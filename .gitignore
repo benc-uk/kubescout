@@ -1,0 +1,4 @@
+.azure
+.env
+/build/bin/
+/build/out/
