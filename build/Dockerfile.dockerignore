@@ -8,4 +8,4 @@
 !build/
 !build/Dockerfile
 **/*_test.go
-internal/integration/
+tests/cluster/

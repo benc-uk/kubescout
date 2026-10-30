@@ -1,6 +1,6 @@
 //go:build integration
 
-package integration
+package cluster
 
 import (
 	"bufio"
@@ -53,9 +53,6 @@ func newFixture(t *testing.T, model bool) *fixture {
 
 func newFixtureStage(t *testing.T, model bool, stage string) *fixture {
 	t.Helper()
-	if os.Getenv("K8S_HEALTH_LIVE_WRITES") != "yes" {
-		t.Skip("requires K8S_HEALTH_LIVE_WRITES=yes: creates and deletes an isolated namespace")
-	}
 	target := os.Getenv("K8S_HEALTH_LIVE_CONTEXT")
 	if target == "" {
 		t.Fatal("K8S_HEALTH_LIVE_CONTEXT must explicitly select a kubeconfig context")

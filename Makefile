@@ -1,15 +1,14 @@
 .DEFAULT_GOAL := help
 
 GO ?= go
-CONTEXT ?=
+CONTEXT ?= kind-kind
 NAMESPACE ?=
 ARGS ?= --deterministic-only
-ALLOW_WRITES ?=
 ALLOW_MODEL ?=
 CONTAINER_ENGINE ?= podman
-IMAGE ?= localhost/k8s-health:stage3
+IMAGE ?= localhost/k8s-health:dev
 KIND ?= kind
-KIND_CLUSTER ?=
+KIND_CLUSTER ?= kind
 KIND_PROVIDER ?= podman
 KUBECTL ?= kubectl
 
@@ -37,27 +36,26 @@ run once: build
 test: ## 🧪 Run tests without a cluster or model connection
 	$(GO) test -race -timeout 120s ./...
 
-integration: ## ☸ Validate live kind with isolated fixtures (requires CONTEXT, ALLOW_WRITES=yes)
+integration: ## ☸ Validate live kind with isolated fixtures (requires CONTEXT)
 integration-model: ## 🤖 Validate two real model requests (also requires ALLOW_MODEL=yes)
 
 integration integration-model: build
 	@test -n "$(CONTEXT)" || { printf '❌ Set CONTEXT explicitly\n' >&2; exit 2; }
-	@test "$(ALLOW_WRITES)" = yes || { printf '❌ Set ALLOW_WRITES=yes to authorise isolated fixture creation and cleanup\n' >&2; exit 2; }
 	@if [ "$@" = integration-model ]; then test "$(ALLOW_MODEL)" = yes || { printf '❌ Set ALLOW_MODEL=yes to authorise two model requests\n' >&2; exit 2; }; fi
-	@K8S_HEALTH_LIVE_CONTEXT="$(CONTEXT)" K8S_HEALTH_LIVE_WRITES="$(ALLOW_WRITES)" \
+	@K8S_HEALTH_LIVE_CONTEXT="$(CONTEXT)" \
 		K8S_HEALTH_LIVE_MODEL="$(ALLOW_MODEL)" $(GO) test -tags=integration -count=1 -v \
-		-timeout 10m -run '$(if $(filter integration-model,$@),^TestLiveModel$$,^TestLive(Kubernetes|Connectivity)$$)' ./internal/integration
+		-timeout 10m -run '$(if $(filter integration-model,$@),^TestLiveModel$$,^TestLive(Kubernetes|Connectivity)$$)' ./tests/cluster
 
-integration-deploy: build ## 🧪 Validate the imported image, RBAC and reports (requires CONTEXT, ALLOW_WRITES=yes)
-	@test -n "$(CONTEXT)" && test "$(ALLOW_WRITES)" = yes || { printf '❌ Set CONTEXT and ALLOW_WRITES=yes\n' >&2; exit 2; }
-	@K8S_HEALTH_LIVE_CONTEXT="$(CONTEXT)" K8S_HEALTH_LIVE_WRITES="$(ALLOW_WRITES)" \
+integration-deploy: build ## 🧪 Validate the imported image, RBAC and reports (requires CONTEXT)
+	@test -n "$(CONTEXT)" || { printf '❌ Set CONTEXT explicitly\n' >&2; exit 2; }
+	@K8S_HEALTH_LIVE_CONTEXT="$(CONTEXT)" \
 		K8S_HEALTH_LIVE_MODEL="$(ALLOW_MODEL)" K8S_HEALTH_LIVE_CONTAINER=yes \
 		K8S_HEALTH_CONTAINER_ENGINE="$(CONTAINER_ENGINE)" K8S_HEALTH_IMAGE="$(IMAGE)" \
 		$(GO) test -tags=integration -count=1 -v \
-		-timeout 10m -run '^TestLiveDeployment$$' ./internal/integration
+		-timeout 10m -run '^TestLiveDeployment$$' ./tests/cluster
 
 check: ## 🔍 Check formatting, modules and static diagnostics
-	@test -z "$$(gofmt -l cmd internal)" || { printf '❌ Run gofmt -w cmd internal\n' >&2; exit 1; }
+	@test -z "$$(gofmt -l cmd internal tests)" || { printf '❌ Run gofmt -w cmd internal tests\n' >&2; exit 1; }
 	$(GO) mod tidy -diff
 	$(GO) mod verify
 	$(GO) vet -tags=integration ./...
@@ -74,6 +72,10 @@ kind-load: ## ☸ Import the built image (requires KIND_CLUSTER)
 		mv build/out/k8s-health.tar.tmp build/out/k8s-health.tar
 	KIND_EXPERIMENTAL_PROVIDER="$(KIND_PROVIDER)" $(KIND) load image-archive build/out/k8s-health.tar --name "$(KIND_CLUSTER)"
 
-deploy: ## 🚀 Apply the local Deployment (requires CONTEXT, ALLOW_WRITES=yes)
-	@test -n "$(CONTEXT)" && test "$(ALLOW_WRITES)" = yes || { printf '❌ Set CONTEXT and ALLOW_WRITES=yes\n' >&2; exit 2; }
+deploy: ## 🚀 Apply the local Deployment (requires CONTEXT)
+	@test -n "$(CONTEXT)" || { printf '❌ Set CONTEXT explicitly\n' >&2; exit 2; }
 	$(KUBECTL) --context "$(CONTEXT)" apply -k deploy
+
+undeploy: ## 🧹 Remove the local Deployment (requires CONTEXT)
+	@test -n "$(CONTEXT)" || { printf '❌ Set CONTEXT explicitly\n' >&2; exit 2; }
+	$(KUBECTL) --context "$(CONTEXT)" delete -k deploy

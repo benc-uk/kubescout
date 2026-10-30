@@ -4,3 +4,8 @@ resources:
   - namespace.yaml
   - rbac.yaml
   - deployment.yaml
+
+# Overrides for the image tag in deployment
+images:
+  - name: localhost/k8s-health
+    newTag: dev

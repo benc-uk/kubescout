@@ -1,4 +1,4 @@
-package integration
+package cluster
 
 import (
 	"encoding/json"

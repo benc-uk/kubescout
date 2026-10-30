@@ -33,18 +33,18 @@ Routine tests use fixtures and local HTTP servers exercising the actual Kubernet
 Agent Framework SDKs. They do not connect to a real cluster or model.
 `make test` includes Go's race detector and requires a C compiler.
 
-### Opt-in live integration tests
+### Opt-in live cluster tests
 
-The tests in [internal/integration](internal/integration) are excluded from
+The live tests in [tests/cluster](tests/cluster) are excluded from
 routine tests by the `integration` build tag. They run the compiled observer
 binary, not a substitute implementation.
 
 ```bash
-# Authorises creation and deletion of isolated test fixtures on this context.
-make integration CONTEXT=kind-kind ALLOW_WRITES=yes
+# Creates and deletes isolated test fixtures on this context.
+make integration CONTEXT=kind-kind
 
 # Separately authorises two real model requests, including an intentional failure.
-make integration-model CONTEXT=kind-kind ALLOW_WRITES=yes ALLOW_MODEL=yes
+make integration-model CONTEXT=kind-kind ALLOW_MODEL=yes
 ```
 
 Requirements: a reachable development cluster, explicit kubeconfig context,
@@ -100,6 +100,28 @@ long-duration soak test or a production-scale memory-leak assessment.
 Latest passing results and their limits are recorded in the
 [Stage 2 acceptance record](IMPLEMENTATION-PLAN.md#stage-2-acceptance-record-25-october-2026).
 
+### Manually inject failures
+
+The [Bash script](scripts/inject-failures.sh) offers a menu for the four example
+commands: image pull failure, crash loop, unschedulable pod and failed Job.
+Supply a development context and an existing namespace watched by the observer:
+
+```bash
+bash scripts/inject-failures.sh kind-kind default
+```
+
+Enter one or more numbers separated by spaces, such as `1 3`, or `5` for all
+four. Choose `6` on its own to remove all injected fixtures across runs in the
+selected context/namespace, then confirm with `y`. Cleanup checks fixture names
+and ownership labels, supports older unlabelled `health-demo-*` fixtures after
+confirmation, and uses UID-preconditioned deletion. It waits for the selected
+fixtures and Job-owned pods to disappear, leaving the namespace intact.
+Enter `0` to cancel. It uses unique resource names and prints each selected
+fixture's cleanup command before creating it. It does not create namespaces or
+change existing workloads.
+The unschedulable finding needs the default 120-second startup grace. Fixtures
+remain until you clean them up; the crashing pod keeps restarting.
+
 ### Container build and local Deployment
 
 Build assets and Kubernetes assets are deliberately separate:
@@ -123,13 +145,13 @@ make image
 make kind-load KIND_CLUSTER=kind
 
 # Validate the image and RBAC in a disposable namespace.
-make integration-deploy CONTEXT=kind-kind ALLOW_WRITES=yes
+make integration-deploy CONTEXT=kind-kind
 
 # Optionally include one real in-cluster model request.
-make integration-deploy CONTEXT=kind-kind ALLOW_WRITES=yes ALLOW_MODEL=yes
+make integration-deploy CONTEXT=kind-kind ALLOW_MODEL=yes
 
 # Leave the deterministic-only observer running.
-make deploy CONTEXT=kind-kind ALLOW_WRITES=yes
+make deploy CONTEXT=kind-kind
 kubectl --context kind-kind -n k8s-health rollout status deployment/k8s-health
 kubectl --context kind-kind -n k8s-health logs deployment/k8s-health --tail=20
 ```

@@ -48,8 +48,8 @@ Routine tests must remain offline. Use local HTTP fixtures for Kubernetes and mo
 protocol tests. `make test` includes the race detector. Preserve the Makefile's
 awk-generated `##` help and emoji descriptions.
 
-Live tests in [internal/integration](internal/integration) require the
-`integration` build tag and explicit context/write authorisation. The
+Live tests in [tests/cluster](tests/cluster) require the
+`integration` build tag and an explicit kubeconfig context. The
 `integration-model` Make target additionally requires model authorisation and
 makes two real requests. Test writes belong only in this harness, never in the
 observer runtime. Use unique namespaces, verify ownership/UID before cleanup,

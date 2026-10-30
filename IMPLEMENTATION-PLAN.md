@@ -90,11 +90,11 @@ live-test harness, developer commands, test dependencies and documentation.
 Commands:
 
 ```bash
-make integration CONTEXT=kind-kind ALLOW_WRITES=yes
-make integration-model CONTEXT=kind-kind ALLOW_WRITES=yes ALLOW_MODEL=yes
+make integration CONTEXT=kind-kind
+make integration-model CONTEXT=kind-kind ALLOW_MODEL=yes
 make test
 make check
-go vet -tags=integration ./internal/integration
+go vet -tags=integration ./tests/cluster
 ```
 
 The full deterministic suite passed. Its workload test was then rerun with the
