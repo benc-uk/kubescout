@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>K8S Health Agent - Dashboard</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main>
+      <section class="page-heading" aria-labelledby="page-title">
+        <h1 id="page-title">K8S Health Agent - Dashboard</h1>
+        <div class="page-actions">
+          <button id="theme-toggle" class="secondary" type="button" aria-pressed="false">Dark mode</button>
+          <button id="refresh" class="primary" type="button">Refresh now</button>
+        </div>
+      </section>
+      <p id="theme-notice" class="muted" role="status" hidden></p>
+      <div class="connection">
+        <span>Issue namespace <strong id="namespace">Loading...</strong></span>
+        <span id="freshness" role="status">Connecting to Kubernetes...</span>
+        <span>Auto-refresh: 15s</span>
+      </div>
+      <div id="error" class="notice error" role="alert" hidden></div>
+      <section aria-labelledby="counts-title">
+        <h2 id="counts-title" class="section-label">Open issues by severity <span id="counts-stale" hidden>(stale)</span></h2>
+        <div class="counts">
+          <button type="button" class="count-card critical" data-severity="critical" aria-pressed="false"><span class="count-label"><span class="dot"></span>Critical</span><strong id="count-critical">-</strong><span>Immediate attention</span></button>
+          <button type="button" class="count-card high" data-severity="high" aria-pressed="false"><span class="count-label"><span class="dot"></span>High</span><strong id="count-high">-</strong><span>Significant impact</span></button>
+          <button type="button" class="count-card medium" data-severity="medium" aria-pressed="false"><span class="count-label"><span class="dot"></span>Medium</span><strong id="count-medium">-</strong><span>Needs investigation</span></button>
+          <button type="button" class="count-card low" data-severity="low" aria-pressed="false"><span class="count-label"><span class="dot"></span>Low</span><strong id="count-low">-</strong><span>Limited impact</span></button>
+        </div>
+      </section>
+      <section class="issues-panel" aria-label="Browse issues">
+        <form id="filters" class="filters" role="search">
+          <label class="search">Search issues<input id="search" type="search" placeholder="Title, resource, observer or issue name" autocomplete="off"></label>
+          <label>Phase<select id="phase"><option value="open">Open</option><option value="resolved">Resolved</option><option value="">All phases</option></select></label>
+          <label>Severity<select id="severity"><option value="">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+          <label>Problem family<select id="family"><option value="">All families</option><option value="scheduling">Scheduling</option><option value="container-failure">Container failure</option><option value="rollout">Rollout</option><option value="job-failure">Job failure</option><option value="node-health">Node health</option><option value="service-availability">Service availability</option></select></label>
+          <label>Workload namespace<select id="workload-namespace"><option value="">All namespaces</option></select></label>
+          <button id="reset-filters" type="button" class="secondary">Reset filters</button>
+        </form>
+        <div class="table-toolbar">
+          <p id="results" role="status">Loading issues...</p>
+          <div class="sort-controls">
+            <label>Sort by<select id="sort"><option value="severity">Severity</option><option value="updated">Last updated</option><option value="raised">Raised</option><option value="title">Title</option></select></label>
+            <label>Order<select id="direction"><option value="desc">Descending</option><option value="asc">Ascending</option></select></label>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <caption class="sr-only">Cluster issues. Click an issue row or activate its title button to view details.</caption>
+            <thead><tr><th scope="col">Severity</th><th scope="col">Issue / affected resource</th><th scope="col">Phase</th><th scope="col">Impact</th><th scope="col">Updated</th></tr></thead>
+            <tbody id="issue-rows"></tbody>
+          </table>
+        </div>
+        <div id="empty" class="empty" hidden><h3 id="empty-title"></h3><p id="empty-message"></p></div>
+        <nav class="pagination" aria-label="Issue pages">
+          <span id="page-info">Page 1 of 1</span>
+          <div><button id="previous" type="button" class="secondary" disabled>Previous</button><button id="next" type="button" class="secondary" disabled>Next</button></div>
+        </nav>
+      </section>
+    </main>
+    <dialog id="detail" class="drawer" aria-labelledby="detail-title">
+      <header class="drawer-header"><p class="eyebrow">ISSUE DETAILS</p><button id="close-detail" type="button" class="secondary" aria-label="Close issue details">Close</button></header>
+      <h2 id="detail-title">Issue details</h2>
+      <p id="detail-freshness" class="muted" role="status"></p>
+      <div id="detail-error" class="notice error" role="alert" hidden></div>
+      <div id="detail-content"></div>
+    </dialog>
+  </body>
+</html>

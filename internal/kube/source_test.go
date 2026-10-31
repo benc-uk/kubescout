@@ -13,6 +13,7 @@ import (
 
 	"k8s-ops-agent/internal/config"
 	"k8s-ops-agent/internal/health"
+	"k8s-ops-agent/internal/incident"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -28,7 +29,7 @@ func pod(name, reason string) map[string]any {
 		"status": map[string]any{"phase": "Pending", "containerStatuses": []any{map[string]any{"name": "app", "image": "registry/app:stale", "state": map[string]any{"waiting": map[string]any{"reason": reason, "message": "must-not-retain"}}}}}}
 }
 func testConfig() config.Config {
-	return config.Config{Namespaces: []string{"apps"}, MaxObjects: 20, RequestTimeout: time.Second, RunTimeout: 2 * time.Second, CheckInterval: 30 * time.Millisecond, WatchTimeout: time.Minute, Policy: health.DefaultPolicy()}
+	return config.Config{NamespaceWatch: []string{"apps"}, MaxObjects: 20, RequestTimeout: time.Second, RunTimeout: 2 * time.Second, CheckInterval: 30 * time.Millisecond, WatchTimeout: time.Minute, Policy: health.DefaultPolicy()}
 }
 func clientFor(t *testing.T, server *httptest.Server) dynamic.Interface {
 	t.Helper()
@@ -53,6 +54,193 @@ func until(t *testing.T, f func() bool) {
 			t.Fatal("condition timed out")
 		case <-tick.C:
 		}
+	}
+}
+
+func namespacedPod(namespace, name string) map[string]any {
+	p := pod(name, "ErrImagePull")
+	p["metadata"] = map[string]any{"name": name, "namespace": namespace, "uid": namespace + "-" + name, "resourceVersion": "2"}
+	return p
+}
+
+func TestMultiNamespaceCollection(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		watch, ignore []string
+		want          int
+		max           int
+		invalid       bool
+	}{
+		{name: "all", want: 3, max: 4},
+		{name: "watch", watch: []string{"apps", "payments"}, want: 2, max: 3},
+		{name: "ignore before admission", ignore: []string{"system"}, want: 2, max: 3},
+		{name: "shared budget across namespaces", watch: []string{"apps", "payments"}, max: 2, invalid: true},
+		{name: "all shared budget", max: 3, invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.Method != http.MethodGet || r.URL.Query().Get("limit") != "100" || strings.HasSuffix(r.URL.Path, "/namespaces") {
+					t.Errorf("unexpected collection request: %s %s", r.Method, r.URL)
+				}
+				if len(tt.watch) == 0 && strings.Contains(r.URL.Path, "/namespaces/") {
+					t.Error("all/ignore mode must use all-namespace endpoints")
+				}
+				if len(tt.watch) != 0 && !strings.HasSuffix(r.URL.Path, "/nodes") &&
+					!strings.Contains(r.URL.Path, "/namespaces/apps/") && !strings.Contains(r.URL.Path, "/namespaces/payments/") {
+					t.Error("explicit watch escaped scope")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				items := []any{}
+				meta := map[string]any{"resourceVersion": "1"}
+				if strings.HasSuffix(r.URL.Path, "/nodes") {
+					items = append(items, node())
+				}
+				if strings.HasSuffix(r.URL.Path, "/events") && r.URL.Query().Get("fieldSelector") != "type=Warning" {
+					t.Error("warning filter missing")
+				}
+				if strings.HasSuffix(r.URL.Path, "/pods") {
+					if len(tt.watch) == 0 {
+						if r.URL.Query().Get("continue") == "" {
+							items = []any{namespacedPod("system", "same")}
+							meta["continue"] = "next"
+						} else {
+							items = []any{namespacedPod("apps", "same"), namespacedPod("payments", "same")}
+						}
+					} else if strings.Contains(r.URL.Path, "/namespaces/apps/") {
+						items = []any{namespacedPod("apps", "same")}
+					} else {
+						items = []any{namespacedPod("payments", "same")}
+					}
+				}
+				json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "List", "metadata": meta, "items": items})
+			}))
+			defer server.Close()
+			c := testConfig()
+			c.NamespaceWatch, c.NamespaceIgnore, c.MaxObjects = tt.watch, tt.ignore, tt.max
+			snapshot, err := NewSource(clientFor(t, server), c).Collect(t.Context(), time.Now())
+			if (err != nil) != tt.invalid {
+				t.Fatalf("unexpected collection error: %v", err)
+			}
+			if tt.invalid {
+				return
+			}
+			if len(snapshot.Objects) != tt.want+1 {
+				t.Fatalf("retained %d objects", len(snapshot.Objects))
+			}
+			inputs, err := incident.Inputs(snapshot, c.Policy, nil, c.MaxObjects)
+			if err != nil || len(inputs) != tt.want {
+				t.Fatalf("same-named workloads were not distinct candidates: count=%d err=%v", len(inputs), err)
+			}
+			for _, in := range inputs {
+				anchor := in.Identities[in.Anchor]
+				for _, r := range in.Identities {
+					if r.Kind != "Node" && r.Namespace != anchor.Namespace {
+						t.Fatal("unrelated namespaces coalesced into one candidate")
+					}
+				}
+			}
+			wantRequests := 11
+			if len(tt.watch) != 0 {
+				wantRequests = 19
+			}
+			if requests != wantRequests {
+				t.Fatalf("requests=%d want=%d", requests, wantRequests)
+			}
+		})
+	}
+}
+
+func TestAllNamespaceWatchFiltersAndTracksNewNamespaces(t *testing.T) {
+	for _, ignore := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ignore=%t", ignore), func(t *testing.T) {
+			var mu sync.Mutex
+			streams := map[string]chan map[string]any{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "/namespaces/") || r.Method != http.MethodGet {
+					t.Error("all-namespace watch made an unexpected request")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Query().Get("watch") == "true" {
+					ch := make(chan map[string]any, 10)
+					mu.Lock()
+					streams[r.URL.Path] = ch
+					mu.Unlock()
+					w.WriteHeader(http.StatusOK)
+					w.(http.Flusher).Flush()
+					for {
+						select {
+						case <-r.Context().Done():
+							return
+						case event := <-ch:
+							if err := json.NewEncoder(w).Encode(event); err != nil {
+								return
+							}
+							w.(http.Flusher).Flush()
+						}
+					}
+				}
+				items := []any{}
+				if strings.HasSuffix(r.URL.Path, "/nodes") {
+					items = append(items, node())
+				}
+				if strings.HasSuffix(r.URL.Path, "/pods") {
+					items = append(items, namespacedPod("apps", "same"))
+				}
+				json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "List", "metadata": map[string]any{"resourceVersion": "1"}, "items": items})
+			}))
+			defer server.Close()
+			c := testConfig()
+			c.NamespaceWatch, c.MaxObjects = nil, 3
+			if ignore {
+				c.NamespaceIgnore = []string{"system"}
+			}
+			s := NewSource(clientFor(t, server), c)
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() { defer close(done); s.Run(ctx) }()
+			defer func() { cancel(); <-done }()
+			until(t, func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return s.Err() == nil && len(streams) == 10
+			})
+			mu.Lock()
+			stream := streams["/api/v1/pods"]
+			mu.Unlock()
+			for _, phase := range []string{"ADDED", "MODIFIED", "DELETED"} {
+				stream <- map[string]any{"type": phase, "object": namespacedPod("system", "ignored")}
+			}
+			p := namespacedPod("new-namespace", "same")
+			stream <- map[string]any{"type": "ADDED", "object": p}
+			until(t, func() bool {
+				snapshot, err := s.Snapshot(time.Now())
+				if err != nil {
+					return false
+				}
+				for _, obj := range snapshot.Objects {
+					if obj.Namespace == "new-namespace" {
+						return len(snapshot.Objects) == 3
+					}
+				}
+				return false
+			})
+			stream <- map[string]any{"type": "DELETED", "object": p}
+			until(t, func() bool {
+				snapshot, err := s.Snapshot(time.Now())
+				return err == nil && len(snapshot.Objects) == 2
+			})
+			stream <- map[string]any{"type": "ERROR", "object": map[string]any{"apiVersion": "v1", "kind": "Status", "code": 410, "reason": "Expired"}}
+			until(t, func() bool {
+				_, err := s.Snapshot(time.Now())
+				return err != nil
+			})
+			until(t, func() bool {
+				snapshot, err := s.Snapshot(time.Now())
+				return err == nil && len(snapshot.Objects) == 2
+			})
+		})
 	}
 }
 
@@ -121,7 +309,7 @@ func TestInformerUpdatesDeletionAndRecovery(t *testing.T) {
 		_, err := s.Snapshot(time.Now())
 		mu.Lock()
 		defer mu.Unlock()
-		return err == nil && len(streams) == 5
+		return err == nil && len(streams) == 10
 	})
 	path := "/api/v1/namespaces/apps/pods"
 	mu.Lock()
@@ -150,7 +338,7 @@ func TestInformerUpdatesDeletionAndRecovery(t *testing.T) {
 		snapshot, err := s.Snapshot(time.Now())
 		mu.Lock()
 		defer mu.Unlock()
-		return err == nil && len(snapshot.Objects) == 2 && listCalls >= before+5
+		return err == nil && len(snapshot.Objects) == 2 && listCalls >= before+6
 	})
 	// A hanging stream is eventually closed by the configured watch deadline.
 	cancel()
@@ -235,6 +423,32 @@ func TestProjectionRejectsUnexpectedScopeAndIdentity(t *testing.T) {
 	u.SetUID("")
 	if _, err := project(u, "Pod", "apps"); err == nil {
 		t.Fatal("missing UID accepted")
+	}
+}
+
+func TestSourceProjectionNamespaceBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name, namespace, requested string
+		ignore                     []string
+		invalid, skipped           bool
+	}{
+		{name: "all permits actual namespace", namespace: "payments"},
+		{name: "missing namespace", invalid: true},
+		{name: "invalid namespace", namespace: "bad/name", invalid: true},
+		{name: "explicit request mismatch", namespace: "payments", requested: "apps", invalid: true},
+		{name: "ignore", namespace: "system", ignore: []string{"system"}, skipped: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.NamespaceWatch, c.NamespaceIgnore = nil, tt.ignore
+			obj, err := NewSource(nil, c).project(&unstructured.Unstructured{Object: namespacedPod(tt.namespace, "pod")}, resource{kind: "Pod", namespace: tt.requested})
+			if (err != nil) != tt.invalid {
+				t.Fatalf("unexpected projection error: %v", err)
+			}
+			if !tt.invalid && (obj == nil) != tt.skipped {
+				t.Fatal("unexpected namespace filtering")
+			}
+		})
 	}
 }
 

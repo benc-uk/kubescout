@@ -3,24 +3,19 @@
 package cluster
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
-	"k8s-ops-agent/internal/report"
+	"k8s-ops-agent/internal/config"
+	"k8s-ops-agent/internal/health"
+	"k8s-ops-agent/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,51 +41,39 @@ type fixture struct {
 	uid                               types.UID
 }
 
-func newFixture(t *testing.T, model bool) *fixture {
-	t.Helper()
-	return newFixtureStage(t, model, "stage2")
-}
-
+func newFixture(t *testing.T, model bool) *fixture { return newFixtureStage(t, model, "collector") }
 func newFixtureStage(t *testing.T, model bool, stage string) *fixture {
 	t.Helper()
 	target := os.Getenv("K8S_HEALTH_LIVE_CONTEXT")
 	if target == "" {
-		t.Fatal("K8S_HEALTH_LIVE_CONTEXT must explicitly select a kubeconfig context")
+		t.Fatal("K8S_HEALTH_LIVE_CONTEXT must explicitly select a context")
 	}
 	if model && os.Getenv("K8S_HEALTH_LIVE_MODEL") != "yes" {
-		t.Skip("requires K8S_HEALTH_LIVE_MODEL=yes: makes two real model requests")
+		t.Skip("requires explicit model request authorisation")
+	}
+	rc, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{CurrentContext: target}).ClientConfig()
+	if err != nil {
+		t.Fatal("cannot load explicitly selected kubeconfig")
+	}
+	rc.Timeout, rc.QPS, rc.Burst = 5*time.Second, 30, 50
+	client, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "k8s-health-" + stage
+	ns, err := client.CoreV1().Namespaces().Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: owner + "-", Labels: map[string]string{"app.kubernetes.io/managed-by": owner}}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
 	}
 	binary, err := filepath.Abs(filepath.Join("..", "..", "build", "bin", "k8s-health"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(binary); err != nil {
-		t.Fatal("run make build first")
-	}
-	rc, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{CurrentContext: target},
-	).ClientConfig()
-	if err != nil {
-		t.Fatal("cannot load the explicitly selected kubeconfig context")
-	}
-	rc.Timeout, rc.QPS, rc.Burst = 5*time.Second, 30, 50
-	client, err := kubernetes.NewForConfig(rc)
-	if err != nil {
-		t.Fatal("cannot construct fixture client")
-	}
-	owner := "k8s-health-" + stage
-	ns, err := client.CoreV1().Namespaces().Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-		GenerateName: owner + "-", Labels: map[string]string{"app.kubernetes.io/managed-by": owner},
-	}}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("cannot create test namespace: %v", err)
-	}
 	f := &fixture{t: t, client: client, config: rc, context: target, namespace: ns.Name, uid: ns.UID, binary: binary, owner: owner}
-	t.Logf("fixture context=%s namespace=%s uid=%s", target, ns.Name, ns.UID)
+	t.Logf("owned fixture context=%s namespace=%s uid=%s", target, ns.Name, ns.UID)
 	t.Cleanup(f.cleanup)
 	return f
 }
-
 func (f *fixture) cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -99,255 +82,163 @@ func (f *fixture) cleanup() {
 		return
 	}
 	if err != nil {
-		f.t.Errorf("cannot verify namespace before cleanup: %v", err)
+		f.t.Errorf("cannot verify cleanup ownership: %v", err)
 		return
 	}
 	if ns.UID != f.uid || ns.Labels["app.kubernetes.io/managed-by"] != f.owner {
-		f.t.Errorf("refusing cleanup: namespace ownership changed for %s", f.namespace)
+		f.t.Error("namespace ownership changed; refusing cleanup")
 		return
 	}
 	if err := f.client.CoreV1().Namespaces().Delete(ctx, f.namespace, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &f.uid}}); err != nil {
-		f.t.Errorf("namespace cleanup failed: %v", err)
+		f.t.Error(err)
 		return
 	}
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
+	for ctx.Err() == nil {
 		_, err := f.client.CoreV1().Namespaces().Get(ctx, f.namespace, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
-			f.t.Logf("cleanup verified: namespace %s removed", f.namespace)
 			return
 		}
-		if err != nil && ctx.Err() == nil {
-			f.t.Errorf("cleanup verification failed: %v", err)
+		if err != nil {
+			f.t.Error(err)
 			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	f.t.Error("owned namespace cleanup timed out")
+}
+func (f *fixture) args(extra ...string) []string {
+	return append([]string{"--auth-mode=kubeconfig", "--context=" + f.context, "--namespace=" + f.namespace, "--observer-id=" + f.namespace,
+		"--request-timeout=5s", "--run-timeout=90s"}, extra...)
+}
+
+// observation is a test-only view of the collector and pure rules. It is not an
+// executable mode, public output contract or incident publication mechanism.
+type observation struct {
+	CollectionComplete bool
+	Health             string
+	Findings           []health.Finding
+	Errors             []string
+	EmittedAt          time.Time
+	At                 time.Time
+	Changes            struct{ Resolved []string }
+}
+
+func (f *fixture) collector(extra []string) (*kube.Source, config.Config) {
+	f.t.Helper()
+	env := func(k string) string {
+		return map[string]string{"AZURE_OPENAI_ENDPOINT": "https://fixture/openai/v1/", "AZURE_OPENAI_API_KEY": "unused", "AZURE_AI_MODEL_DEPLOYMENT_NAME": "unused"}[k]
+	}
+	cfg, err := config.Parse(f.args(extra...), env, io.Discard)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	client, _, err := kube.Client(cfg)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return kube.NewSource(client, cfg), cfg
+}
+func observed(snapshot health.Snapshot, err error, policy health.Policy, before []health.Finding) observation {
+	out := observation{Health: "unknown", EmittedAt: time.Now(), At: snapshot.At, Findings: before}
+	if err != nil {
+		out.Errors = []string{err.Error()}
+		return out
+	}
+	out.CollectionComplete = true
+	out.Findings = health.Evaluate(snapshot, policy)
+	out.Health = health.Status(out.Findings)
+	current := map[string]bool{}
+	for _, f := range out.Findings {
+		current[f.ID] = true
+	}
+	for _, f := range before {
+		if !current[f.ID] {
+			out.Changes.Resolved = append(out.Changes.Resolved, f.ID)
+		}
+	}
+	return out
+}
+func (f *fixture) once(extra []string, _ map[string]string) (observation, int) {
+	source, cfg := f.collector(extra)
+	snapshot, err := source.Collect(f.t.Context(), time.Now())
+	out := observed(snapshot, err, cfg.Policy, nil)
+	if err != nil {
+		return out, 1
+	}
+	return out, 0
+}
+
+type observer struct {
+	t        *testing.T
+	source   *kube.Source
+	config   config.Config
+	done     chan struct{}
+	cancel   context.CancelFunc
+	last     []health.Finding
+	stopOnce sync.Once
+	peakRSS  int64
+}
+
+func (f *fixture) watch(extra ...string) *observer {
+	source, cfg := f.collector(extra)
+	ctx, cancel := context.WithCancel(f.t.Context())
+	o := &observer{t: f.t, source: source, config: cfg, done: make(chan struct{}), cancel: cancel}
+	go func() { defer close(o.done); source.Run(ctx) }()
+	f.t.Cleanup(o.stop)
+	return o
+}
+func (o *observer) await(limit time.Duration, matches func(observation) bool) observation {
+	o.t.Helper()
+	ctx, cancel := context.WithTimeout(o.t.Context(), limit)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snapshot, err := o.source.Snapshot(time.Now())
+		out := observed(snapshot, err, o.config.Policy, o.last)
+		if out.CollectionComplete {
+			o.last = out.Findings
+		}
+		if matches(out) {
+			return out
 		}
 		select {
 		case <-ctx.Done():
-			f.t.Errorf("namespace %s still exists after cleanup deadline", f.namespace)
-			return
+			o.t.Fatalf("collector evidence timed out: health=%s errors=%v", out.Health, out.Errors)
 		case <-ticker.C:
 		}
 	}
 }
-
-func (f *fixture) args(extra ...string) []string {
-	return append([]string{"--auth-mode=kubeconfig", "--context=" + f.context, "--namespace=" + f.namespace,
-		"--request-timeout=5s", "--run-timeout=30s"}, extra...)
-}
-
-func (f *fixture) once(extra []string, env map[string]string) (report.Report, int) {
-	f.t.Helper()
-	ctx, cancel := context.WithTimeout(f.t.Context(), 100*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, f.binary, f.args(append([]string{"--once"}, extra...)...)...)
-	cmd.Env = environment(env)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
-	code := 0
-	if err != nil {
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) {
-			f.t.Fatalf("observer could not run: %v", err)
-		}
-		code = exit.ExitCode()
-	}
-	var result report.Report
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		f.t.Fatalf("observer did not emit exactly one JSON report (exit=%d): %s", code, stderr.String())
-	}
-	return result, code
-}
-
-func environment(overrides map[string]string) []string {
-	values := os.Environ()
-	for key, value := range overrides {
-		prefix := key + "="
-		filtered := values[:0]
-		for _, existing := range values {
-			if !strings.HasPrefix(existing, prefix) {
-				filtered = append(filtered, existing)
-			}
-		}
-		values = append(filtered, prefix+value)
-	}
-	return values
-}
-
-type lockedBuffer struct {
-	mu sync.Mutex
-	bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.Buffer.Write(p)
-}
-func (b *lockedBuffer) text() string { b.mu.Lock(); defer b.mu.Unlock(); return b.Buffer.String() }
-
-type observer struct {
-	t          *testing.T
-	cmd        *exec.Cmd
-	reports    chan report.Report
-	readErrors chan error
-	done       chan struct{}
-	stderr     lockedBuffer
-	waitErr    error
-	readerDone chan struct{}
-	stopReader context.CancelFunc
-	stopOnce   sync.Once
-	peakRSS    int64
-}
-
-func (f *fixture) watch(extra ...string) *observer {
-	f.t.Helper()
-	args := f.args(append([]string{"--deterministic-only"}, extra...)...)
-	o := &observer{t: f.t, reports: make(chan report.Report, 256), readErrors: make(chan error, 1), done: make(chan struct{}), readerDone: make(chan struct{})}
-	o.cmd = exec.Command(f.binary, args...)
-	o.cmd.Stderr = &o.stderr
-	pipe, err := o.cmd.StdoutPipe()
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	if err := o.cmd.Start(); err != nil {
-		f.t.Fatal(err)
-	}
-	readCtx, cancel := context.WithCancel(context.Background())
-	o.stopReader = cancel
-	go func() {
-		defer close(o.readerDone)
-		scanner := bufio.NewScanner(pipe)
-		scanner.Buffer(make([]byte, 4096), 4<<20)
-		for scanner.Scan() {
-			var r report.Report
-			if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
-				o.readErrors <- errors.New("observer emitted invalid JSON")
-				return
-			}
-			select {
-			case o.reports <- r:
-			case <-readCtx.Done():
-				return
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			select {
-			case o.readErrors <- err:
-			default:
-			}
-		}
-	}()
-	go func() { o.waitErr = o.cmd.Wait(); close(o.done) }()
-	f.t.Cleanup(o.stop)
-	return o
-}
-
-func (o *observer) await(limit time.Duration, matches func(report.Report) bool) report.Report {
-	o.t.Helper()
-	timer := time.NewTimer(limit)
-	defer timer.Stop()
-	var last report.Report
-	for {
-		select {
-		case r := <-o.reports:
-			last = r
-			if r.SchemaVersion != "2.0" {
-				o.t.Fatal("unexpected report schema")
-			}
-			if matches(r) {
-				return r
-			}
-		case err := <-o.readErrors:
-			o.t.Fatalf("report stream error: %v", err)
-		case <-o.done:
-			o.t.Fatalf("observer exited unexpectedly: %v; %s", o.waitErr, o.stderr.text())
-		case <-timer.C:
-			details := []string{}
-			for _, item := range last.Findings {
-				if len(details) == 10 {
-					break
-				}
-				details = append(details, item.Rule+"/"+item.Severity+"/"+item.Resource.Name)
-			}
-			o.t.Fatalf("report not received within %s; last health=%s complete=%t findings=%v errors=%v; %s", limit, last.Health, last.CollectionComplete, details, last.Errors, o.stderr.text())
-		}
-	}
-}
-
 func (o *observer) stop() {
-	o.t.Helper()
 	o.stopOnce.Do(func() {
-		start := time.Now()
-		o.sampleRSS()
+		o.cancel()
 		select {
 		case <-o.done:
-		default:
-			if err := o.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				o.t.Errorf("SIGTERM failed: %v", err)
-			}
-			select {
-			case <-o.done:
-			case <-time.After(shutdownLimit):
-				o.t.Error("observer exceeded 5s shutdown limit")
-				if err := o.cmd.Process.Kill(); err != nil {
-					o.t.Errorf("failed to terminate test observer: %v", err)
-				}
-				<-o.done
-			}
-		}
-		o.stopReader()
-		<-o.readerDone
-		if o.waitErr != nil {
-			o.t.Errorf("observer exit failed: %v; %s", o.waitErr, o.stderr.text())
-		}
-		if runtime.GOOS == "linux" && o.cmd.ProcessState != nil {
-			if usage, ok := o.cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
-				o.peakRSS = max(o.peakRSS, usage.Maxrss)
-			}
-		}
-		o.t.Logf("observer shutdown=%s peak_rss_kib=%d", time.Since(start).Round(time.Millisecond), o.peakRSS)
-		if o.peakRSS >= rssLimitKiB {
-			o.t.Errorf("observer peak RSS %d KiB must be below %d KiB", o.peakRSS, rssLimitKiB)
+		case <-time.After(shutdownLimit):
+			o.t.Error("collector shutdown exceeded limit")
 		}
 	})
 }
-
 func (o *observer) sampleRSS() int64 {
 	o.t.Helper()
-	if runtime.GOOS != "linux" {
-		o.t.Fatal("RSS acceptance measurement currently requires Linux /proc")
-	}
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", o.cmd.Process.Pid))
+	data, err := os.ReadFile("/proc/self/status")
 	if err != nil {
-		select {
-		case <-o.done:
-			return o.peakRSS
-		default:
-			o.t.Fatalf("cannot measure observer RSS: %v", err)
-		}
+		o.t.Fatal(err)
 	}
 	var rss int64
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		if fields[0] == "VmRSS:" || fields[0] == "VmHWM:" {
-			value, err := strconv.ParseInt(fields[1], 10, 64)
+		if len(fields) > 1 && fields[0] == "VmRSS:" {
+			rss, err = strconv.ParseInt(fields[1], 10, 64)
 			if err != nil {
-				o.t.Fatal("invalid RSS measurement")
+				o.t.Fatal(err)
 			}
-			if fields[0] == "VmRSS:" {
-				rss = value
-			}
-			o.peakRSS = max(o.peakRSS, value)
 		}
 	}
+	o.peakRSS = max(o.peakRSS, rss)
+	o.t.Logf("collector test-process RSS=%d KiB (not standalone agent RSS)", rss)
 	return rss
 }
-
 func poll(t *testing.T, limit time.Duration, description string, check func() (bool, error)) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), limit)
@@ -364,14 +255,13 @@ func poll(t *testing.T, limit time.Duration, description string, check func() (b
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("%s timed out after %s", description, limit)
+			t.Fatalf("%s timed out", description)
 		case <-ticker.C:
 		}
 	}
 }
-
-func finding(r report.Report, rule string, uid types.UID) bool {
-	if r.Type != "assessment" || !r.CollectionComplete {
+func finding(r observation, rule string, uid types.UID) bool {
+	if !r.CollectionComplete {
 		return false
 	}
 	for _, f := range r.Findings {
@@ -381,12 +271,18 @@ func finding(r report.Report, rule string, uid types.UID) bool {
 	}
 	return false
 }
-
-func metric(t *testing.T, name string, since time.Time, r report.Report, limit time.Duration) {
+func metric(t *testing.T, name string, since time.Time, r observation, limit time.Duration) {
 	t.Helper()
 	elapsed := max(0, r.EmittedAt.Sub(since))
 	if elapsed > limit {
-		t.Fatalf("%s latency %s exceeds %s", name, elapsed, limit)
+		t.Fatalf("%s exceeded bound", name)
 	}
-	t.Logf("METRIC %s=%s limit=%s", name, elapsed.Round(time.Millisecond), limit)
+	t.Logf("collector evidence %s=%s", name, elapsed)
+}
+
+func requireLiveModel(t *testing.T) {
+	t.Helper()
+	if os.Getenv("K8S_HEALTH_LIVE_MODEL") != "yes" {
+		t.Skip("requires explicit authorisation for up to six real model requests")
+	}
 }

@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/pem"
 	"io"
@@ -17,7 +18,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"k8s-ops-agent/internal/report"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -60,13 +60,18 @@ func (f *fixture) proxy(mode int32) *faultProxy {
 	forward.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
 		http.Error(w, "test API proxy unavailable", http.StatusBadGateway)
 	}
-	token := report.ID()
+	token := rand.Text()
 	allowed := map[string]bool{
 		"/api/v1/nodes": true,
-		"/api/v1/namespaces/" + f.namespace + "/pods":              true,
-		"/api/v1/namespaces/" + f.namespace + "/events":            true,
-		"/apis/apps/v1/namespaces/" + f.namespace + "/deployments": true,
-		"/apis/batch/v1/namespaces/" + f.namespace + "/jobs":       true,
+		"/api/v1/namespaces/" + f.namespace + "/pods":                             true,
+		"/api/v1/namespaces/" + f.namespace + "/services":                         true,
+		"/api/v1/namespaces/" + f.namespace + "/events":                           true,
+		"/apis/apps/v1/namespaces/" + f.namespace + "/deployments":                true,
+		"/apis/apps/v1/namespaces/" + f.namespace + "/replicasets":                true,
+		"/apis/apps/v1/namespaces/" + f.namespace + "/statefulsets":               true,
+		"/apis/apps/v1/namespaces/" + f.namespace + "/daemonsets":                 true,
+		"/apis/discovery.k8s.io/v1/namespaces/" + f.namespace + "/endpointslices": true,
+		"/apis/batch/v1/namespaces/" + f.namespace + "/jobs":                      true,
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 || r.Method != http.MethodGet || !allowed[r.URL.Path] {

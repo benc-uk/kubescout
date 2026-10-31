@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/cache"
@@ -23,12 +24,21 @@ type resource struct {
 	kind, namespace string
 }
 
-func resources(namespaces []string) []resource {
+func resources(c config.Config) []resource {
 	out := []resource{{schema.GroupVersionResource{Version: "v1", Resource: "nodes"}, "Node", ""}}
+	namespaces := c.NamespaceWatch
+	if len(namespaces) == 0 {
+		namespaces = []string{metav1.NamespaceAll}
+	}
 	for _, ns := range namespaces {
 		out = append(out,
 			resource{schema.GroupVersionResource{Version: "v1", Resource: "pods"}, "Pod", ns},
 			resource{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, "Deployment", ns},
+			resource{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}, "ReplicaSet", ns},
+			resource{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}, "StatefulSet", ns},
+			resource{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}, "DaemonSet", ns},
+			resource{schema.GroupVersionResource{Version: "v1", Resource: "services"}, "Service", ns},
+			resource{schema.GroupVersionResource{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}, "EndpointSlice", ns},
 			resource{schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}, "Job", ns},
 			resource{schema.GroupVersionResource{Version: "v1", Resource: "events"}, "Event", ns})
 	}
@@ -174,7 +184,7 @@ func (s *Source) runEpoch(parent context.Context) bool {
 			cancel()
 		})
 	}
-	for _, r := range resources(s.config.Namespaces) {
+	for _, r := range resources(s.config) {
 		lw := &cache.ListWatch{
 			DisableChunking: true,
 			ListWithContextFunc: func(callCtx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
@@ -261,9 +271,12 @@ func (s *Source) list(ctx context.Context, r resource, b *budget) (*cachedList, 
 		}
 		list.ResourceVersion = page.GetResourceVersion()
 		for i := range page.Items {
-			obj, err := project(&page.Items[i], r.kind, r.namespace)
+			obj, err := s.project(&page.Items[i], r)
 			if err != nil {
 				return nil, err
+			}
+			if obj == nil {
+				continue
 			}
 			key := objectKey(obj)
 			if identities[key] {
@@ -288,6 +301,20 @@ func (s *Source) list(ctx context.Context, r resource, b *budget) (*cachedList, 
 		seen[token] = true
 		opts.Continue = token
 	}
+}
+
+func (s *Source) project(u *unstructured.Unstructured, r resource) (*cachedObject, error) {
+	if r.kind == "Node" {
+		return project(u, r.kind, "")
+	}
+	namespace := u.GetNamespace()
+	if len(validation.IsDNS1123Label(namespace)) != 0 || r.namespace != "" && namespace != r.namespace {
+		return nil, errors.New("missing resource namespace or response outside requested scope")
+	}
+	if !s.config.WatchesNamespace(namespace) {
+		return nil, nil
+	}
+	return project(u, r.kind, namespace)
 }
 
 func objectKey(obj *cachedObject) string {
@@ -343,10 +370,17 @@ func (s *Source) watch(ctx context.Context, r resource, opts metav1.ListOptions,
 					fail(errors.New("unexpected watch object"))
 					return
 				}
-				obj, err := project(u, r.kind, r.namespace)
+				if event.Type != watch.Added && event.Type != watch.Modified && event.Type != watch.Deleted {
+					fail(errors.New("unexpected watch event type"))
+					return
+				}
+				obj, err := s.project(u, r)
 				if err != nil {
 					fail(err)
 					return
+				}
+				if obj == nil {
+					continue
 				}
 				switch event.Type {
 				case watch.Added, watch.Modified:
@@ -382,7 +416,7 @@ func (w *projectedWatch) ResultChan() <-chan watch.Event { return w.events }
 func (s *Source) Collect(ctx context.Context, now time.Time) (health.Snapshot, error) {
 	b := &budget{keys: map[string]struct{}{}, max: s.config.MaxObjects}
 	snapshot := health.Snapshot{At: now}
-	for _, r := range resources(s.config.Namespaces) {
+	for _, r := range resources(s.config) {
 		list, err := s.list(ctx, r, b)
 		if err != nil {
 			return health.Snapshot{}, err

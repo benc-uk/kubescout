@@ -1,5 +1,65 @@
 # Kubernetes health agent implementation plan
 
+## Current direction: AI-first incident investigation
+
+The deterministic observer/reporting design below is historical and superseded.
+The current runtime treats deterministic signals only as internal AI evidence.
+AI investigates with scoped read-only tools and may choose no-action. Only
+validated AI conclusions create/update/resolve durable `ClusterIssue` resources.
+There is no deterministic-only mode, baseline CR or deterministic outage CR.
+
+Implemented components:
+
+- Typed no-action/raise/update/resolve decisions, strict citations and stable
+  problem-family/controller identity, with recurrence on the same incident.
+- Agent Framework Responses local-tool loop with serial allow-listed resource/
+  event inspection, redaction, byte limits and actual HTTP attempt budgets.
+- Scoped ReplicaSet ownership projection; workload get/list/watch remains read-only.
+- Coalesced AI scheduling, cooldowns, periodic no-action/unresolved review,
+  continuously fresh recovery gating and stale-evidence rejection.
+- Restart-aware incident loading, material/no-op equality, UID/resourceVersion
+  preconditions and read-back reconciliation of ambiguous writes.
+- Schema 3.0 accepted-change/once output separated from operator diagnostics.
+- In-memory kubeconfig simulation, inactive model-Secret-backed deployment,
+  explicit model authorisation and legacy HealthReport retention.
+- Offline SDK/tool/collector/incident HTTP fixtures, lifecycle/scope/budget/race
+  tests and updated opt-in collector/model/container harnesses.
+
+Current commands, limitations, permissions and migration steps are in
+[README.md](README.md). New operating invariants are in [AGENTS.md](AGENTS.md).
+No real model requests or live rollout are implied by offline validation.
+The following earlier live acceptance records validate the old design only.
+
+### Separate read-only dashboard
+
+The optional dashboard is independent of the agent: the `issue-dash` Go HTTP host on port 8000
+embeds HTML/CSS/native ES modules, with no Node or frontend package tooling.
+It reads ClusterIssues from one configured namespace using a separate get/list-only
+ServiceAccount. It supports severity colors, filtering, sorting, details and
+15-second polling, with explicit stale/error states and bounded snapshots.
+It can also run locally using the current kubeconfig context (or an explicit override), binding only to
+127.0.0.1:8000, without an in-cluster dashboard deployment or authentication fallback.
+Its image and `deploy/dashboard` bundle do not activate or modify the AI agent.
+See [README.md](README.md#clusterissue-dashboard) for trust boundaries, offline
+browser fixtures and explicit deployment commands. Live rollout is not implied.
+
+### AI-first offline acceptance
+
+- Complete race-test suite, pinned-module/static checks, binary build and
+  Kustomize rendering pass.
+- ClusterIssue passes Kubernetes v0.35.9 structural-schema and CEL compilation/
+  cost validation without contacting a cluster.
+- An end-to-end HTTP fixture runs the collector, a two-request SDK investigation
+  with a real local function tool, and one ClusterIssue API create. The stored
+  severity and explanation originate from validated AI output.
+- A simulated day of 288 renewals/counter changes and 96 periodic unchanged
+  conclusions retains one incident with no additional mutations.
+- Direct transport and actual SDK looping fixtures enforce global/per-run
+  request ceilings, and the tool adapter rejects a ninth invocation.
+- No live model calls, cluster mutation or rollout were performed for this
+  redesign. Real-model diagnosis quality and container/runtime acceptance require
+  a separately authorised live run.
+
 ## Agreed redesign
 
 The Python run-once/CronJob plan is superseded by a Go rewrite with near-real-time
@@ -223,6 +283,72 @@ reports without a restart. The updated persistent Deployment has no probes or
 progress volume and emits complete deterministic assessments with zero restarts.
 No model calls were made, and temporary test resources were removed.
 
+### Report persistence: HealthReport custom resources
+
+Authorised after Stage 3: retain reports, not a mutable finding registry, for a
+future external delivery component.
+
+- In-cluster mode creates namespaced `HealthReport` CRs for meaningful schema
+  2.0 records, using the quiet-publication policy below.
+- `spec.report` retains the full report and is immutable. The default report
+  namespace is `k8s-health`; workload observation remains read-only.
+- Add only namespaced `create` permission on `healthreports`. The observer has
+  no report read/update/delete or status permissions and no CRD management access.
+- Kubeconfig execution logs would-create actions to stderr instead of writing
+  CRs. Existing JSON lines and optional latest-record file remain available.
+- Bound creates by request/run/shutdown contexts. Report creation failures are
+  explicit output failures, not silent delivery or a simulated success.
+- Retain records until explicit deletion, with no workload/Pod owner references.
+  Undeploy preserves the report namespace and CRD. Automatic retention and an
+  external sender are not implemented; reserve status for future delivery state.
+- Validate locally with HTTP fixtures, race tests, CRD payload/schema coverage,
+  manifest rendering and static checks. The opt-in deployment harness requires
+  a separately installed CRD and checks stored reports in its owned namespace.
+
+Report storage has been observed in a user-deployed kind cluster. Previous
+automated Stage 3 acceptance predates report CR storage. No model requests are
+needed for offline report persistence validation.
+The CRD also passed the Kubernetes v0.35.9 API-server validation library offline,
+including structural schema and CEL compilation/cost checks.
+
+#### Quiet publication after report-volume investigation
+
+The original policy persisted every JSON record. In the inspected kind
+deployment, normal watch renewals produced watch-expiry, cache-sync and recovery
+CRs, while informational Warning-event counters produced further assessments.
+Those are not new actionable health incidents.
+
+- Persist the first complete assessment, subsequent actionable
+  new/changed/resolved findings and correlated analysis records.
+- Keep informational-only changes and short collection transitions in local
+  JSON output/latest-file diagnostics without creating CRs.
+- Preserve immediate unknown health and last-known findings during every
+  collection failure. Persist one outage report only after 30 continuous
+  seconds, then one complete recovery report. Error-message changes neither
+  reset the timer nor generate repeated stored outage reports.
+- Keep deferred analysis correlated with its stored assessment even while
+  local diagnostics change.
+- Preserve the single-report `--once` contract. Do not delete existing CRs,
+  modify the CRD schema or add automatic retention.
+
+Offline regression coverage includes a simulated day of 288 renewals plus
+informational counter changes producing exactly one CR for an unchanged
+unschedulable Pod, actionable updates/resolutions, the exact 30-second outage
+boundary, changing errors, repeated outages and analysis correlation.
+With explicit approval, rebuilt/imported `localhost/k8s-health:dev` and restarted
+only `Deployment/k8s-health` in namespace `k8s-health` on context `kind-kind`.
+The fixed Pod started at 01:31:40 UTC on 31 October 2026 and was observed through
+01:37:41 UTC, including a real five-minute renewal and four informational-only
+updates. Ten diagnostic records created no CRs. The observer had zero restarts
+and made no model calls.
+
+A crashing demo Pod was independently created during this window, so the final
+count was four CRs: the baseline plus three actionable state-change reports.
+Every post-baseline stored assessment changed actionable evidence; the renewal
+and informational-only updates created none. This is not a claim that flapping
+actionable findings are incident-level deduplicated. No monitored workload or
+existing report was created, modified or deleted by the coding agent.
+
 ## Stage 4: AKS production readiness
 
 Confirm target subscription/cluster, namespace scope, latency requirements,
@@ -248,7 +374,7 @@ before provisioning or deployment.
 ## Deferred features
 
 - Teams/webhook/queue notifications and durable delivery.
-- Durable finding history, cross-restart quota and deduplication.
+- Automatic report retention, cross-restart quota and finding deduplication.
 - Leader election and high availability.
 - Metrics, utilisation, restart rates, ownership correlation and broader checks.
 - Model-driven investigation tools, logs, remediation or Foundry-hosted execution.

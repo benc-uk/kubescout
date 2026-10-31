@@ -27,20 +27,50 @@ type Container struct {
 	ExitCode, PreviousExit                            *int32
 }
 
+type Port struct {
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Target   string `json:"target_port,omitempty"`
+	Number   int32  `json:"port,omitempty"`
+}
+
+type Endpoint struct {
+	Target                      Resource
+	Ready, Serving, Terminating bool
+}
+
+type EndpointCounts struct {
+	Total       int `json:"total"`
+	Ready       int `json:"ready"`
+	Serving     int `json:"serving"`
+	Terminating int `json:"terminating"`
+}
+
 // Object is the allow-list shared by collection and pure rules, not a raw API object.
 type Object struct {
 	Resource
-	Created                     time.Time
-	Deleting, Paused            bool
-	Phase                       string
-	Conditions                  []Condition
-	Containers                  []Container
-	Generation, Observed        int64
-	Desired, Available, Updated int32
-	Target                      Resource
-	EventTime                   time.Time
-	EventReason                 string
-	EventCount                  int32
+	Version                      string `json:"-"`
+	Created                      time.Time
+	Deleting, Paused             bool
+	Phase                        string
+	Conditions                   []Condition
+	Containers                   []Container
+	Generation, Observed         int64
+	Desired, Available, Updated  int32
+	Target                       Resource
+	EventTime                    time.Time
+	EventReason                  string
+	EventCount                   int32
+	Owner                        Resource
+	Ready, Current, Misscheduled int32
+	UpdateStrategy               string
+	Partition                    int32
+	Labels, Selector             map[string]string `json:"-"`
+	ServiceType, ServiceName     string
+	PublishNotReady              bool
+	Ports                        []Port
+	AddressType                  string
+	Endpoints                    []Endpoint
 }
 
 type Snapshot struct {

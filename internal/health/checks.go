@@ -4,7 +4,7 @@ import "fmt"
 
 type Check func(Snapshot, Policy) []Finding
 
-var Checks = []Check{Nodes, Pods, Deployments, Jobs, Events}
+var Checks = []Check{Nodes, Pods, Deployments, Controllers, Services, Jobs, Events}
 
 func Evaluate(s Snapshot, p Policy) []Finding {
 	findings := []Finding{}

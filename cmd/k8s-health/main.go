@@ -9,13 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"k8s-ops-agent/internal/analysis"
 	"k8s-ops-agent/internal/config"
+	"k8s-ops-agent/internal/incident"
 	"k8s-ops-agent/internal/kube"
 	"k8s-ops-agent/internal/report"
 	"k8s-ops-agent/internal/runner"
+	"k8s.io/client-go/dynamic"
 )
 
 func main() {
@@ -25,6 +26,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runWithClient(ctx, args, stdout, stderr, kube.Client)
+}
+
+func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer, newClient func(config.Config) (dynamic.Interface, string, error)) int {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(stderr, "ERROR: cannot determine working directory")
@@ -47,20 +52,25 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "ERROR:", err)
 		return 2
 	}
-	sink := report.Writer{Out: stdout, File: c.ReportFile}
-	client, cluster, err := kube.Client(c)
+	sink := report.Writer{Out: stdout, Err: stderr, File: c.OutputFile}
+	client, cluster, err := newClient(c)
 	if err != nil {
-		out := report.New(cluster, c.Namespaces, time.Now())
-		out.Execution, out.Errors = "incomplete", []string{err.Error()}
-		out.Analysis = report.AnalysisState("skipped", "Kubernetes client unavailable")
-		if err := sink.Write(out); err != nil {
-			fmt.Fprintln(stderr, "ERROR:", err)
+		out := report.Result{SchemaVersion: "3.0", Type: "execution", Status: "incomplete", Changes: []incident.Change{}, Errors: []string{err.Error()}}
+		if c.Once {
+			if err := sink.WriteResult(out); err != nil {
+				fmt.Fprintln(stderr, "ERROR:", err)
+			}
 		}
 		fmt.Fprintln(stderr, "ERROR: Kubernetes client initialisation failed")
 		return 1
 	}
-	r := runner.Runner{Config: c, Cluster: cluster, Source: kube.NewSource(client, c), Analyzer: &analysis.Analyzer{Config: c}, Sink: sink}
-	fmt.Fprintf(stderr, "INFO: observing %s in namespaces %v (once=%t, deterministic-only=%t)\n", cluster, c.Namespaces, c.Once, c.Deterministic)
+	var repository incident.Repository = &incident.Memory{Log: stderr}
+	if c.Auth == "in-cluster" {
+		repository = incident.Kubernetes{Client: client, Namespace: c.IncidentNamespace, Observer: c.ObserverID, Limit: c.MaxObjects, Timeout: c.RequestTimeout}
+	}
+	r := runner.Runner{Config: c, Source: kube.NewSource(client, c), Analyzer: &analysis.Analyzer{Config: c, Kubernetes: client}, Output: sink,
+		Incidents: incident.Reconciler{Repository: repository, Observer: c.ObserverID, Model: c.Model, Simulated: c.Auth == "kubeconfig"}}
+	fmt.Fprintf(stderr, "INFO: AI investigation for %s, %s (once=%t)\n", cluster, c.NamespaceScope(), c.Once)
 	code := 0
 	if c.Once {
 		code = r.Once(ctx)

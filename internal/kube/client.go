@@ -21,7 +21,17 @@ func Client(c config.Config) (dynamic.Interface, string, error) {
 	} else {
 		rules := clientcmd.NewDefaultClientConfigLoadingRules()
 		rules.ExplicitPath = c.Kubeconfig
-		rc, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: c.Context}).ClientConfig()
+		loaded, loadErr := rules.Load()
+		if loadErr != nil {
+			return nil, identifier, errors.New("kubeconfig could not be loaded")
+		}
+		if identifier == "" {
+			identifier = loaded.CurrentContext
+		}
+		if identifier == "" {
+			return nil, identifier, errors.New("kubeconfig has no current context; select one or provide --context")
+		}
+		rc, err = clientcmd.NewNonInteractiveClientConfig(*loaded, identifier, &clientcmd.ConfigOverrides{}, rules).ClientConfig()
 	}
 	if err != nil {
 		return nil, identifier, errors.New("Kubernetes credentials could not be loaded for the selected authentication mode")

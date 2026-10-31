@@ -1,0 +1,17 @@
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/issue-dash/
+!cmd/issue-dash/**
+!internal/
+!internal/dashboard/
+!internal/dashboard/**
+!internal/incident/
+!internal/incident/**
+!internal/health/
+!internal/health/**
+!build/
+!build/Dockerfile.dashboard
+**/*_test.go
+**/testdata/

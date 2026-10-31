@@ -18,41 +18,80 @@ import (
 )
 
 type Config struct {
-	Once, Deterministic                                                  bool
-	Auth, Context, Kubeconfig, ReportFile                                string
-	Namespaces                                                           []string
+	Once                                                                 bool
+	Auth, Context, Kubeconfig, OutputFile, IncidentNamespace, ObserverID string
+	NamespaceWatch, NamespaceIgnore                                      []string
 	RequestTimeout, RunTimeout, BatchWindow, CheckInterval, WatchTimeout time.Duration
 	MaxObjects, MaxInputChars, MaxOutputTokens, CallsPerHour             int
 	Endpoint, APIKey, Model                                              string
 	Policy                                                               health.Policy
+	InvestigationTimeout, Cooldown, RecoveryWindow, ReviewInterval       time.Duration
 }
 
 type namespaces []string
 
 func (n *namespaces) String() string { return strings.Join(*n, ",") }
 func (n *namespaces) Set(s string) error {
-	if len(validation.IsDNS1123Label(s)) != 0 {
-		return errors.New("namespace must be a valid explicit namespace name")
+	values := strings.Split(s, ",")
+	for i, value := range values {
+		values[i] = strings.TrimSpace(value)
+		if len(validation.IsDNS1123Label(values[i])) != 0 {
+			return errors.New("namespace lists must contain comma-separated valid namespace names")
+		}
 	}
-	if !slices.Contains(*n, s) {
-		*n = append(*n, s)
+	for _, value := range values {
+		if !slices.Contains(*n, value) {
+			*n = append(*n, value)
+		}
 	}
 	return nil
 }
 
+func (c Config) WatchesNamespace(name string) bool {
+	return name != "" && (len(c.NamespaceWatch) == 0 || slices.Contains(c.NamespaceWatch, name)) && !slices.Contains(c.NamespaceIgnore, name)
+}
+
+func (c Config) NamespaceScope() string {
+	if len(c.NamespaceWatch) != 0 {
+		return "watching " + strings.Join(c.NamespaceWatch, ",")
+	}
+	if len(c.NamespaceIgnore) != 0 {
+		return "watching all except " + strings.Join(c.NamespaceIgnore, ",")
+	}
+	return "watching all namespaces"
+}
+
 func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config, error) {
 	c := Config{Policy: health.DefaultPolicy()}
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		switch name {
+		case "--deterministic-only":
+			return c, errors.New("--deterministic-only was removed; the runtime requires AI configuration, and offline tests use fixtures")
+		case "--report-namespace":
+			return c, errors.New("--report-namespace was replaced by --incident-namespace; HealthReport publication has been removed")
+		case "--report-file":
+			return c, errors.New("--report-file was replaced by --output-file using the schema 3.0 AI incident contract")
+		}
+	}
 	f := flag.NewFlagSet("k8s-health", flag.ContinueOnError)
 	f.SetOutput(stderr)
-	var ns namespaces
+	var watch, ignore namespaces
 	var restart int
 	f.BoolVar(&c.Once, "once", false, "Collect and report once instead of watching")
-	f.BoolVar(&c.Deterministic, "deterministic-only", false, "Never call the model")
 	f.StringVar(&c.Auth, "auth-mode", "", "Required: kubeconfig or in-cluster")
-	f.StringVar(&c.Context, "context", "", "Explicit kubeconfig context")
+	f.StringVar(&c.Context, "context", "", "Kubeconfig context override (defaults to the current context)")
 	f.StringVar(&c.Kubeconfig, "kubeconfig", "", "Optional kubeconfig path")
-	f.Var(&ns, "namespace", "Required namespace, repeat to select more")
-	f.StringVar(&c.ReportFile, "report-file", "", "Atomically replace this file with the latest report")
+	f.Var(&watch, "namespace-watch", "Comma-separated namespaces to watch (NAMESPACE_WATCH); default is all")
+	f.Var(&ignore, "namespace-ignore", "Comma-separated namespaces to ignore (NAMESPACE_IGNORE); mutually exclusive with namespace-watch")
+	f.Var(&watch, "namespace", "Deprecated alias for namespace-watch; repeat to select more")
+	f.StringVar(&c.OutputFile, "output-file", "", "Atomically replace this file with the latest incident output")
+	f.StringVar(&c.IncidentNamespace, "incident-namespace", "k8s-health", "Namespace for ClusterIssue records; kubeconfig mode simulates writes")
+	f.StringVar(&c.ObserverID, "observer-id", "", "Required stable unique identity for this cluster and observation scope")
+	f.DurationVar(&c.InvestigationTimeout, "investigation-timeout", 120*time.Second, "Whole AI investigation deadline")
+	f.DurationVar(&c.Cooldown, "incident-cooldown", 2*time.Minute, "Coalesce ordinary changes in the same incident")
+	f.DurationVar(&c.RecoveryWindow, "recovery-window", 2*time.Minute, "Continuous fresh recovery before AI resolution review")
+	f.DurationVar(&c.ReviewInterval, "review-interval", 15*time.Minute, "Revisit unresolved or no-action cases")
 	f.DurationVar(&c.RequestTimeout, "request-timeout", 10*time.Second, "API/model request timeout")
 	f.DurationVar(&c.RunTimeout, "run-timeout", 120*time.Second, "Once deadline or initial informer synchronisation deadline")
 	f.DurationVar(&c.BatchWindow, "batch-window", 5*time.Second, "Maximum wait to batch resource changes")
@@ -60,7 +99,7 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	f.DurationVar(&c.WatchTimeout, "watch-timeout", 5*time.Minute, "Bound each watch connection; rebuild caches on renewal")
 	f.IntVar(&c.MaxObjects, "max-objects", 5000, "Shared retained object limit across all resource types")
 	f.IntVar(&c.MaxInputChars, "max-input-chars", 20000, "Maximum model evidence length, never truncated")
-	f.IntVar(&c.MaxOutputTokens, "max-output-tokens", 1000, "Model output token limit")
+	f.IntVar(&c.MaxOutputTokens, "max-output-tokens", 2000, "Per-request model output token limit")
 	f.IntVar(&c.CallsPerHour, "model-calls-per-hour", 60, "Maximum model attempts in a rolling hour")
 	f.DurationVar(&c.Policy.StartupGrace, "startup-grace", c.Policy.StartupGrace, "Normal pod startup/readiness grace")
 	f.DurationVar(&c.Policy.RolloutGrace, "rollout-grace", c.Policy.RolloutGrace, "Deployment rollout grace")
@@ -72,15 +111,45 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	if f.NArg() != 0 {
 		return c, errors.New("unexpected positional arguments")
 	}
-	c.Namespaces = ns
-	slices.Sort(c.Namespaces)
-	if len(ns) == 0 {
-		return c, errors.New("at least one --namespace is required")
+	watchSet, ignoreSet := false, false
+	f.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "namespace-watch", "namespace":
+			watchSet = true
+		case "namespace-ignore":
+			ignoreSet = true
+		}
+	})
+	for _, setting := range []struct {
+		name string
+		set  bool
+		list *namespaces
+	}{{"NAMESPACE_WATCH", watchSet, &watch}, {"NAMESPACE_IGNORE", ignoreSet, &ignore}} {
+		if value := getenv(setting.name); !setting.set && value != "" {
+			if err := setting.list.Set(value); err != nil {
+				return c, fmt.Errorf("%s: %w", setting.name, err)
+			}
+		}
+	}
+	if len(watch) != 0 && len(ignore) != 0 {
+		return c, errors.New("namespace-watch and namespace-ignore are mutually exclusive (including environment variables)")
+	}
+	c.NamespaceWatch, c.NamespaceIgnore = watch, ignore
+	slices.Sort(c.NamespaceWatch)
+	slices.Sort(c.NamespaceIgnore)
+	if len(validation.IsDNS1123Label(c.IncidentNamespace)) != 0 {
+		return c, errors.New("--incident-namespace must be a valid explicit namespace name")
+	}
+	if c.ObserverID == "" || len(validation.IsDNS1123Label(c.ObserverID)) != 0 {
+		return c, errors.New("--observer-id must be a stable explicit DNS label unique to this cluster and scope")
+	}
+	if c.InvestigationTimeout < c.RequestTimeout || c.Cooldown <= 0 || c.RecoveryWindow <= 0 || c.ReviewInterval <= 0 {
+		return c, errors.New("investigation and scheduling durations must be positive; investigation timeout must cover request timeout")
 	}
 	switch c.Auth {
 	case "kubeconfig":
-		if strings.TrimSpace(c.Context) == "" {
-			return c, errors.New("kubeconfig authentication requires --context")
+		if c.Context != "" && strings.TrimSpace(c.Context) == "" {
+			return c, errors.New("--context must be a valid kubeconfig context name")
 		}
 	case "in-cluster":
 		if c.Context != "" || c.Kubeconfig != "" {
@@ -99,20 +168,25 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	if c.MaxObjects <= 0 || c.MaxInputChars <= 0 || c.MaxOutputTokens <= 0 || c.MaxOutputTokens > 1000000 || c.CallsPerHour <= 0 {
 		return c, errors.New("object, input, output and call limits must be positive; max output tokens cannot exceed 1000000")
 	}
+	if err := c.LoadModel(getenv); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+func (c *Config) LoadModel(getenv func(string) string) error {
 	c.Endpoint, c.APIKey, c.Model = getenv("AZURE_OPENAI_ENDPOINT"), getenv("AZURE_OPENAI_API_KEY"), getenv("AZURE_AI_MODEL_DEPLOYMENT_NAME")
 	if c.Model == "" {
 		c.Model = getenv("FOUNDRY_MODEL_NAME")
 	}
-	if !c.Deterministic {
-		u, err := url.Parse(c.Endpoint)
-		if err != nil || u.Scheme != "https" || u.Hostname() == "" || (u.Port() != "" && u.Port() != "443") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/openai/v1/" {
-			return c, errors.New("AZURE_OPENAI_ENDPOINT must be an HTTPS /openai/v1/ endpoint on port 443")
-		}
-		if strings.TrimSpace(c.APIKey) == "" || strings.TrimSpace(c.Model) == "" {
-			return c, errors.New("set AZURE_OPENAI_API_KEY and AZURE_AI_MODEL_DEPLOYMENT_NAME, or use --deterministic-only")
-		}
+	u, err := url.Parse(c.Endpoint)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || (u.Port() != "" && u.Port() != "443") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/openai/v1/" {
+		return errors.New("AZURE_OPENAI_ENDPOINT must be an HTTPS /openai/v1/ endpoint on port 443")
 	}
-	return c, nil
+	if strings.TrimSpace(c.APIKey) == "" || strings.TrimSpace(c.Model) == "" {
+		return errors.New("AI configuration is required: set AZURE_OPENAI_API_KEY and AZURE_AI_MODEL_DEPLOYMENT_NAME")
+	}
+	return nil
 }
 
 // LoadDotEnv never searches arbitrary parent .env files. A checkout is identified

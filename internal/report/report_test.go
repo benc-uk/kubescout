@@ -7,73 +7,50 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"k8s-ops-agent/internal/health"
+	"k8s-ops-agent/internal/incident"
 )
 
-func TestDiffIncludesEvidenceAndResolution(t *testing.T) {
-	f := health.NewFinding("test", "warning", health.Resource{Name: "pod", UID: "id"}, "", "bad", "old")
-	g := f
-	g.Evidence = []string{"new"}
-	if c := Diff(nil, []health.Finding{f}); len(c.New) != 1 {
-		t.Fatal(c)
+func TestOutputSeparation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	path := filepath.Join(t.TempDir(), "result.json")
+	w := Writer{Out: &stdout, Err: &stderr, File: path}
+	if err := w.Diagnostic("collection_unknown", "watch renewal"); err != nil {
+		t.Fatal(err)
 	}
-	if c := Diff([]health.Finding{f}, []health.Finding{g}); len(c.Updated) != 1 {
-		t.Fatal(c)
+	if stdout.Len() != 0 || stderr.Len() == 0 {
+		t.Fatal("diagnostic reached incident output")
 	}
-	if c := Diff([]health.Finding{g}, nil); len(c.Resolved) != 1 {
-		t.Fatal(c)
-	}
-	if !Diff([]health.Finding{g}, []health.Finding{g}).Empty() {
-		t.Fatal("unchanged finding reported")
-	}
-}
-
-func TestWriter(t *testing.T) {
-	var out bytes.Buffer
-	path := filepath.Join(t.TempDir(), "report.json")
-	w := Writer{Out: &out, File: path}
-	r := New("test", []string{"apps"}, time.Now())
-	if err := w.Write(r); err != nil {
+	result := Result{"3.0", "execution", "completed", []incident.Change{}, []string{}}
+	if err := w.WriteResult(result); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !bytes.Equal(data, stdout.Bytes()) {
+		t.Fatal("file differs from stdout")
 	}
-	if !bytes.Equal(data, out.Bytes()) || bytes.Count(data, []byte("\n")) != 1 {
-		t.Fatal("expected matching one-line JSON")
+	var decoded Result
+	if json.Unmarshal(data, &decoded) != nil || decoded.Changes == nil || decoded.SchemaVersion != "3.0" {
+		t.Fatal("invalid no-action output")
 	}
 	stat, _ := os.Stat(path)
 	if stat.Mode().Perm() != 0600 {
-		t.Fatal("report file must be private")
+		t.Fatal("output file not private")
 	}
-	out.Reset()
-	w.File = filepath.Join(t.TempDir(), "absent", "report.json")
-	if err := w.Write(r); err == nil {
-		t.Fatal("missing directory did not fail")
+	w.File = filepath.Join(t.TempDir(), "missing", "out.json")
+	stdout.Reset()
+	if w.WriteResult(result) == nil {
+		t.Fatal("file failure hidden")
 	}
-	var failed Report
-	if err := json.Unmarshal(out.Bytes(), &failed); err != nil {
-		t.Fatal(err)
+	if json.Unmarshal(stdout.Bytes(), &decoded) != nil || decoded.Status != "incomplete" {
+		t.Fatal("file failure not reflected")
 	}
-	if failed.Execution != "incomplete" || len(failed.Errors) == 0 {
-		t.Fatal("stdout hid file error")
-	}
-	w = Writer{Out: failingWriter{}, File: path}
-	if err := w.Write(r); err == nil {
-		t.Fatal("stdout failure not returned")
-	}
-	data, _ = os.ReadFile(path)
-	if err := json.Unmarshal(data, &failed); err != nil {
-		t.Fatal(err)
-	}
-	if failed.Execution != "incomplete" {
-		t.Fatal("file hid stdout failure")
+	w = Writer{Out: failedWriter{}, Err: failedWriter{}}
+	if w.WriteResult(result) == nil || w.Diagnostic("test", "test") == nil {
+		t.Fatal("output failure hidden")
 	}
 }
 
-type failingWriter struct{}
+type failedWriter struct{}
 
-func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
+func (failedWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }

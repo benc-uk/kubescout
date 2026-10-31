@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: k8s-health
 spec:
-  replicas: 1
+  replicas: 0
   strategy:
     type: Recreate
   selector:
@@ -27,13 +27,23 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: observer
+        - name: agent
           image: localhost/k8s-health:dev
           imagePullPolicy: Never
           args:
             - --auth-mode=in-cluster
-            - --namespace=default
-            - --deterministic-only
+            - --incident-namespace=k8s-health
+            - --observer-id=kind-all
+            - --model-calls-per-hour=300
+          # Omit both lists to watch all namespaces; configure at most one.
+          env:
+            - name: NAMESPACE_WATCH
+              value: ""
+            - name: NAMESPACE_IGNORE
+              value: ""
+          envFrom:
+            - secretRef:
+                name: k8s-health-model
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
