@@ -1,7 +1,6 @@
-# Kubernetes AI incident agent
+# Kubernetes AI Ops Agent 
 
-A Go agent that investigates Kubernetes problems using Microsoft Agent Framework
-and publishes **AI conclusions**, not deterministic alerts.
+An AI-driven Kubernetes operations agent that investigates cluster issues and provides actionable insights.
 
 Deterministic rules are internal evidence producers. They neither decide what
 deserves user attention nor create Kubernetes incidents. The AI can investigate,
