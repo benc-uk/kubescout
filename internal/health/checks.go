@@ -11,7 +11,7 @@ type Check struct {
 }
 
 var Checks = []Check{{"nodes", Nodes}, {"pods", Pods}, {"deployments", Deployments},
-	{"controllers", Controllers}, {"services", Services}, {"jobs", Jobs}, {"events", Events}}
+	{"controllers", Controllers}, {"services", Services}, {"ingresses", Ingresses}, {"storage", Volumes}, {"attachments", Attachments}, {"autoscaling", HPAs}, {"jobs", Jobs}, {"events", Events}}
 
 // Evaluate runs every registered pure check and returns findings in stable ID order.
 func Evaluate(s Snapshot, p Policy) []Finding {

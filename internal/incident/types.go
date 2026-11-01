@@ -132,7 +132,7 @@ func Name(identity Identity) string {
 	return "inc-" + hex.EncodeToString(sum[:8])
 }
 
-var Families = []string{"scheduling", "container-failure", "rollout", "job-failure", "node-health", "service-availability"}
+var Families = []string{"scheduling", "container-failure", "rollout", "job-failure", "node-health", "service-availability", "storage-availability", "autoscaling"}
 var diagnosisKey = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // Validate permits explicit no-action or checks action bounds, known identities and citations.

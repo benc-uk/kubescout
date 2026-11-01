@@ -3,6 +3,11 @@ Purpose: Implement the handle-scoped inspect_resource local tool.
 Flow: Shared session validation authorizes a bounded Kubernetes GET; identity
 checks and approved projections return redacted state and track inspected
 resource versions. No raw objects, credentials or workload writes are exposed.
+Storage inspection excludes all volume sources, raw claim references and storage paths.
+CronJob inspection includes approved schedule/status facts and template container specifications.
+HPA inspection shares condition redaction and excludes metric selectors and metrics API calls.
+Ingress inspection returns redacted configuration, not TLS validity or network reachability.
+Attachment inspection returns bounded driver errors without metadata or inline volume configuration.
 */
 package investigation
 
@@ -72,6 +77,22 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 	result["exists"] = true
 	fields := map[string]any{}
 
+	if r.Kind == "VolumeAttachment" {
+		return inspectAttachment(obj, r, s, result)
+	}
+
+	if r.Kind == "PersistentVolume" || r.Kind == "PersistentVolumeClaim" {
+		return inspectStorage(obj, r, s, fields, result)
+	}
+
+	if r.Kind == "HorizontalPodAutoscaler" {
+		return inspectHPA(obj, r, s, result)
+	}
+
+	if r.Kind == "Ingress" {
+		return inspectIngress(obj, r, s, result)
+	}
+
 	paths := [][]string{{"status", "phase"}, {"status", "replicas"}, {"status", "availableReplicas"}, {"status", "updatedReplicas"}, {"status", "failed"}, {"status", "succeeded"}, {"status", "capacity"}, {"status", "allocatable"},
 		{"spec", "nodeName"}, {"spec", "nodeSelector"}, {"spec", "replicas"}, {"spec", "backoffLimit"},
 		{"spec", "tolerations"}, {"spec", "affinity"}, {"spec", "schedulingGates"}, {"spec", "taints"},
@@ -80,6 +101,39 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 		{"status", "currentRevision"}, {"status", "updateRevision"}, {"status", "desiredNumberScheduled"},
 		{"status", "currentNumberScheduled"}, {"status", "updatedNumberScheduled"}, {"status", "numberReady"},
 		{"status", "numberAvailable"}, {"status", "numberUnavailable"}, {"status", "numberMisscheduled"}}
+
+	if r.Kind == "CronJob" {
+		o, err := kube.ProjectResource(obj, r.Kind, r.Namespace)
+		if err != nil {
+			return err
+		}
+
+		fields["spec.schedule"] = redactValue(o.CronJob.Schedule)
+		fields["spec.suspend"] = o.CronJob.Suspended
+		fields["spec.concurrencyPolicy"] = redactValue(o.CronJob.ConcurrencyPolicy)
+		fields["spec.successfulJobsHistoryLimit"] = o.CronJob.SuccessfulHistory
+		fields["spec.failedJobsHistoryLimit"] = o.CronJob.FailedHistory
+		fields["status.active_count"] = o.CronJob.Active
+
+		if o.CronJob.TimeZone != "" {
+			fields["spec.timeZone"] = redactValue(o.CronJob.TimeZone)
+		}
+
+		if o.CronJob.StartingDeadline != nil {
+			fields["spec.startingDeadlineSeconds"] = *o.CronJob.StartingDeadline
+		}
+
+		if o.CronJob.LastSchedule != nil {
+			fields["status.lastScheduleTime"] = o.CronJob.LastSchedule
+		}
+
+		if o.CronJob.LastSuccess != nil {
+			fields["status.lastSuccessfulTime"] = o.CronJob.LastSuccess
+		}
+
+		paths = nil
+	}
+
 	for _, path := range paths {
 		v, found, _ := unstructured.NestedFieldCopy(obj.Object, path...)
 		if found {
@@ -87,24 +141,9 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 		}
 	}
 
-	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-	safeConditions := []map[string]any{}
-
-	for _, raw := range conditions {
-		c, ok := raw.(map[string]any)
-		if !ok {
-			return errors.New("invalid condition schema")
-		}
-
-		value := map[string]any{}
-
-		for _, k := range []string{"type", "status", "reason", "message", "lastTransitionTime"} {
-			if v, ok := c[k]; ok {
-				value[k] = redactValue(v)
-			}
-		}
-
-		safeConditions = append(safeConditions, value)
+	safeConditions, err := conditionFields(obj)
+	if err != nil {
+		return err
 	}
 
 	fields["conditions"] = safeConditions
@@ -181,6 +220,8 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 		path := []string{"spec", kind}
 		if r.Kind == "Deployment" || r.Kind == "StatefulSet" || r.Kind == "DaemonSet" || r.Kind == "Job" {
 			path = []string{"spec", "template", "spec", kind}
+		} else if r.Kind == "CronJob" {
+			path = []string{"spec", "jobTemplate", "spec", "template", "spec", kind}
 		}
 
 		specs, _, _ := unstructured.NestedSlice(obj.Object, path...)
@@ -232,4 +273,100 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 	result["state"] = fields
 
 	return nil
+}
+
+// inspectStorage returns bounded storage facts and authorized binding handles, never backend configuration.
+func inspectStorage(obj *unstructured.Unstructured, r health.Resource, s *Session, fields, result map[string]any) error {
+	o, err := kube.ProjectResource(obj, r.Kind, r.Namespace)
+	if err != nil {
+		return err
+	}
+
+	fields["status.phase"] = redactValue(o.Phase)
+	fields["storage_class"] = redactValue(o.Storage.Class)
+	fields["capacity"] = redactValue(o.Storage.Capacity)
+	fields["volume_mode"] = redactValue(o.Storage.Mode)
+	modes := []any{}
+
+	for _, mode := range o.Storage.AccessModes {
+		modes = append(modes, redactValue(mode))
+	}
+
+	fields["access_modes"] = modes
+	if r.Kind == "PersistentVolumeClaim" {
+		fields["requested_storage"] = redactValue(o.Storage.Requested)
+	} else {
+		fields["reclaim_policy"] = redactValue(o.Storage.ReclaimPolicy)
+	}
+
+	safe, err := conditionFields(obj)
+	if err != nil {
+		return err
+	}
+
+	if len(safe) > 32 {
+		return errors.New("storage condition projection exceeds limit")
+	}
+
+	fields["conditions"] = safe
+
+	if r.Kind == "PersistentVolume" {
+		for _, key := range []string{"reason", "message"} {
+			value, found, err := unstructured.NestedString(obj.Object, "status", key)
+			if err != nil {
+				return errors.New("invalid storage status schema")
+			}
+
+			if found {
+				fields["status."+key] = redactValue(value)
+			}
+		}
+	}
+
+	for ref, candidate := range s.Investigation.Objects {
+		if _, authorized := s.Investigation.Identities[ref]; !authorized {
+			continue
+		}
+
+		if health.MatchesVolumeClaim(o, candidate) {
+			fields["bound_claim_ref"] = ref
+		}
+
+		if health.MatchesVolumeClaim(candidate, o) {
+			fields["bound_volume_ref"] = ref
+		}
+	}
+
+	result["state"] = fields
+
+	return nil
+}
+
+// conditionFields validates condition records and redacts the shared approved field allow-list.
+func conditionFields(obj *unstructured.Unstructured) ([]map[string]any, error) {
+	conditions, _, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if err != nil {
+		return nil, errors.New("invalid condition schema")
+	}
+
+	out := []map[string]any{}
+
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			return nil, errors.New("invalid condition schema")
+		}
+
+		value := map[string]any{}
+
+		for _, key := range []string{"type", "status", "reason", "message", "lastTransitionTime"} {
+			if v, ok := condition[key]; ok {
+				value[key] = redactValue(v)
+			}
+		}
+
+		out = append(out, value)
+	}
+
+	return out, nil
 }

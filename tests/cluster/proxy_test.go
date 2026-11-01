@@ -4,7 +4,7 @@
 Purpose: Inject scoped API interruptions and silent watches into live collector tests.
 Flow: An integration fixture supplies authenticated upstream access; a local TLS
 proxy accepts an ephemeral token and only allow-listed GET paths for its namespace
-and nodes. Test cleanup closes the server and removes its generated kubeconfig;
+and cluster-scoped nodes/PVs/attachments. Test cleanup closes the server and removes its generated kubeconfig;
 faults affect test requests rather than cluster-wide networking or model traffic.
 */
 package cluster
@@ -77,15 +77,21 @@ func (f *fixture) proxy(mode int32) *faultProxy {
 	token := rand.Text()
 	allowed := map[string]bool{
 		"/api/v1/nodes": true,
-		"/api/v1/namespaces/" + f.namespace + "/pods":                             true,
-		"/api/v1/namespaces/" + f.namespace + "/services":                         true,
-		"/api/v1/namespaces/" + f.namespace + "/events":                           true,
-		"/apis/apps/v1/namespaces/" + f.namespace + "/deployments":                true,
-		"/apis/apps/v1/namespaces/" + f.namespace + "/replicasets":                true,
-		"/apis/apps/v1/namespaces/" + f.namespace + "/statefulsets":               true,
-		"/apis/apps/v1/namespaces/" + f.namespace + "/daemonsets":                 true,
-		"/apis/discovery.k8s.io/v1/namespaces/" + f.namespace + "/endpointslices": true,
-		"/apis/batch/v1/namespaces/" + f.namespace + "/jobs":                      true,
+		"/apis/storage.k8s.io/v1/volumeattachments":                                    true,
+		"/api/v1/persistentvolumes":                                                    true,
+		"/api/v1/namespaces/" + f.namespace + "/pods":                                  true,
+		"/api/v1/namespaces/" + f.namespace + "/persistentvolumeclaims":                true,
+		"/api/v1/namespaces/" + f.namespace + "/services":                              true,
+		"/api/v1/namespaces/" + f.namespace + "/events":                                true,
+		"/apis/apps/v1/namespaces/" + f.namespace + "/deployments":                     true,
+		"/apis/apps/v1/namespaces/" + f.namespace + "/replicasets":                     true,
+		"/apis/apps/v1/namespaces/" + f.namespace + "/statefulsets":                    true,
+		"/apis/apps/v1/namespaces/" + f.namespace + "/daemonsets":                      true,
+		"/apis/discovery.k8s.io/v1/namespaces/" + f.namespace + "/endpointslices":      true,
+		"/apis/batch/v1/namespaces/" + f.namespace + "/jobs":                           true,
+		"/apis/batch/v1/namespaces/" + f.namespace + "/cronjobs":                       true,
+		"/apis/autoscaling/v2/namespaces/" + f.namespace + "/horizontalpodautoscalers": true,
+		"/apis/networking.k8s.io/v1/namespaces/" + f.namespace + "/ingresses":          true,
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 || r.Method != http.MethodGet || !allowed[r.URL.Path] {

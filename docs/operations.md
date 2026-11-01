@@ -53,10 +53,15 @@ rejects kubeconfig flags. Local Make run/deploy/dashboard targets use the curren
 context; `CONTEXT` is only a Make variable for live integration tests.
 
 The agent needs read access to Nodes, Pods, Deployments, ReplicaSets, StatefulSets,
-DaemonSets, Services, EndpointSlices, Jobs and Warning Events. See
+DaemonSets, Services, EndpointSlices, PVCs, PVs, VolumeAttachments, Jobs, CronJobs,
+HPAs, Ingresses and Warning Events. See
 [Resources and health checks](resources-and-checks.md) for the collected facts
 and checks, including grace periods and exceptions. Refer to the
-[agent RBAC](../deploy/rbac.yaml) for exact resource verbs. Incident permissions
+[agent RBAC](../deploy/rbac.yaml) for exact resource verbs. PV reads are cluster-wide;
+PVC reads follow namespace selection. Existing installations need the updated
+read RBAC and Incident CRD's `storage-availability` family before running the
+rebuilt agent; applying schema/RBAC changes alone need not activate the Deployment.
+No storage source, StorageClass or Secret access is added. Incident permissions
 are `get`, `list`, `create` and `patch` on cluster-scoped Incidents:
 
 ```bash
@@ -65,6 +70,31 @@ kubectl auth can-i list incidents.kubescout.benc-uk.github.com
 kubectl auth can-i create incidents.kubescout.benc-uk.github.com
 kubectl auth can-i patch incidents.kubescout.benc-uk.github.com
 ```
+
+CronJob support also requires `get`, `list` and `watch` on `batch/cronjobs`
+within the workload scope; update existing read RBAC before running the rebuilt
+agent. It reuses the existing `job-failure` incident family. No workload writes
+or automatic migration of existing Job incidents are added.
+
+HPA support requires `get`, `list` and `watch` on
+`autoscaling/horizontalpodautoscalers` using `autoscaling/v2`. Existing
+installations also need the updated Incident CRD's `autoscaling` family.
+Update the read RBAC and CRD before running the rebuilt agent; these changes
+do not authorize metrics APIs, `/scale` access or workload writes.
+
+Ingress support requires `get`, `list` and `watch` on
+`networking.k8s.io/ingresses` using `networking.k8s.io/v1` within the workload
+scope. Update existing read RBAC before running the rebuilt agent. It reuses
+`service-availability`; no new Incident family is needed for Ingress.
+No IngressClass, Secret, certificate or external-probe access is added.
+
+VolumeAttachment support requires cluster-wide `get`, `list` and `watch` on
+`storage.k8s.io/volumeattachments`. The existing `kubescout-nodes` ClusterRole
+also grants these attachment reads alongside Node/PV reads; update its RBAC
+before running the rebuilt agent. It reuses `storage-availability` and does not
+add CSI access, `/scale`, attachment metadata output or workload/storage writes.
+Clusters without attachable storage may return an empty list; denied reads are
+incomplete collection, not an empty healthy inventory.
 
 `make incidents-setup` requires namespace/CRD apply permissions. It installs the
 `kubescout` runtime namespace and cluster-scoped Incident CRD and waits for establishment, but does not
@@ -97,7 +127,11 @@ names and empty comma-separated entries are rejected.
 Explicit watch lists use namespace-scoped requests and can use Roles in each
 watched namespace. All/ignore mode uses cluster-wide requests and does not require
 Namespace-object discovery. Ignored objects are filtered before cache admission
-and model input, but **ignore is not an RBAC boundary**. Nodes are always observed.
+and model input, but **ignore is not an RBAC boundary**. Nodes, PVs and
+VolumeAttachments are always observed cluster-wide, including those related to
+claims outside the workload scope.
+Those claims and their Pods are not collected or exposed as related handles.
+Node/PV/attachment Warning-event reads still respect the selected event namespaces.
 The checked-in workload ClusterRole grants reads across namespaces.
 
 `--observer-id` is required: choose a stable DNS label, at most 63 lowercase
@@ -316,7 +350,7 @@ explicit choice is remembered.
   **Resources** lists affected resources; **Record** shows lifecycle, provenance
   and copyable identifiers.
 - The **Problem namespace** belongs to the anchor resource. Incident records
-  themselves have no namespace; Node problems show `Cluster-scoped`.
+  themselves have no namespace; Node, PV and VolumeAttachment problems show `Cluster-scoped`.
 - Use Left/Right or Home/End within the tabs. Refresh retains the tab and scroll
   position; another incident opens on Overview. Escape, the backdrop or Close
   returns focus to the list. The modal is designed for desktop, not a separate

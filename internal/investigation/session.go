@@ -1,7 +1,7 @@
 /*
 Purpose: Share investigation tool validation, budgets, redaction and diagnostics.
 Flow: Both local tools resolve model-supplied handles through private identities
-before scoped reads; one session enforces call, byte and timeout limits and
+before scoped reads, including cluster-scoped PVs and attachments; one session enforces call, byte and timeout limits and
 registers operation-named citations only for accepted evidence. Logs distinguish
 AI requests from Go execution without publishing incidents or raw objects.
 */
@@ -57,13 +57,19 @@ func resourceRefSchema() any {
 
 var resources = map[string]schema.GroupVersionResource{
 	"Node": {Version: "v1", Resource: "nodes"}, "Pod": {Version: "v1", Resource: "pods"},
-	"Deployment":    {Group: "apps", Version: "v1", Resource: "deployments"},
-	"ReplicaSet":    {Group: "apps", Version: "v1", Resource: "replicasets"},
-	"Job":           {Group: "batch", Version: "v1", Resource: "jobs"},
-	"StatefulSet":   {Group: "apps", Version: "v1", Resource: "statefulsets"},
-	"DaemonSet":     {Group: "apps", Version: "v1", Resource: "daemonsets"},
-	"Service":       {Version: "v1", Resource: "services"},
-	"EndpointSlice": {Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"},
+	"Deployment":              {Group: "apps", Version: "v1", Resource: "deployments"},
+	"ReplicaSet":              {Group: "apps", Version: "v1", Resource: "replicasets"},
+	"Job":                     {Group: "batch", Version: "v1", Resource: "jobs"},
+	"CronJob":                 {Group: "batch", Version: "v1", Resource: "cronjobs"},
+	"HorizontalPodAutoscaler": {Group: "autoscaling", Version: "v2", Resource: "horizontalpodautoscalers"},
+	"Ingress":                 {Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"},
+	"StatefulSet":             {Group: "apps", Version: "v1", Resource: "statefulsets"},
+	"DaemonSet":               {Group: "apps", Version: "v1", Resource: "daemonsets"},
+	"Service":                 {Version: "v1", Resource: "services"},
+	"EndpointSlice":           {Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"},
+	"PersistentVolumeClaim":   {Version: "v1", Resource: "persistentvolumeclaims"},
+	"PersistentVolume":        {Version: "v1", Resource: "persistentvolumes"},
+	"VolumeAttachment":        {Group: "storage.k8s.io", Version: "v1", Resource: "volumeattachments"},
 }
 
 // call validates a scoped handle before invoking a tool's read under shared budgets.
@@ -139,9 +145,9 @@ func (s *Session) call(ctx context.Context, name, args string, read func(context
 		return nil, errors.New("unauthorised tool resource")
 	}
 
-	if r.Kind == "Node" {
+	if health.ClusterScoped(r.Kind) {
 		if r.Namespace != "" {
-			return nil, errors.New("unauthorised node namespace")
+			return nil, errors.New("unauthorised cluster resource namespace")
 		}
 	} else if !s.Scope.WatchesNamespace(r.Namespace) {
 		return nil, errors.New("tool resource outside namespace scope")

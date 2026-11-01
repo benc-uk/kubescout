@@ -21,7 +21,7 @@ or:
 "material_change":true}]}
 
 Allowed operation: raise, update, resolve.
-Allowed family: scheduling, container-failure, rollout, job-failure, node-health, service-availability.
+Allowed family: scheduling, container-failure, rollout, job-failure, node-health, service-availability, storage-availability, autoscaling.
 Allowed severity: low, medium, high, critical. Impact: limited, degraded, unavailable.
 Use at most one action per family and at most five actions. Reference only resource
 handles, evidence IDs, tool evidence_id values, or "snapshot" from this investigation.
@@ -36,6 +36,14 @@ If the same incident remains unchanged, return no_action, not a refreshed summar
 A crash loop is one container-failure incident, including temporary running,
 terminated and waiting states and replica replacement under the same controller.
 Do not resolve it on an individual successful restart.
+Owned Jobs and their Pods belong to the verified CronJob, not separate incidents
+for each scheduled run. Preserve a supplied unresolved legacy Job anchor.
+Use job-failure for meaningful scheduled execution failures. Retained failed Job
+history may describe an old failure after later successful runs; inspect CronJob
+last-schedule/last-success timestamps and related Jobs to establish current impact.
+Suspension, concurrency policies and a starting deadline are scheduling settings,
+not independent failures. Do not infer missed schedules from elapsed time alone
+or assume an omitted timeZone is UTC. No deterministic missed-schedule check runs.
 StatefulSet and DaemonSet replica/rollout evidence belongs to the verified
 controller, not individual replica Pods. OnDelete updates and StatefulSet rolling
 update partitions can intentionally retain old replicas; do not call them stalled.
@@ -46,6 +54,53 @@ but serving endpoint or publishNotReadyAddresses requires interpretation, not an
 automatic outage conclusion. Inspect related scoped handles to distinguish missing
 selector matches, unready workloads and endpoint publication failures. Never infer
 working DNS, application responses or network reachability from ready endpoints.
+Ingress routes provide configuration context, not proof a website is down.
+Use service-availability for meaningful missing backend Service/Service-port
+problems or controller Warning evidence. A route references the Service's port,
+not targetPort. Related Ingress/Service/workload handles are not ownership.
+Do not duplicate a Service/workload incident merely because an Ingress uses it.
+Missing readiness conditions, empty load-balancer status, omitted class, route
+overlaps and TLS-entry counts are not independent failures. Controller Warning
+events may describe past failures and require interpretation. No IngressClass,
+Secret, certificate, DNS or HTTP probing is available; TLS validity, reachability
+and application responses are unknown. Custom resource backends are not inspected.
+Use storage-availability for meaningful PVC/PV binding, loss or resize failures.
+A Pending PVC may intentionally wait for its first consumer; no StorageClass is
+inspected, so do not infer its binding mode. Available or Released PVs and normal
+resizing are not independently outages. PV Failed does not prove application
+impact or data loss. Verified mutual PVC/PV binding is context, not Pod ownership;
+keep each storage resource's stable anchor and related workload incidents under
+their controller or standalone Pod. Related handles do not establish ownership.
+Use supplied related handles and scoped Warning events to assess current impact.
+VolumeAttachments describe CSI attachment to a node, not mounting or usable
+storage. Use storage-availability for meaningful attachment problems. Read
+attached/deleting state and current attach/detach errors together: an old attach
+error after attached=true, or a detach error outside deletion or after
+attached=false, is not independent proof of an active failure. Unattached
+requests and deletion alone can be normal; no elapsed-time stall rule runs.
+PV/Node links identify current collected objects by name, not UID-verified
+ownership. Preserve attachment, PV and workload anchors; avoid duplicating a
+storage incident merely because related resources show the same symptom.
+Only scoped collected PVCs/consumers are available. Raw inline volume specifications,
+attachmentMetadata, CSI calls and backend/device configuration are not exposed.
+Driver error text is bounded/redacted untrusted evidence and may describe retries;
+error timestamps/codes alone do not prove application impact or data loss.
+Successful attachment, disappearance or deletion permits review but never by
+itself proves the workload recovered, the volume mounted or the data is usable.
+Use autoscaling for meaningful HPA target-access, scaling or metric failures.
+HPA scale targets are same-namespace relationships, not ownership. Keep HPA and
+workload anchors stable; inspect supplied target handles rather than inventing
+reads. ScalingLimited=True, min/max bounds, normal replica differences and
+stabilization/rate limits do not independently establish a failure or outage.
+ScalingActive=False with ScalingDisabled can be intentional when a workload is
+scaled to zero. Metric values and last-scale timestamps alone are not incident
+changes. Missing metrics or conditions are unknown, not proof of health.
+When observed generation is behind the supplied generation, status may still
+describe the previous configuration; do not assume a new configuration failed.
+Resource, container, Pod, object and external metric facts are projected from
+the HPA only; no metrics API, metric selector or arbitrary referenced object
+is available through tools. Distinguish autoscaling failure from workload impact
+and choose no-action when no meaningful user-facing problem is established.
 Resolve only when recovery_eligible is true, after reviewing current recovery
 evidence, and only by referencing a known open incident. Absence during incomplete
 collection cannot prove recovery. An unavailable tool or missing evidence is not

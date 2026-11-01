@@ -42,19 +42,21 @@ func (t RelatedWarningEvents) Call(ctx context.Context, args string) (any, error
 }
 
 // readEvents projects Warning events only after complete, bounded namespace and target checks.
-// Node event reads preserve all/watch/ignore scope without namespace discovery.
+// Cluster-resource event reads preserve all/watch/ignore scope without namespace discovery.
 func (t RelatedWarningEvents) readEvents(ctx context.Context, _ string, r health.Resource, result map[string]any) error {
 	s := t.Session
 	namespaces := []string{r.Namespace}
 
 	selector := "type=Warning,involvedObject.uid=" + r.UID
-	if r.Kind == "Node" {
+
+	clusterScoped := health.ClusterScoped(r.Kind)
+	if clusterScoped {
 		namespaces = s.Scope.NamespaceWatch
 		if len(namespaces) == 0 {
 			namespaces = []string{metav1.NamespaceAll}
 		}
 
-		selector = "type=Warning,involvedObject.kind=Node,involvedObject.name=" + r.Name
+		selector = "type=Warning,involvedObject.kind=" + r.Kind + ",involvedObject.name=" + r.Name
 	}
 
 	if len(namespaces) == 0 {
@@ -102,7 +104,7 @@ func (t RelatedWarningEvents) readEvents(ctx context.Context, _ string, r health
 				name, _, _ := unstructured.NestedString(obj.Object, "involvedObject", "name")
 
 				kind, _, _ := unstructured.NestedString(obj.Object, "involvedObject", "kind")
-				if (r.Kind != "Node" && target != r.UID) || (r.Kind == "Node" && (name != r.Name || kind != "Node" || target != "" && target != r.UID)) {
+				if (!clusterScoped && target != r.UID) || (clusterScoped && (name != r.Name || kind != r.Kind || target != "" && target != r.UID)) {
 					return errors.New("event response outside authorised resource")
 				}
 

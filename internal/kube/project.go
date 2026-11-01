@@ -2,6 +2,11 @@
 Purpose: Project supported Kubernetes resources into internal evidence objects.
 Flow: Unstructured API responses are identity-checked and reduced to selected
 status, ownership and relationship fields for collection and investigation.
+Storage retains capacities and private claim links, never volume sources or credentials.
+CronJobs retain scheduling facts and active counts, not raw active Job references or templates.
+HPAs retain numeric metric/scaling facts without selectors or metrics API access.
+Ingresses retain bounded routes and counts, never annotations, Secret names or raw addresses.
+VolumeAttachments retain operation/error metadata but exclude inline sources, attachment metadata and error messages.
 Cache wrappers retain projected data, not raw objects; model-facing filtering
 and redaction occur downstream.
 */
@@ -16,9 +21,12 @@ import (
 
 	"github.com/benc-uk/kubescout/internal/health"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +54,22 @@ func (o *cachedObject) DeepCopyObject() runtime.Object {
 	copy.Value.Selector = maps.Clone(o.Value.Selector)
 	copy.Value.Ports = slices.Clone(o.Value.Ports)
 	copy.Value.Endpoints = slices.Clone(o.Value.Endpoints)
+	copy.Value.Claims = slices.Clone(o.Value.Claims)
+	copy.Value.Storage.AccessModes = slices.Clone(o.Value.Storage.AccessModes)
+	copy.Value.HPA = o.Value.HPA.Clone()
+	copy.Value.Ingress.Routes = slices.Clone(o.Value.Ingress.Routes)
+
+	if o.Value.CronJob.StartingDeadline != nil {
+		copy.Value.CronJob.StartingDeadline = new(*o.Value.CronJob.StartingDeadline)
+	}
+
+	if o.Value.CronJob.LastSchedule != nil {
+		copy.Value.CronJob.LastSchedule = new(*o.Value.CronJob.LastSchedule)
+	}
+
+	if o.Value.CronJob.LastSuccess != nil {
+		copy.Value.CronJob.LastSuccess = new(*o.Value.CronJob.LastSuccess)
+	}
 
 	return &copy
 }
@@ -85,7 +109,7 @@ func project(u *unstructured.Unstructured, kind, namespace string) (*cachedObjec
 		Created:  u.GetCreationTimestamp().Time, Deleting: u.GetDeletionTimestamp() != nil,
 	}
 	for _, owner := range u.GetOwnerReferences() {
-		if owner.Controller != nil && *owner.Controller && slices.Contains([]string{"ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Service"}, owner.Kind) {
+		if owner.Controller != nil && *owner.Controller && slices.Contains([]string{"ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Service"}, owner.Kind) {
 			o.Owner = health.Resource{Kind: owner.Kind, Namespace: namespace, Name: owner.Name, UID: string(owner.UID)}
 			break
 		}
@@ -126,6 +150,108 @@ func project(u *unstructured.Unstructured, kind, namespace string) (*cachedObjec
 		}
 
 		o.Containers = append(containers(pod.Spec.InitContainers, pod.Status.InitContainerStatuses, true), containers(pod.Spec.Containers, pod.Status.ContainerStatuses, false)...)
+		if len(pod.Spec.Volumes) > 128 {
+			return nil, errors.New("Pod volume projection exceeds limit")
+		}
+
+		for _, volume := range pod.Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil {
+				o.Claims = append(o.Claims, volume.PersistentVolumeClaim.ClaimName)
+			}
+		}
+	case "PersistentVolumeClaim":
+		var claim corev1.PersistentVolumeClaim
+		if err := decode(&claim); err != nil {
+			return nil, err
+		}
+
+		if len(claim.Spec.AccessModes) > 8 || len(claim.Status.Conditions) > 32 {
+			return nil, errors.New("PVC projection exceeds limit")
+		}
+
+		o.Phase = string(claim.Status.Phase)
+		if requested, ok := claim.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
+			o.Storage.Requested = requested.String()
+		}
+
+		if capacity, ok := claim.Status.Capacity[corev1.ResourceStorage]; ok {
+			o.Storage.Capacity = capacity.String()
+		}
+
+		o.Storage.VolumeName, o.Storage.Mode = claim.Spec.VolumeName, string(corev1.PersistentVolumeFilesystem)
+
+		if claim.Spec.StorageClassName != nil {
+			o.Storage.Class = *claim.Spec.StorageClassName
+		}
+
+		if claim.Spec.VolumeMode != nil {
+			o.Storage.Mode = string(*claim.Spec.VolumeMode)
+		}
+
+		for _, mode := range claim.Spec.AccessModes {
+			o.Storage.AccessModes = append(o.Storage.AccessModes, string(mode))
+		}
+
+		for _, c := range claim.Status.Conditions {
+			o.Conditions = append(o.Conditions, health.Condition{Type: string(c.Type), Status: string(c.Status), Reason: c.Reason, Transition: c.LastTransitionTime.Time, Updated: c.LastProbeTime.Time})
+		}
+	case "VolumeAttachment":
+		var attachment storagev1.VolumeAttachment
+		if err := decode(&attachment); err != nil {
+			return nil, err
+		}
+
+		if attachment.Spec.Attacher == "" || attachment.Spec.NodeName == "" ||
+			len(attachment.Spec.Attacher) > 253 || len(attachment.Spec.NodeName) > 253 ||
+			(attachment.Spec.Source.PersistentVolumeName == nil) == (attachment.Spec.Source.InlineVolumeSpec == nil) {
+			return nil, errors.New("invalid or oversized VolumeAttachment specification")
+		}
+
+		o.Attachment = health.AttachmentState{Attacher: attachment.Spec.Attacher, NodeName: attachment.Spec.NodeName,
+			Inline: attachment.Spec.Source.InlineVolumeSpec != nil, Attached: attachment.Status.Attached,
+			AttachError: attachmentError(attachment.Status.AttachError), DetachError: attachmentError(attachment.Status.DetachError)}
+
+		if attachment.Spec.Source.PersistentVolumeName != nil {
+			name := *attachment.Spec.Source.PersistentVolumeName
+			if name == "" || len(name) > 253 {
+				return nil, errors.New("invalid or oversized VolumeAttachment PV name")
+			}
+
+			o.Attachment.VolumeName = name
+		}
+
+		if attachment.DeletionTimestamp != nil {
+			o.Attachment.DeletingSince = attachment.DeletionTimestamp.Time
+		}
+	case "PersistentVolume":
+		var volume corev1.PersistentVolume
+		if err := decode(&volume); err != nil {
+			return nil, err
+		}
+
+		if len(volume.Spec.AccessModes) > 8 {
+			return nil, errors.New("PV projection exceeds limit")
+		}
+
+		o.Phase = string(volume.Status.Phase)
+		if capacity, ok := volume.Spec.Capacity[corev1.ResourceStorage]; ok {
+			o.Storage.Capacity = capacity.String()
+		}
+
+		o.Storage.Class = volume.Spec.StorageClassName
+		o.Storage.ReclaimPolicy, o.Storage.Mode = string(volume.Spec.PersistentVolumeReclaimPolicy), string(corev1.PersistentVolumeFilesystem)
+
+		if volume.Spec.VolumeMode != nil {
+			o.Storage.Mode = string(*volume.Spec.VolumeMode)
+		}
+
+		for _, mode := range volume.Spec.AccessModes {
+			o.Storage.AccessModes = append(o.Storage.AccessModes, string(mode))
+		}
+
+		if claim := volume.Spec.ClaimRef; claim != nil && (claim.Kind == "" || claim.Kind == "PersistentVolumeClaim") {
+			o.Storage.Claim = health.Resource{Kind: "PersistentVolumeClaim", Namespace: claim.Namespace, Name: claim.Name, UID: string(claim.UID)}
+		}
 	case "Deployment":
 		var d appsv1.Deployment
 		if err := decode(&d); err != nil {
@@ -242,6 +368,65 @@ func project(u *unstructured.Unstructured, kind, namespace string) (*cachedObjec
 
 			o.Endpoints = append(o.Endpoints, value)
 		}
+	case "Ingress":
+		var ingress networkingv1.Ingress
+		if err := decode(&ingress); err != nil {
+			return nil, err
+		}
+
+		if err := projectIngress(ingress, &o); err != nil {
+			return nil, err
+		}
+	case "HorizontalPodAutoscaler":
+		var hpa autoscalingv2.HorizontalPodAutoscaler
+		if err := decode(&hpa); err != nil {
+			return nil, err
+		}
+
+		if err := projectHPA(hpa, &o); err != nil {
+			return nil, err
+		}
+	case "CronJob":
+		var cron batchv1.CronJob
+		if err := decode(&cron); err != nil {
+			return nil, err
+		}
+
+		if len(cron.Status.Active) > 128 || len(cron.Spec.Schedule) > 256 || cron.Spec.TimeZone != nil && len(*cron.Spec.TimeZone) > 128 {
+			return nil, errors.New("CronJob projection exceeds limit")
+		}
+
+		o.Generation = cron.Generation
+		o.CronJob = health.CronJobState{Schedule: cron.Spec.Schedule, ConcurrencyPolicy: string(cron.Spec.ConcurrencyPolicy),
+			StartingDeadline: cron.Spec.StartingDeadlineSeconds, SuccessfulHistory: 3, FailedHistory: 1, Active: len(cron.Status.Active)}
+
+		if o.CronJob.ConcurrencyPolicy == "" {
+			o.CronJob.ConcurrencyPolicy = string(batchv1.AllowConcurrent)
+		}
+
+		if cron.Spec.TimeZone != nil {
+			o.CronJob.TimeZone = *cron.Spec.TimeZone
+		}
+
+		if cron.Spec.Suspend != nil {
+			o.CronJob.Suspended = *cron.Spec.Suspend
+		}
+
+		if cron.Spec.SuccessfulJobsHistoryLimit != nil {
+			o.CronJob.SuccessfulHistory = *cron.Spec.SuccessfulJobsHistoryLimit
+		}
+
+		if cron.Spec.FailedJobsHistoryLimit != nil {
+			o.CronJob.FailedHistory = *cron.Spec.FailedJobsHistoryLimit
+		}
+
+		if cron.Status.LastScheduleTime != nil {
+			o.CronJob.LastSchedule = new(cron.Status.LastScheduleTime.Time)
+		}
+
+		if cron.Status.LastSuccessfulTime != nil {
+			o.CronJob.LastSuccess = new(cron.Status.LastSuccessfulTime.Time)
+		}
 	case "Job":
 		var job batchv1.Job
 		if err := decode(&job); err != nil {
@@ -294,6 +479,20 @@ func project(u *unstructured.Unstructured, kind, namespace string) (*cachedObjec
 		ObjectMeta: metav1.ObjectMeta{Name: u.GetName(), Namespace: namespace, UID: u.GetUID(), ResourceVersion: u.GetResourceVersion()},
 		Value:      o,
 	}, nil
+}
+
+// attachmentError projects error presence, time and optional numeric code, excluding raw driver messages.
+func attachmentError(value *storagev1.VolumeError) health.AttachmentError {
+	if value == nil {
+		return health.AttachmentError{}
+	}
+
+	out := health.AttachmentError{Present: true, At: value.Time.Time}
+	if value.ErrorCode != nil {
+		out.HasCode, out.Code = true, *value.ErrorCode
+	}
+
+	return out
 }
 
 // containers projects status entries with configured images preferred over reported images,

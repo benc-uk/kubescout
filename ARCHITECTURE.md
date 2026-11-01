@@ -38,10 +38,11 @@ exchanges, not incident storage; the dashboard reads CRDs only.
 | **5. Wake the runner** | Informer add/update/delete callbacks send a notification. The runner reads the **current cached snapshot**, rather than passing each raw change directly to AI. A timer also wakes it. | [`Source.notify` and informer callbacks](internal/kube/source.go), [`Runner.Watch`](internal/runner/runner.go) | Coalesces notifications. Refuses incomplete collection; a broken watch triggers cache rebuilding, not a healthy result. | **Deterministic** |
 
 The watched resources are Nodes, Pods, Deployments, ReplicaSets, StatefulSets,
-DaemonSets, Services, EndpointSlices, Jobs and Warning Events. An explicit
+DaemonSets, Services, EndpointSlices, PVCs, PVs, VolumeAttachments, Jobs, CronJobs,
+HPAs, Ingresses and Warning Events. An explicit
 namespace watch list uses namespace-scoped requests. All/ignore mode uses
-cluster-wide requests and filters ignored namespaces locally. Nodes are always
-observed.
+cluster-wide requests and filters ignored namespaces locally. Nodes, PVs and
+VolumeAttachments are always observed cluster-wide; PVCs follow namespace filters.
 
 A Kubernetes **watch notification** is not the same as a Kubernetes **Event
 object**. A Pod status update, for example, arrives through the Pod watch; it does
@@ -63,6 +64,10 @@ consistently by resource category:
 | [deployments.go](internal/health/deployments.go) | Deployment rollout progress. |
 | [controllers.go](internal/health/controllers.go) | StatefulSet and DaemonSet replica/rollout state. |
 | [services.go](internal/health/services.go) | Service backend availability and EndpointSlice port matching. |
+| [volumes.go](internal/health/volumes.go) | PVC pending/lost binding and resize errors; explicit PV failure. |
+| [attachments.go](internal/health/attachments.go) | Reported attach errors while unattached and detach errors while deleting/still attached. |
+| [hpa.go](internal/health/hpa.go) | HPA unable-to-scale and inactive conditions, excluding intentional disabled scaling. |
+| [ingresses.go](internal/health/ingresses.go) | Missing Ingress backend Services or Service port definitions. |
 | [jobs.go](internal/health/jobs.go) | Terminal Job failure conditions. |
 | [events.go](internal/health/events.go) | Recent Warning Events as supporting evidence. |
 
@@ -72,6 +77,12 @@ collection inventory, retained facts, rule IDs, thresholds and exclusions.
 ### Resource semantics
 
 ReplicaSets establish ownership rather than a separate incident category.
+CronJobs establish stable ownership for scheduled Jobs and their Pods. Approved
+schedule/time-zone, suspension, deadline, concurrency, history and last-run facts
+are inspection context; no standalone missed-schedule heuristic runs. A retained
+failed Job can describe history after a later success, so AI decides current
+impact and may choose no-action. Unresolved legacy Job anchors remain in place
+with their own failure evidence and verified CronJob inspection context.
 StatefulSet and DaemonSet checks consider observed generations, replica readiness
 and update progress, respecting OnDelete and StatefulSet rolling-update
 partitions. New-controller shortfalls use rollout grace; these APIs have no
@@ -93,14 +104,56 @@ Selector matches provide related Pod/controller handles, not ownership.
 Selectors and Pod labels stay private. Selector/label projections and port lists
 are bounded to 128 entries each; EndpointSlices retain at most 1,000
 readiness/target records and no endpoint addresses. All resource types share
-namespace scope, pagination, admission, freshness and investigation limits.
+the applicable cluster/namespace scope, pagination, admission, freshness and investigation limits.
 Missing access means incomplete collection, not healthy resources.
+
+VolumeAttachments retain attacher/target names, attached/deleting state and error
+metadata, not attachment metadata, inline volume specs or raw driver messages.
+Inspection adds bounded redacted errors and supplied current named PV/Node handles.
+Named links are not UID-based ownership; scoped mutual PV/PVC bindings add
+consumer context while preserving standalone attachment/PV and workload anchors.
+Attach errors use creation-based startup grace; detach errors use deletion-based
+startup grace. Stale operation errors, normal pending and deletion alone are not
+rules. Error timestamp churn is excluded from fingerprints. Successful attachment
+does not prove mounting, usable storage or application recovery.
+
+PVC Pending is grace-aware evidence, not proof of failed provisioning: delayed
+binding can be intentional, and StorageClasses are not read. Lost claims, explicit
+resize-error conditions and Failed PVs provide stronger private hints. Normal
+resizing and Available/Released PVs do not independently imply incidents.
+Storage projections exclude CSI/backend configuration, mount paths and credentials.
+Explicit Pod claim names, mutual PVC/PV binding names and PVC UIDs stay private
+for relationships; only authorized peer handles reach AI inspection.
+PVs/PVCs retain standalone anchors, and storage relationships never replace
+Pod/controller ownership. Binding, capacity and storage-condition state changes
+invalidate evidence revisions; condition timestamp churn alone does not.
 
 ### Correlation and scheduling
 
+HPAs use `autoscaling/v2` and share namespace scope, admission and freshness
+limits. Approved condition failures use startup grace, while normal scaling
+limits, stabilization, replica differences and `ScalingDisabled` are not
+independent failures. Scale-target references provide same-namespace current
+Deployment/StatefulSet/ReplicaSet context, never synthetic ownership.
+Metric selectors are excluded; approved metric/behavior facts come from the HPA
+GET only, without metrics API or scale-subresource access. Current metric samples,
+last-scale times and condition timestamp churn do not independently invalidate
+no-action fingerprints; inspected resource versions still gate stale decisions.
+
+Ingresses use `networking.k8s.io/v1` with the same scope, freshness and shared
+limits. Complete collection supports grace-aware missing backend Service/port
+evidence; denied or stale reads never imply a missing backend. Routes retain
+bounded class/host/path and Service port facts, custom-backend presence and
+TLS/address counts, not annotations, Secret names or raw addresses.
+Related Services, EndpointSlices, Pods and verified controllers provide context
+without changing anchors or duplicating Service readiness rules. Controller
+Warning Events are supporting evidence. Missing class, empty load-balancer
+status and TLS configuration are not health rules; no class/Secret reads or
+DNS/HTTP probes are performed. AI can use `service-availability` or no-action.
+
 | Step | What happens | Code responsible | Decisions made | Deterministic or AI? |
 |---|---|---|---|---|
-| **6. Evaluate evidence rules** | Runs checks for nodes, Pods, controllers, Services, Jobs and Warning events. Produces internal findings. | [`Evaluate`](internal/health/checks.go), for example [`Services`](internal/health/services.go) | Detects conditions such as no ready backends, a failed Pod or a stalled rollout. Assigns informational/warning/critical **hints**, not final incident severity. | **Deterministic** |
+| **6. Evaluate evidence rules** | Runs checks for nodes, Pods, controllers, Services, Ingresses, storage, autoscaling, Jobs and Warning events. Produces internal findings. | [`Evaluate`](internal/health/checks.go), for example [`Services`](internal/health/services.go) | Detects conditions such as missing route backends, no ready backends, a failed Pod or a stalled rollout. Assigns informational/warning/critical **hints**, not final incident severity. | **Deterministic** |
 | **7. Group related evidence** | Groups findings under a controller or standalone resource, called the **anchor**. Adds related resources and existing open incidents, even when their original findings have disappeared. | [`BuildInvestigationContexts` and `anchor`](internal/incident/evidence.go) | Which observations belong together. For example, related replica failures belong under their controller rather than becoming separate candidates. | **Deterministic** |
 | **8. Schedule an investigation** | Compares evidence fingerprints and chooses a due candidate. Only one investigation runs at a time; collection continues meanwhile. | [`updateCandidates` and `Runner.Watch`](internal/runner/runner.go) | Batches changes, applies cooldowns, accelerates reviews when urgency increases, revisits unchanged cases and delays failed investigations. No findings and no existing incident generally means no candidate. | **Deterministic** |
 
@@ -137,10 +190,15 @@ The [Responses agent](internal/analysis/analysis.go) has two typed local tools:
 - [`inspect_resource`](internal/investigation/inspect_resource.go) returns approved
   state, scheduling/capacity facts, container state and bounded redacted condition
   messages. It includes controller template images/resources/container ports,
-  Service port definitions and EndpointSlice readiness counts, not raw templates,
-  volume claims, selectors, endpoint addresses or target UIDs.
+  Service port definitions, EndpointSlice readiness counts and approved PVC/PV
+  facts with authorized binding handles, not raw templates, volume sources,
+  claim references, selectors, endpoint addresses or target UIDs. CronJob scheduling
+  facts and nested Job-template container specifications are approved; raw active
+  Job references, commands and environment values are excluded. HPA inspection
+  returns bounded metric/scaling facts, redacted conditions and an optional
+  already-authorized supported workload handle, never metric selectors or arbitrary reads.
 - [`related_warning_events`](internal/investigation/related_warning_events.go)
-  returns bounded redacted Warning events for an authorized resource. Node-event
+  returns bounded redacted Warning events for an authorized resource. Node/PV-event
   reads use the same namespace watch/ignore scope. Reads are limited to 20 pages
   and 20 retained events per call; incomplete/oversized results fail explicitly.
 
@@ -175,10 +233,12 @@ memory. See [limits](docs/operations.md#limits-and-scheduling) for values and fl
 
 Incident identity combines the observer, anchor resource incarnation and problem
 family. Verified ownership groups Pod evidence through ReplicaSets to Deployments
-or directly under StatefulSets, DaemonSets and Jobs. Standalone resources use
+or directly under StatefulSets, DaemonSets and Jobs; scheduled Jobs and their Pods
+share the verified CronJob anchor, except unresolved legacy Job records kept in place.
+Standalone resources use
 their own identity. Services remain stable anchors across EndpointSlice replacement.
 Problem families cover scheduling, container failure, rollout, Job failure,
-node health and Service availability; this is bounded correlation, not
+node health, Service availability, storage availability and autoscaling; this is bounded correlation, not
 unrestricted semantic grouping across unrelated workloads.
 
 Names use `inc-<identity-hash>`. Individual finding IDs, model wording and

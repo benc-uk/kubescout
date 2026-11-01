@@ -1,6 +1,6 @@
 /*
 Purpose: Collect scoped Kubernetes evidence through bounded lists and watches.
-Flow: Namespace filters, projection and shared admission limits feed one-shot
+Flow: Cluster-scoped Nodes/PVs/attachments, namespace filters and shared admission limits feed one-shot
 snapshots or informer caches with change notifications. Broken or expired
 watches invalidate and rebuild caches; labelled progress describes collection only.
 Collection errors remain unknown
@@ -67,10 +67,14 @@ type projectedWatch struct {
 	events chan watch.Event
 }
 
-// resources selects cluster-scoped Nodes and supported workload requests per watched namespace,
+// resources selects cluster-scoped Nodes/PVs/attachments and namespaced requests per watched namespace,
 // using all-namespace endpoints when no explicit watch list is configured.
 func resources(c config.Config) []resource {
-	out := []resource{{schema.GroupVersionResource{Version: "v1", Resource: "nodes"}, "Node", ""}}
+	out := []resource{
+		{schema.GroupVersionResource{Version: "v1", Resource: "nodes"}, "Node", ""},
+		{schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumes"}, "PersistentVolume", ""},
+		{schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "volumeattachments"}, "VolumeAttachment", ""},
+	}
 
 	namespaces := c.NamespaceWatch
 	if len(namespaces) == 0 {
@@ -80,6 +84,7 @@ func resources(c config.Config) []resource {
 	for _, ns := range namespaces {
 		out = append(out,
 			resource{schema.GroupVersionResource{Version: "v1", Resource: "pods"}, "Pod", ns},
+			resource{schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}, "PersistentVolumeClaim", ns},
 			resource{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, "Deployment", ns},
 			resource{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}, "ReplicaSet", ns},
 			resource{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}, "StatefulSet", ns},
@@ -87,6 +92,9 @@ func resources(c config.Config) []resource {
 			resource{schema.GroupVersionResource{Version: "v1", Resource: "services"}, "Service", ns},
 			resource{schema.GroupVersionResource{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}, "EndpointSlice", ns},
 			resource{schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}, "Job", ns},
+			resource{schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}, "CronJob", ns},
+			resource{schema.GroupVersionResource{Group: "autoscaling", Version: "v2", Resource: "horizontalpodautoscalers"}, "HorizontalPodAutoscaler", ns},
+			resource{schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"}, "Ingress", ns},
 			resource{schema.GroupVersionResource{Version: "v1", Resource: "events"}, "Event", ns})
 	}
 
@@ -393,10 +401,10 @@ func (s *Source) list(ctx context.Context, r resource, b *budget) (*cachedList, 
 	}
 }
 
-// project enforces Node or requested namespace scope and filters excluded namespaces before projection.
+// project enforces cluster or requested namespace scope and filters excluded namespaces before projection.
 // A nil object without an error means the namespace was intentionally skipped.
 func (s *Source) project(u *unstructured.Unstructured, r resource) (*cachedObject, error) {
-	if r.kind == "Node" {
+	if health.ClusterScoped(r.kind) {
 		return project(u, r.kind, "")
 	}
 

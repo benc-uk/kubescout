@@ -1,7 +1,7 @@
 /*
 Purpose: Check agent deployment, RBAC and Incident schema contracts offline.
 Flow: Decode checked-in manifests and validate synthetic configuration and incidents
-to check inactive deployment defaults, workload read permissions, cluster-scoped incident writes
+to check inactive deployment defaults, workload/PV/attachment read permissions, cluster-scoped incident writes
 and lifecycle.state migration plus the bounded transcript mount without activating a cluster or contacting a model.
 Shared decoding helpers also supply manifests to opt-in integration fixtures.
 */
@@ -181,16 +181,20 @@ func TestRBACContract(t *testing.T) {
 
 				continue
 			case "kubescout-nodes":
-				if len(rules) != 1 || !slices.Equal(rules[0].Resources, []string{"nodes"}) {
+				if len(rules) != 2 || !slices.Equal(rules[0].Resources, []string{"nodes", "persistentvolumes"}) ||
+					!slices.Equal(rules[0].APIGroups, []string{""}) ||
+					!slices.Equal(rules[1].Resources, []string{"volumeattachments"}) || !slices.Equal(rules[1].APIGroups, []string{"storage.k8s.io"}) {
 					t.Fatal("incorrect node permissions")
 				}
 			case "kubescout-resources":
-				workloads = len(rules) == 5 &&
-					slices.Equal(rules[0].Resources, []string{"pods", "services"}) && slices.Equal(rules[0].APIGroups, []string{""}) &&
+				workloads = len(rules) == 7 &&
+					slices.Equal(rules[0].Resources, []string{"pods", "services", "persistentvolumeclaims"}) && slices.Equal(rules[0].APIGroups, []string{""}) &&
 					slices.Equal(rules[1].Resources, []string{"events"}) && slices.Equal(rules[1].APIGroups, []string{""}) &&
 					slices.Equal(rules[2].Resources, []string{"deployments", "replicasets", "statefulsets", "daemonsets"}) && slices.Equal(rules[2].APIGroups, []string{"apps"}) &&
-					slices.Equal(rules[3].Resources, []string{"jobs"}) && slices.Equal(rules[3].APIGroups, []string{"batch"}) &&
-					slices.Equal(rules[4].Resources, []string{"endpointslices"}) && slices.Equal(rules[4].APIGroups, []string{"discovery.k8s.io"})
+					slices.Equal(rules[3].Resources, []string{"jobs", "cronjobs"}) && slices.Equal(rules[3].APIGroups, []string{"batch"}) &&
+					slices.Equal(rules[4].Resources, []string{"endpointslices"}) && slices.Equal(rules[4].APIGroups, []string{"discovery.k8s.io"}) &&
+					slices.Equal(rules[5].Resources, []string{"horizontalpodautoscalers"}) && slices.Equal(rules[5].APIGroups, []string{"autoscaling"}) &&
+					slices.Equal(rules[6].Resources, []string{"ingresses"}) && slices.Equal(rules[6].APIGroups, []string{"networking.k8s.io"})
 			default:
 				t.Fatal("unexpected cluster permissions")
 			}
@@ -222,7 +226,7 @@ func TestRBACContract(t *testing.T) {
 			}
 
 			for _, resource := range r.Resources {
-				if !slices.Contains([]string{"nodes", "pods", "services", "events", "deployments", "replicasets", "statefulsets", "daemonsets", "endpointslices", "jobs"}, resource) {
+				if !slices.Contains([]string{"nodes", "persistentvolumes", "volumeattachments", "pods", "persistentvolumeclaims", "services", "events", "deployments", "replicasets", "statefulsets", "daemonsets", "endpointslices", "jobs", "cronjobs", "horizontalpodautoscalers", "ingresses"}, resource) {
 					t.Fatal("unexpected workload access")
 				}
 			}

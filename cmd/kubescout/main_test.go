@@ -1,7 +1,7 @@
 /*
 Purpose: Check agent CLI output, configuration failures and local Make contracts.
 Flow: Offline HTTP fixtures, injected clients, command stubs and dry runs verify
-readable execution summaries, colour controls, workload scope, cluster-scoped incidents, current-context
+readable execution summaries, colour controls, workload/PV/attachment scope, cluster-scoped incidents, current-context
 selection, deployment preflights and lint command failures without live services.
 Incident setup installs only the namespace and CRD, without deploying or calling AI.
 */
@@ -51,7 +51,9 @@ func TestCLIHealthyScopeMakesNoModelOrIncidentWrites(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/nodes") {
 			items = append(items, map[string]any{"apiVersion": "v1", "kind": "Node", "metadata": map[string]any{"name": "node", "uid": "id", "resourceVersion": "1"},
 				"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}})
-		} else if !strings.Contains(r.URL.Path, "/namespaces/apps/") && r.URL.Path != "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents" {
+		} else if r.URL.Path != "/api/v1/persistentvolumes" && r.URL.Path != "/apis/storage.k8s.io/v1/volumeattachments" &&
+			!strings.Contains(r.URL.Path, "/namespaces/apps/") &&
+			r.URL.Path != "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents" {
 			t.Error("unexpected scope")
 		}
 

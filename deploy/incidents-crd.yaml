@@ -55,7 +55,7 @@ spec:
                       maxLength: 63
                     family:
                       type: string
-                      enum: [scheduling, container-failure, rollout, job-failure, node-health, service-availability]
+                      enum: [scheduling, container-failure, rollout, job-failure, node-health, service-availability, storage-availability, autoscaling]
                     anchor:
                       type: object
                       required: [kind, name, uid]

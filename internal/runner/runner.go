@@ -5,6 +5,7 @@ deterministic signals schedule serial AI work. Freshness and recovery checks
 gate reconciliation. Provenance-labelled text explains once/watch activity;
 CRDs alone store incidents. Transcript dispositions and safe failure details
 describe outcomes without changing the existing per-candidate retry schedule.
+Restart scope permits cluster PVs and attachments while retaining namespace boundaries for claims.
 */
 package runner
 
@@ -557,7 +558,11 @@ func (r *Runner) loadOpen(ctx context.Context) ([]incident.Record, error) {
 	for _, record := range open {
 		resources := append([]health.Resource{record.Value.Identity.Anchor}, record.Value.Resources...)
 		for _, resource := range resources {
-			if resource.Kind == "Node" && resource.Namespace == "" {
+			if health.ClusterScoped(resource.Kind) {
+				if resource.Namespace != "" {
+					return nil, errors.New("stored cluster-scoped resource has a namespace")
+				}
+
 				continue
 			}
 

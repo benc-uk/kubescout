@@ -117,7 +117,8 @@ func TestMultiNamespaceCollection(t *testing.T) {
 					t.Error("all/ignore mode must use all-namespace endpoints")
 				}
 
-				if len(tt.watch) != 0 && !strings.HasSuffix(r.URL.Path, "/nodes") &&
+				if len(tt.watch) != 0 && !strings.HasSuffix(r.URL.Path, "/nodes") && !strings.HasSuffix(r.URL.Path, "/persistentvolumes") &&
+					!strings.HasSuffix(r.URL.Path, "/volumeattachments") &&
 					!strings.Contains(r.URL.Path, "/namespaces/apps/") && !strings.Contains(r.URL.Path, "/namespaces/payments/") {
 					t.Error("explicit watch escaped scope")
 				}
@@ -184,9 +185,9 @@ func TestMultiNamespaceCollection(t *testing.T) {
 				}
 			}
 
-			wantRequests := 11
+			wantRequests := 17
 			if len(tt.watch) != 0 {
-				wantRequests = 19
+				wantRequests = 29
 			}
 
 			if requests != wantRequests {
@@ -267,7 +268,7 @@ func TestAllNamespaceWatchFiltersAndTracksNewNamespaces(t *testing.T) {
 				mu.Lock()
 				defer mu.Unlock()
 
-				return s.Err() == nil && len(streams) == 10
+				return s.Err() == nil && len(streams) == 16
 			})
 			mu.Lock()
 			stream := streams["/api/v1/pods"]
@@ -333,7 +334,8 @@ func TestInformerUpdatesDeletionAndRecovery(t *testing.T) {
 			return
 		}
 
-		if !strings.HasSuffix(r.URL.Path, "/nodes") && !strings.Contains(r.URL.Path, "/namespaces/apps/") {
+		if !strings.HasSuffix(r.URL.Path, "/nodes") && !strings.HasSuffix(r.URL.Path, "/persistentvolumes") &&
+			!strings.HasSuffix(r.URL.Path, "/volumeattachments") && !strings.Contains(r.URL.Path, "/namespaces/apps/") {
 			t.Error("request escaped namespace scope")
 		}
 
@@ -405,7 +407,7 @@ func TestInformerUpdatesDeletionAndRecovery(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 
-		return err == nil && len(streams) == 10
+		return err == nil && len(streams) == 16
 	})
 
 	path := "/api/v1/namespaces/apps/pods"

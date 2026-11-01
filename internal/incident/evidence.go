@@ -3,6 +3,11 @@ Purpose: Build correlated investigation contexts and evidence fingerprints.
 Flow: Projected snapshots, deterministic signals and unresolved records become
 bounded resource groups for AI review, including recovery candidates; identity
 and activity hints schedule investigation rather than decide incident changes.
+Verified PVC/PV bindings and Pod claim use add context without changing anchors.
+CronJob ownership groups scheduled runs while preserving unresolved legacy Job anchors.
+HPA scale targets add workload context without becoming ownership or changing anchors.
+Ingress routes share Service/backend context without duplicating endpoint evidence or changing anchors.
+VolumeAttachments share named current PV/Node and scoped claim context without changing incident ownership.
 */
 package incident
 
@@ -13,6 +18,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/benc-uk/kubescout/internal/health"
 )
@@ -26,8 +32,8 @@ func Ref(r health.Resource) string {
 }
 
 // anchor correlates EndpointSlices with verified Services or follows up to three owner links.
-// An owner absent from the snapshot remains the anchor rather than reverting to its child.
-func anchor(o health.Object, objects map[string]health.Object) health.Resource {
+// Unresolved legacy Job anchors remain stable; absent owners do not revert to their children.
+func anchor(o health.Object, objects map[string]health.Object, jobAnchors map[string]bool) health.Resource {
 	if o.Kind == "EndpointSlice" {
 		for _, service := range objects {
 			if health.MatchesServiceSlice(service, o) {
@@ -39,6 +45,10 @@ func anchor(o health.Object, objects map[string]health.Object) health.Resource {
 	}
 
 	for depth := 0; depth < 3 && o.Owner.UID != ""; depth++ {
+		if o.Kind == "Job" && jobAnchors[Ref(o.Resource)] {
+			break
+		}
+
 		parent, ok := objects[Ref(o.Owner)]
 		if !ok {
 			return o.Owner
@@ -57,6 +67,14 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 	objects := map[string]health.Object{}
 	for _, o := range snapshot.Objects {
 		objects[Ref(o.Resource)] = o
+	}
+
+	jobAnchors := map[string]bool{}
+
+	for _, existing := range open {
+		if a := existing.Value.Identity.Anchor; a.Kind == "Job" {
+			jobAnchors[Ref(a)] = true
+		}
 	}
 
 	out := map[string]InvestigationContext{}
@@ -101,7 +119,7 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 			continue
 		}
 
-		a := anchor(o, objects)
+		a := anchor(o, objects, jobAnchors)
 		in := ensure(a)
 		add(&in, a)
 		add(&in, o.Resource)
@@ -127,26 +145,56 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 	for key, in := range out {
 		// Include bounded known owner/replica context without adding unrelated scopes.
 		for _, o := range snapshot.Objects {
-			if anchor(o, objects) == in.Identities[in.Anchor] {
+			if anchor(o, objects, jobAnchors) == in.Identities[in.Anchor] {
 				add(&in, o.Resource)
 			}
 		}
 
-		if service, ok := objects[in.Anchor]; ok && service.Kind == "Service" {
-			addPod := func(pod health.Object) {
-				add(&in, pod.Resource)
+		if job, ok := objects[in.Anchor]; ok && job.Kind == "Job" && job.Owner.Kind == "CronJob" {
+			if cron, ok := objects[Ref(job.Owner)]; ok {
+				add(&in, cron.Resource)
+			}
+		}
 
-				for depth := 0; depth < 3 && pod.Owner.UID != ""; depth++ {
-					parent, ok := objects[Ref(pod.Owner)]
-					if !ok {
-						break
-					}
+		addPod := func(pod health.Object) {
+			add(&in, pod.Resource)
 
-					add(&in, parent.Resource)
-					pod = parent
+			for depth := 0; depth < 3 && pod.Owner.UID != ""; depth++ {
+				parent, ok := objects[Ref(pod.Owner)]
+				if !ok {
+					break
 				}
+
+				add(&in, parent.Resource)
+				pod = parent
+			}
+		}
+
+		services := map[string]health.Object{}
+
+		if service, ok := objects[in.Anchor]; ok && service.Kind == "Service" {
+			services[in.Anchor] = service
+		}
+
+		for _, related := range slices.Clone(in.Resources) {
+			o, ok := objects[related.Ref]
+			if !ok {
+				continue
 			}
 
+			for _, candidate := range snapshot.Objects {
+				if health.MatchesIngressService(candidate, o) {
+					add(&in, candidate.Resource)
+				}
+
+				if health.MatchesIngressService(o, candidate) {
+					add(&in, candidate.Resource)
+					services[Ref(candidate.Resource)] = candidate
+				}
+			}
+		}
+
+		for _, service := range services {
 			for _, o := range snapshot.Objects {
 				if health.MatchesServicePod(service, o) {
 					addPod(o)
@@ -163,6 +211,95 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 				}
 			}
 		}
+
+		for _, related := range slices.Clone(in.Resources) {
+			o, ok := objects[related.Ref]
+			if !ok {
+				continue
+			}
+
+			for _, candidate := range snapshot.Objects {
+				if health.MatchesHPATarget(candidate, o) {
+					add(&in, candidate.Resource)
+				}
+
+				if health.MatchesHPATarget(o, candidate) {
+					add(&in, candidate.Resource)
+					targetAnchor := anchor(candidate, objects, jobAnchors)
+
+					for _, child := range snapshot.Objects {
+						if anchor(child, objects, jobAnchors) == targetAnchor {
+							add(&in, child.Resource)
+						}
+					}
+				}
+			}
+		}
+
+		addAttachment := func(attachment health.Object) {
+			add(&in, attachment.Resource)
+
+			for _, target := range snapshot.Objects {
+				if health.MatchesAttachmentVolume(attachment, target) || health.MatchesAttachmentNode(attachment, target) {
+					add(&in, target.Resource)
+				}
+			}
+		}
+		addAttachments := func() {
+			for _, related := range slices.Clone(in.Resources) {
+				o, ok := objects[related.Ref]
+				if !ok {
+					continue
+				}
+
+				if o.Kind == "VolumeAttachment" {
+					addAttachment(o)
+				}
+
+				for _, attachment := range snapshot.Objects {
+					if health.MatchesAttachmentVolume(attachment, o) ||
+						related.Ref == in.Anchor && health.MatchesAttachmentNode(attachment, o) {
+						addAttachment(attachment)
+					}
+				}
+			}
+		}
+		addAttachments()
+
+		claims := map[string]health.Object{}
+
+		for _, related := range in.Resources {
+			o, ok := objects[related.Ref]
+			if !ok {
+				continue
+			}
+
+			for _, claim := range snapshot.Objects {
+				if claim.Kind == "PersistentVolumeClaim" && (o.Resource == claim.Resource ||
+					health.MatchesClaimPod(claim, o) || health.MatchesVolumeClaim(o, claim)) {
+					claims[Ref(claim.Resource)] = claim
+				}
+			}
+		}
+
+		a := in.Identities[in.Anchor]
+		storageAnchor := a.Kind == "PersistentVolumeClaim" || a.Kind == "PersistentVolume" || a.Kind == "VolumeAttachment"
+
+		for _, claim := range claims {
+			add(&in, claim.Resource)
+
+			for _, o := range snapshot.Objects {
+				if health.MatchesVolumeClaim(o, claim) {
+					add(&in, o.Resource)
+				}
+
+				if storageAnchor && health.MatchesClaimPod(claim, o) {
+					addPod(o)
+				}
+			}
+		}
+
+		addAttachments()
 
 		nodes := 0
 		for _, o := range snapshot.Objects {
@@ -240,6 +377,16 @@ func Fingerprint(in InvestigationContext) string {
 		PublishNotReady                                   bool
 		Ports                                             []health.Port
 		Endpoints                                         []string
+		Storage                                           health.Storage
+		VolumeName, ClaimRef                              string
+		Claims                                            []string
+		StorageConditions                                 []health.Condition
+		Deleting                                          bool
+		CronJob                                           health.CronJobState
+		HPA                                               health.HPAState
+		HPAConditions                                     []health.Condition
+		Ingress                                           health.IngressState
+		Attachment                                        health.AttachmentState
 	}
 
 	states := []state{}
@@ -254,6 +401,83 @@ func Fingerprint(in InvestigationContext) string {
 		value.Ready, value.Current, value.Misscheduled, value.Partition = o.Ready, o.Current, o.Misscheduled, o.Partition
 		value.UpdateStrategy, value.ServiceType, value.AddressType = o.UpdateStrategy, o.ServiceType, o.AddressType
 		value.Selector, value.PublishNotReady = o.Selector, o.PublishNotReady
+		value.CronJob = o.CronJob
+		value.Attachment = o.Attachment
+		value.Attachment.AttachError.At = time.Time{}
+		value.Attachment.DetachError.At = time.Time{}
+		value.Attachment.DeletingSince = time.Time{}
+
+		if o.Kind == "VolumeAttachment" {
+			value.Deleting = o.Deleting
+		}
+
+		value.Ingress = o.Ingress
+		value.Ingress.Routes = slices.Clone(o.Ingress.Routes)
+		slices.SortFunc(value.Ingress.Routes, func(a, b health.IngressRoute) int {
+			aa, _ := json.Marshal(a)
+			bb, _ := json.Marshal(b)
+
+			return slices.Compare(aa, bb)
+		})
+
+		if o.Kind == "Ingress" {
+			value.Deleting = o.Deleting
+		}
+
+		value.HPA = o.HPA.Clone()
+		value.HPA.CurrentMetrics, value.HPA.LastScale = nil, nil
+		slices.SortFunc(value.HPA.Metrics, func(a, b health.Metric) int {
+			aa, _ := json.Marshal(a)
+			bb, _ := json.Marshal(b)
+
+			return slices.Compare(aa, bb)
+		})
+
+		for _, rules := range []*health.ScalingRules{value.HPA.ScaleUp, value.HPA.ScaleDown} {
+			if rules != nil {
+				slices.SortFunc(rules.Policies, func(a, b health.ScalingPolicy) int {
+					aa, _ := json.Marshal(a)
+					bb, _ := json.Marshal(b)
+
+					return slices.Compare(aa, bb)
+				})
+			}
+		}
+
+		if o.Kind == "HorizontalPodAutoscaler" {
+			value.Deleting = o.Deleting
+			for _, c := range o.Conditions {
+				value.HPAConditions = append(value.HPAConditions, health.Condition{Type: c.Type, Status: c.Status, Reason: c.Reason})
+			}
+
+			slices.SortFunc(value.HPAConditions, func(a, b health.Condition) int {
+				aa, _ := json.Marshal(a)
+				bb, _ := json.Marshal(b)
+
+				return slices.Compare(aa, bb)
+			})
+		}
+
+		value.Storage, value.VolumeName, value.ClaimRef = o.Storage, o.Storage.VolumeName, Ref(o.Storage.Claim)
+		value.Storage.AccessModes = slices.Clone(o.Storage.AccessModes)
+		slices.Sort(value.Storage.AccessModes)
+		value.Claims = slices.Clone(o.Claims)
+		slices.Sort(value.Claims)
+
+		if o.Kind == "PersistentVolumeClaim" || o.Kind == "PersistentVolume" {
+			value.Deleting = o.Deleting
+			for _, c := range o.Conditions {
+				value.StorageConditions = append(value.StorageConditions, health.Condition{Type: c.Type, Status: c.Status, Reason: c.Reason})
+			}
+
+			slices.SortFunc(value.StorageConditions, func(a, b health.Condition) int {
+				aa, _ := json.Marshal(a)
+				bb, _ := json.Marshal(b)
+
+				return slices.Compare(aa, bb)
+			})
+		}
+
 		value.Ports = slices.Clone(o.Ports)
 		slices.SortFunc(value.Ports, func(a, b health.Port) int {
 			aa, _ := json.Marshal(a)

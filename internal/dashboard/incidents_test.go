@@ -3,6 +3,11 @@ Purpose: Test bounded incident projection and revision-scoped dashboard triage.
 Flow: Offline HTTP and object fixtures check complete cluster-scoped pagination,
 schema and size failures, plus human dismiss/restore status patches with
 identity/version preconditions that preserve incident specs and foreign status.
+Storage-family fixtures check PVC/PV display without workload access.
+CronJob fixtures preserve the existing Job-failure family and workload namespace.
+HPA fixtures validate the autoscaling family and its embedded filter without workload reads.
+Ingress fixtures reuse Service availability without changing namespace scope or reading workloads.
+Attachment fixtures retain cluster-scoped anchors in the existing storage family.
 */
 package dashboard
 
@@ -78,6 +83,91 @@ func TestServiceAvailabilityFamily(t *testing.T) {
 	html, err := assets.ReadFile("web/index.html")
 	if err != nil || !strings.Contains(string(html), `<option value="service-availability">Service availability</option>`) {
 		t.Fatal("service family missing from dashboard filter")
+	}
+}
+
+// TestStorageAvailabilityFamily checks PVC/PV decoding and the embedded storage filter without workload access.
+func TestStorageAvailabilityFamily(t *testing.T) {
+	for _, kind := range []string{"PersistentVolumeClaim", "PersistentVolume"} {
+		obj := incidentObject(t, "storage-incident")
+		identity := obj["spec"].(map[string]any)["identity"].(map[string]any)
+		identity["family"] = "storage-availability"
+		anchor := identity["anchor"].(map[string]any)
+		anchor["kind"] = kind
+
+		if kind == "PersistentVolume" {
+			delete(anchor, "namespace")
+		}
+
+		item, err := (&Reader{}).decode(&unstructured.Unstructured{Object: obj})
+		if err != nil || item.Family != "storage-availability" || item.Anchor.Kind != kind ||
+			kind == "PersistentVolume" && item.Anchor.Namespace != "" {
+			t.Fatalf("storage incident rejected or scope changed: %v", err)
+		}
+	}
+
+	html, err := assets.ReadFile("web/index.html")
+	if err != nil || !strings.Contains(string(html), `<option value="storage-availability">Storage availability</option>`) {
+		t.Fatal("storage family missing from dashboard filter")
+	}
+}
+
+// TestCronJobIncident checks CronJob anchors use the existing Job-failure family without changing namespace scope.
+func TestCronJobIncident(t *testing.T) {
+	obj := incidentObject(t, "cronjob-incident")
+	identity := obj["spec"].(map[string]any)["identity"].(map[string]any)
+	identity["family"] = "job-failure"
+	identity["anchor"].(map[string]any)["kind"] = "CronJob"
+
+	item, err := (&Reader{}).decode(&unstructured.Unstructured{Object: obj})
+	if err != nil || item.Family != "job-failure" || item.Anchor.Kind != "CronJob" || item.Anchor.Namespace != "apps" {
+		t.Fatalf("CronJob incident rejected or scope changed: %v", err)
+	}
+}
+
+// TestIngressIncident checks routing problems reuse the Service-availability family and workload namespace.
+func TestIngressIncident(t *testing.T) {
+	obj := incidentObject(t, "ingress-incident")
+	identity := obj["spec"].(map[string]any)["identity"].(map[string]any)
+	identity["family"] = "service-availability"
+	identity["anchor"].(map[string]any)["kind"] = "Ingress"
+
+	item, err := (&Reader{}).decode(&unstructured.Unstructured{Object: obj})
+	if err != nil || item.Family != "service-availability" || item.Anchor.Kind != "Ingress" || item.Anchor.Namespace != "apps" {
+		t.Fatalf("Ingress incident rejected or namespace changed: %v", err)
+	}
+}
+
+// TestAttachmentIncident checks cluster-scoped VolumeAttachment problems reuse the storage-availability family.
+func TestAttachmentIncident(t *testing.T) {
+	obj := incidentObject(t, "attachment-incident")
+	identity := obj["spec"].(map[string]any)["identity"].(map[string]any)
+	identity["family"] = "storage-availability"
+	anchor := identity["anchor"].(map[string]any)
+	anchor["kind"] = "VolumeAttachment"
+	delete(anchor, "namespace")
+
+	item, err := (&Reader{}).decode(&unstructured.Unstructured{Object: obj})
+	if err != nil || item.Family != "storage-availability" || item.Anchor.Kind != "VolumeAttachment" || item.Anchor.Namespace != "" {
+		t.Fatalf("attachment incident rejected or scope changed: %v", err)
+	}
+}
+
+// TestAutoscalingFamily checks HPA incident decoding and the corresponding embedded family filter.
+func TestAutoscalingFamily(t *testing.T) {
+	obj := incidentObject(t, "hpa-incident")
+	identity := obj["spec"].(map[string]any)["identity"].(map[string]any)
+	identity["family"] = "autoscaling"
+	identity["anchor"].(map[string]any)["kind"] = "HorizontalPodAutoscaler"
+
+	item, err := (&Reader{}).decode(&unstructured.Unstructured{Object: obj})
+	if err != nil || item.Family != "autoscaling" || item.Anchor.Kind != "HorizontalPodAutoscaler" || item.Anchor.Namespace != "apps" {
+		t.Fatalf("HPA incident rejected or namespace changed: %v", err)
+	}
+
+	html, err := assets.ReadFile("web/index.html")
+	if err != nil || !strings.Contains(string(html), `<option value="autoscaling">Autoscaling</option>`) {
+		t.Fatal("autoscaling family missing from dashboard filter")
 	}
 }
 

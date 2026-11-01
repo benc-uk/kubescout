@@ -2,7 +2,12 @@
 Purpose: Define projected resource snapshots, evidence policies and findings.
 Flow: Collection and pure checks share these internal types; identity hashes,
 fingerprints, severity helpers and sorting support deterministic evidence
-comparison, not incident identity or authority to change incident lifecycle.
+comparison. Storage facts exclude backend configuration; private claim links
+support correlation, not ownership or authority to change incident lifecycle.
+CronJob scheduling/status facts support interpretation of owned Job evidence.
+HPA facts exclude metric selectors and expose only approved scaling context.
+Ingress facts describe bounded routes without annotations, TLS Secrets or raw load-balancer addresses.
+VolumeAttachment facts retain status/error metadata, never attachment metadata or inline volume specifications.
 */
 package health
 
@@ -52,6 +57,80 @@ type EndpointCounts struct {
 	Terminating int `json:"terminating"`
 }
 
+type Storage struct {
+	Class         string
+	Requested     string
+	Capacity      string
+	Mode          string
+	AccessModes   []string
+	ReclaimPolicy string
+	VolumeName    string   `json:"-"`
+	Claim         Resource `json:"-"`
+}
+
+type CronJobState struct {
+	Schedule, TimeZone, ConcurrencyPolicy string
+	Suspended                             bool
+	StartingDeadline                      *int64
+	SuccessfulHistory, FailedHistory      int32
+	Active                                int
+	LastSchedule, LastSuccess             *time.Time
+}
+
+type Metric struct {
+	Type, Name, Container                 string
+	ObjectVersion, ObjectKind, ObjectName string
+	TargetType, Value, AverageValue       string
+	Utilization                           *int32
+}
+
+type ScalingPolicy struct {
+	Type                 string
+	Value, PeriodSeconds int32
+}
+
+type ScalingRules struct {
+	Stabilization *int32
+	SelectPolicy  string
+	Tolerance     string
+	Policies      []ScalingPolicy
+}
+
+type HPAState struct {
+	TargetVersion, TargetKind, TargetName string
+	Min, Max, Current, Desired            int32
+	ObservedGeneration                    *int64
+	LastScale                             *time.Time
+	Metrics, CurrentMetrics               []Metric
+	ScaleUp, ScaleDown                    *ScalingRules
+}
+
+type IngressRoute struct {
+	Default, ResourceBackend bool
+	Host, Path, PathType     string
+	Service, PortName        string
+	PortNumber               int32
+}
+
+type IngressState struct {
+	Class                  string
+	Routes                 []IngressRoute
+	TLSCount, AddressCount int
+}
+
+type AttachmentError struct {
+	Present, HasCode bool
+	Code             int32
+	At               time.Time
+}
+
+type AttachmentState struct {
+	Attacher, NodeName, VolumeName string
+	Inline, Attached               bool
+	DeletingSince                  time.Time
+	AttachError, DetachError       AttachmentError
+}
+
 // Object is the allow-list shared by collection and pure rules, not a raw API object.
 type Object struct {
 	Resource
@@ -77,6 +156,12 @@ type Object struct {
 	Ports                        []Port
 	AddressType                  string
 	Endpoints                    []Endpoint
+	Storage                      Storage
+	Claims                       []string `json:"-"`
+	CronJob                      CronJobState
+	HPA                          HPAState
+	Ingress                      IngressState
+	Attachment                   AttachmentState
 }
 
 type Snapshot struct {
@@ -96,6 +181,11 @@ type Finding struct {
 	Resource Resource `json:"resource"`
 	Summary  string   `json:"summary"`
 	Evidence []string `json:"evidence"`
+}
+
+// ClusterScoped identifies supported globally observed kinds, independent of workload namespace selection.
+func ClusterScoped(kind string) bool {
+	return kind == "Node" || kind == "PersistentVolume" || kind == "VolumeAttachment"
 }
 
 // DefaultPolicy supplies grace periods, event lookback and a cumulative restart threshold for evidence checks.
