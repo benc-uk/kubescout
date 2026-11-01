@@ -1,6 +1,6 @@
 /*
 Purpose: Verify local incident persistence and storage failure behavior.
-Flow: Offline CLI and Kubernetes HTTP fixtures exercise real writes, no-action,
+Flow: Offline CLI and Kubernetes HTTP fixtures exercise cluster-scoped writes, no-action,
 restart identity and guarded updates from decision fixtures. Missing CRDs or
 permissions stop execution without publishing incidents or switching stores.
 */
@@ -24,11 +24,11 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// TestKubeconfigIncidentPersistence verifies real local creates, no-action and restart-safe updates.
+// TestKubeconfigIncidentPersistence verifies cluster-scoped local creates, no-action and restart-safe updates.
 func TestKubeconfigIncidentPersistence(t *testing.T) {
 	cliEnvironment(t)
 
-	args := []string{"--auth-mode=kubeconfig", "--observer-id=fixture", "--incident-namespace=kubescout"}
+	args := []string{"--auth-mode=kubeconfig", "--observer-id=fixture"}
 
 	c, err := config.Parse(args, os.Getenv, &bytes.Buffer{})
 	if err != nil {
@@ -39,13 +39,13 @@ func TestKubeconfigIncidentPersistence(t *testing.T) {
 
 	var stored *unstructured.Unstructured
 
-	base := "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents"
+	base := "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.URL.Path != base && !strings.HasPrefix(r.URL.Path, base+"/") {
-			t.Error("incident API request escaped the configured namespace")
+			t.Error("incident API request escaped the cluster-scoped Incident endpoint")
 			w.WriteHeader(http.StatusBadRequest)
 
 			return
@@ -84,8 +84,8 @@ func TestKubeconfigIncidentPersistence(t *testing.T) {
 				return
 			}
 
-			if stored.GetKind() != "Incident" || stored.GetNamespace() != "kubescout" || stored.Object["status"] != nil {
-				t.Error("local writes must create only a namespaced Incident spec")
+			if stored.GetKind() != "Incident" || stored.GetNamespace() != "" || stored.Object["status"] != nil {
+				t.Error("local writes must create only a cluster-scoped Incident spec")
 			}
 
 			stored.SetUID("incident-uid")
@@ -222,7 +222,7 @@ func TestCLIIncidentIndexFailureStopsExecution(t *testing.T) {
 					return client, "fixture", nil
 				})
 
-				if code != 1 || incidentReads.Load() != 1 || !strings.Contains(diag.String()+out.String(), "check Incident CRD, namespace and RBAC") {
+				if code != 1 || incidentReads.Load() != 1 || !strings.Contains(diag.String()+out.String(), "check cluster-scoped Incident CRD and RBAC") {
 					t.Fatalf("storage failure silently downgraded: code=%d stdout=%s stderr=%s", code, &out, &diag)
 				}
 

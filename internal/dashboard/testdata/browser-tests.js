@@ -56,7 +56,8 @@ try {
   assert(!document.querySelector(".observation-note"), "no redundant footer disclaimer");
   assert($("counts-title").classList.contains("sr-only") && $("counts-stale").closest(".severity-strip")
     && !$("counts-stale").closest(".sr-only"), "severity heading is hidden visually while stale counts remain visible");
-  const overviewNodes = [$("namespace"), document.querySelector(".counts"), $("freshness"), $("refresh")];
+  assert(!$("incident-scope") && !$("namespace"), "no redundant incident scope or storage namespace label");
+  const overviewNodes = [document.querySelector(".counts"), $("freshness"), $("refresh")];
   const overviewCenters = overviewNodes.map((node) => {
     const rect = node.getBoundingClientRect();
     return rect.top + rect.height / 2;
@@ -64,7 +65,7 @@ try {
   assert(overviewNodes.every((node) => node.closest(".connection"))
     && Math.max(...overviewCenters) - Math.min(...overviewCenters) <= 2
     && document.querySelector(".connection").getBoundingClientRect().height <= 80,
-    "namespace, severity counts, freshness and refresh share one compact desktop bar");
+    "severity counts, freshness and refresh share one compact desktop bar");
   document.querySelector('[data-severity="low"]').click();
   assert($("severity").value === "low" && $("state").value === "open"
     && document.querySelector('[data-severity="low"]').getAttribute("aria-pressed") === "true",
@@ -113,6 +114,8 @@ try {
   else localStorage.setItem("kubescout-dashboard-theme", previousTheme);
   const rawSnapshot = await (await fetch("/api/incidents")).json();
   assert(Array.isArray(rawSnapshot.incidents) && !("items" in rawSnapshot), "incident API returns an incidents collection");
+  assert(!("namespace" in rawSnapshot) && rawSnapshot.incidents.every((item) => !("namespace" in item)),
+    "cluster-scoped incident API omits storage namespaces");
   const data = validateSnapshot(rawSnapshot);
   const defaults = { search: "", state: "open", severity: "", family: "", namespace: "", sort: "severity", direction: "desc" };
   const selected = selectIncidents(data.incidents, defaults);
@@ -205,8 +208,8 @@ try {
   assert(titles().length === 1 && titles()[0].includes("03"), "service availability family filter");
   $("reset-filters").click();
   set("workload-namespace", "payments");
-  assert(titles().length === selectIncidents(data.incidents, { ...defaults, namespace: "payments" }).length
-    && $("namespace").textContent === data.namespace, "namespace dropdown filters workloads without changing incident-storage namespace");
+  assert(titles().length === selectIncidents(data.incidents, { ...defaults, namespace: "payments" }).length,
+    "namespace dropdown filters workloads");
   $("reset-filters").click();
   set("workload-namespace", clusterScope);
   assert(titles().length === 1 && titles()[0].includes("01"), "workload namespace distinguishes cluster-scoped resources");
@@ -269,7 +272,7 @@ try {
   const namespaceValue = problemNamespace.nextElementSibling;
   assert(resourceName.querySelector("code").textContent === data.incidents[0].anchor.name
     && namespaceValue.querySelector("code").textContent === "apps"
-    && !$("incident-rows").querySelector(".copy-button") && !$("namespace").querySelector(".copy-button"),
+    && !$("incident-rows").querySelector(".copy-button") && !document.querySelector(".connection .copy-button"),
     "exact resource names and namespaces are copyable only in the details view");
   const affectedResources = [...$("detail-content").querySelectorAll(".detail-section")].find((node) =>
     node.querySelector("h3")?.textContent === "Affected resources");

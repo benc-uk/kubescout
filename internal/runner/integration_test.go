@@ -1,7 +1,7 @@
 /*
 Purpose: Exercise collection, tool-assisted AI and incident persistence together.
 Flow: Offline Kubernetes and model HTTP fixtures drive the real collector,
-Responses agent and reconciler through namespace scopes and Pod/Service cases.
+Responses agent and reconciler through workload namespace scopes, cluster-scoped Incidents and Pod/Service cases.
 Assertions check collection-failure retention, projected evidence with named citations and
 AI-authored stored Incidents and readable activity; no live cluster or model is contacted.
 */
@@ -134,9 +134,18 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 		w.Header().Set("Content-Type", "application/json")
 
 		if strings.Contains(r.URL.Path, "/incidents") {
+			if !strings.HasPrefix(r.URL.Path, "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents") {
+				t.Error("incident request must be cluster-scoped")
+			}
+
 			if r.Method == "POST" {
 				creates.Add(1)
 				json.NewDecoder(r.Body).Decode(&stored)
+
+				if _, exists := stored["metadata"].(map[string]any)["namespace"]; exists {
+					t.Error("incident create must omit metadata.namespace")
+				}
+
 				w.WriteHeader(201)
 				json.NewEncoder(w).Encode(stored)
 
@@ -254,7 +263,7 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 	var out, diag bytes.Buffer
 
 	r := Runner{Config: cfg, Source: kube.NewSource(client, cfg), Analyzer: &analysis.Analyzer{Config: cfg, Kubernetes: client},
-		Incidents: incident.Reconciler{Repository: incident.Kubernetes{Client: client, Namespace: "kubescout", Observer: "fixture", Limit: 100, Timeout: time.Second}, Observer: "fixture", Model: "fixture"},
+		Incidents: incident.Reconciler{Repository: incident.Kubernetes{Client: client, Observer: "fixture", Limit: 100, Timeout: time.Second}, Observer: "fixture", Model: "fixture"},
 		Output:    &output.Writer{Out: &out, Err: &diag}}
 	if code := r.Once(t.Context()); code != 0 {
 		t.Fatalf("code=%d out=%s diag=%s", code, &out, &diag)

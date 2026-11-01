@@ -2,7 +2,7 @@
 Purpose: Exercise configuration validation and repository-root dotenv precedence.
 Flow: Offline argument tables, synthetic environment values and filesystem fixtures
 check namespace filters, authentication, logging/colour controls, configurable tool budgets, endpoint and model requirements.
-Removed runtime modes are rejected without contacting Kubernetes or a model.
+Removed runtime modes and incident-storage namespace options are rejected without contacting Kubernetes or a model.
 */
 package config
 
@@ -135,7 +135,7 @@ func TestConfiguration(t *testing.T) {
 		{"wildcard ns", []string{"--namespace-watch=*"}, true},
 		{"empty ns", []string{"--namespace-watch="}, true},
 		{"removed namespace alias", []string{"--namespace=apps"}, true},
-		{"incident namespace", []string{"--incident-namespace=observer"}, false},
+		{"removed incident namespace", []string{"--incident-namespace=observer"}, true},
 		{"empty incident namespace", []string{"--incident-namespace="}, true},
 		{"wildcard incident namespace", []string{"--incident-namespace=*"}, true},
 		{"invalid incident namespace", []string{"--incident-namespace=bad/name"}, true},
@@ -162,14 +162,6 @@ func TestConfiguration(t *testing.T) {
 
 			if test.name == "default watch" && c.MaxToolCalls != 64 || test.name == "tool cap override" && c.MaxToolCalls != 16 {
 				t.Fatal("tool-call limit default or override ignored")
-			}
-
-			if test.name == "default watch" && c.IncidentNamespace != "kubescout" {
-				t.Fatal("unexpected report namespace default")
-			}
-
-			if test.name == "incident namespace" && c.IncidentNamespace != "observer" {
-				t.Fatal("report namespace override ignored")
 			}
 		})
 	}

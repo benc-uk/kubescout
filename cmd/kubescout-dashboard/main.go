@@ -1,6 +1,6 @@
 /*
 Purpose: Bootstrap the standalone dashboard with explicit Kubernetes authentication.
-Flow: Validate flags, select the bind address and serve namespaced Incident
+Flow: Validate flags, select the bind address and serve cluster-scoped Incident
 views and human triage until shutdown, reporting startup failures through exit codes.
 The dashboard runs separately from AI investigation and incident-spec publication.
 */
@@ -19,7 +19,6 @@ import (
 	"syscall"
 
 	"github.com/benc-uk/kubescout/internal/dashboard"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -36,7 +35,6 @@ func main() {
 func run(ctx context.Context, args []string, stderr io.Writer, client func(dashboard.ClientOptions) (dynamic.Interface, error), listen func(string, string) (net.Listener, error)) int {
 	flags := flag.NewFlagSet("kubescout-dashboard", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	namespace := flags.String("namespace", "kubescout", "Namespace containing Incidents")
 
 	var options dashboard.ClientOptions
 	flags.StringVar(&options.AuthMode, "auth-mode", "in-cluster", "Kubernetes authentication: in-cluster (:8000) or kubeconfig (127.0.0.1:8000)")
@@ -51,8 +49,8 @@ func run(ctx context.Context, args []string, stderr io.Writer, client func(dashb
 		return 2
 	}
 
-	if flags.NArg() != 0 || len(validation.IsDNS1123Label(*namespace)) != 0 {
-		fmt.Fprintln(stderr, "ERROR: expected one valid --namespace and no positional arguments")
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "ERROR: unexpected positional arguments")
 		return 2
 	}
 
@@ -67,11 +65,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, client func(dashb
 		return 1
 	}
 
-	reader, err := dashboard.NewReader(kube, *namespace)
-	if err != nil {
-		fmt.Fprintln(stderr, "ERROR:", err)
-		return 2
-	}
+	reader := dashboard.NewReader(kube)
 
 	address := ":8000"
 	if options.AuthMode == "kubeconfig" {
@@ -85,7 +79,7 @@ func run(ctx context.Context, args []string, stderr io.Writer, client func(dashb
 	}
 
 	logger := log.New(stderr, "", 0)
-	logger.Printf("INFO: dashboard with human triage listening on %s for namespace %s", address, *namespace)
+	logger.Printf("INFO: dashboard with human triage listening on %s for cluster-scoped Incidents", address)
 
 	if err := dashboard.Serve(ctx, listener, dashboard.Handler(reader, logger), stderr); err != nil {
 		logger.Print("ERROR: dashboard HTTP server failed")

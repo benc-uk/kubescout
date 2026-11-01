@@ -28,7 +28,7 @@ KUBECTL ?= kubectl
 help: ## 📖 Show available targets
 	@awk 'BEGIN {FS = ":.*## "; print "\n☸ KubeScout · Your AI Kubernetes investigator.\n"} \
 		/^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2} \
-		END {print "\nExample (real AI calls and persisted Incidents):\n  make incidents-setup\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps ALLOW_MODEL=yes\n\nLocal defaults: current kubeconfig context, all namespaces, OBSERVER_ID=local-dev-<username>\nLocal credentials need get/list/create/patch access to Incidents in kubescout.\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nALLOW_MODEL=yes is a Make confirmation gate; model credentials are still required.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md for getting started; docs/operations.md for configuration and deployment;\ndocs/development.md for the Make reference, prerequisites and tests.\n"}' $(MAKEFILE_LIST)
+		END {print "\nExample (real AI calls and persisted Incidents):\n  make incidents-setup\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps ALLOW_MODEL=yes\n\nLocal defaults: current kubeconfig context, all workload namespaces, OBSERVER_ID=local-dev-<username>\nLocal credentials need get/list/create/patch access to cluster-scoped Incidents.\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nALLOW_MODEL=yes is a Make confirmation gate; model credentials are still required.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md for getting started; docs/operations.md for configuration and deployment;\ndocs/development.md for the Make reference, prerequisites and tests.\n"}' $(MAKEFILE_LIST)
 
 setup: ## 📦 Download pinned Go dependencies and install the linter
 	$(GO) mod download
@@ -97,7 +97,7 @@ kind-load: ## ☸ Import IMAGE into kind's KIND_CLUSTER (does not deploy)
 		mv build/out/kubescout.tar.tmp build/out/kubescout.tar
 	KIND_EXPERIMENTAL_PROVIDER="$(KIND_PROVIDER)" $(KIND) load image-archive build/out/kubescout.tar --name "$(KIND_CLUSTER)"
 
-incidents-setup: ## ☸ Install Incident namespace and CRD only (current context; no agent/model)
+incidents-setup: ## ☸ Install runtime namespace and cluster-scoped Incident CRD (no agent/model)
 	$(KUBECTL) apply -f deploy/namespace.yaml
 	$(KUBECTL) apply -f deploy/incidents-crd.yaml
 	$(KUBECTL) wait --for=condition=Established --timeout=60s crd/incidents.kubescout.benc-uk.github.com
@@ -120,7 +120,7 @@ dash-build: ## 🔨 Build the standalone dashboard (no JavaScript build step)
 	$(GO) build -trimpath -o build/bin/kubescout-dashboard ./cmd/kubescout-dashboard
 
 dash-run: dash-build ## 🌐 Run the KubeScout dashboard locally on 127.0.0.1:8000 (current context)
-	./build/bin/kubescout-dashboard --auth-mode=kubeconfig --namespace=kubescout
+	./build/bin/kubescout-dashboard --auth-mode=kubeconfig
 
 dash-image: ## 📦 Build the separate non-root DASHBOARD_IMAGE
 	$(CONTAINER_ENGINE) build $(if $(filter podman,$(notdir $(CONTAINER_ENGINE))),--ignorefile build/Dockerfile.dashboard.dockerignore,) \

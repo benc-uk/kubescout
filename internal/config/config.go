@@ -2,7 +2,7 @@
 Purpose: Define and validate runtime options, namespace selection and model settings.
 Flow: Combine CLI flags and environment values into collection, evidence-policy,
 logging/console colour and AI limits; repository-root dotenv loading preserves existing values.
-Configuration requires AI settings and rejects removed runtime modes.
+Configuration requires AI settings; cluster-scoped Incidents have no storage namespace option.
 */
 package config
 
@@ -25,7 +25,7 @@ import (
 
 type Config struct {
 	Once, AILog                                                          bool
-	Auth, Context, Kubeconfig, IncidentNamespace, ObserverID             string
+	Auth, Context, Kubeconfig, ObserverID                                string
 	LogLevel, LogColor, AILogDir                                         string
 	NamespaceWatch, NamespaceIgnore                                      []string
 	RequestTimeout, RunTimeout, BatchWindow, CheckInterval, WatchTimeout time.Duration
@@ -91,8 +91,8 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 		switch name {
 		case "--deterministic-only":
 			return c, errors.New("--deterministic-only was removed; the runtime requires AI configuration, and offline tests use fixtures")
-		case "--report-namespace":
-			return c, errors.New("--report-namespace was replaced by --incident-namespace; HealthReport publication has been removed")
+		case "--report-namespace", "--incident-namespace":
+			return c, errors.New(name + " was removed; Incident records are cluster-scoped")
 		case "--report-file", "--output-file":
 			return c, errors.New(name + " was removed; incidents are stored in Kubernetes CRDs, not console/file exports; --ai-log-dir selects diagnostic AI transcripts")
 		case "--simulate-incidents":
@@ -118,7 +118,6 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	f.StringVar(&c.LogColor, "log-color", "always", "ANSI console colour: always or never (including pod logs and redirected output)")
 	f.BoolVar(&c.AILog, "ai-log", true, "Capture rotating AI transcripts; use --ai-log=false to disable")
 	f.StringVar(&c.AILogDir, "ai-log-dir", "logs", "Private AI transcript directory (10 files of at most 10 MiB)")
-	f.StringVar(&c.IncidentNamespace, "incident-namespace", "kubescout", "Namespace for persisted Incident records")
 	f.StringVar(&c.ObserverID, "observer-id", "", "Required stable unique identity for this cluster and observation scope")
 	f.DurationVar(&c.InvestigationTimeout, "investigation-timeout", 120*time.Second, "Whole AI investigation deadline")
 	f.DurationVar(&c.Cooldown, "incident-cooldown", 2*time.Minute, "Coalesce ordinary changes in the same incident")
@@ -189,10 +188,6 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	c.NamespaceWatch, c.NamespaceIgnore = watch, ignore
 	slices.Sort(c.NamespaceWatch)
 	slices.Sort(c.NamespaceIgnore)
-
-	if len(validation.IsDNS1123Label(c.IncidentNamespace)) != 0 {
-		return c, errors.New("--incident-namespace must be a valid explicit namespace name")
-	}
 
 	if c.ObserverID == "" || len(validation.IsDNS1123Label(c.ObserverID)) != 0 {
 		return c, errors.New("--observer-id must be a stable explicit DNS label unique to this cluster and scope")

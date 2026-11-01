@@ -66,6 +66,9 @@ consistently by resource category:
 | [jobs.go](internal/health/jobs.go) | Terminal Job failure conditions. |
 | [events.go](internal/health/events.go) | Recent Warning Events as supporting evidence. |
 
+See [Resources and health checks](docs/resources-and-checks.md) for the complete
+collection inventory, retained facts, rule IDs, thresholds and exclusions.
+
 ### Resource semantics
 
 ReplicaSets establish ownership rather than a separate incident category.
@@ -181,6 +184,12 @@ unrestricted semantic grouping across unrelated workloads.
 Names use `inc-<identity-hash>`. Individual finding IDs, model wording and
 per-run identifiers do not determine incident identity.
 
+Incidents are cluster-scoped and have no storage namespace. Namespace fields
+remain on workload anchors and affected resources. The agent's runtime namespace
+contains its Deployment, ServiceAccount and model Secret, not its incident
+records. Agent Incident access uses a dedicated ClusterRole/ClusterRoleBinding;
+observer ownership is validated by the application, not isolated by RBAC.
+
 | [Incident CRD](deploy/incidents-crd.yaml) field | Responsibility |
 |---|---|
 | `spec.identity` | Immutable observer, verified anchor and problem family |
@@ -261,9 +270,10 @@ failures, new observations and the AI conclusion can delay or prevent a change.
 
 ### Dashboard contracts
 
-The [dashboard](internal/dashboard/) reads all observers' incidents from one
-storage namespace. Workload-namespace filtering uses anchor and affected-resource
-namespaces without widening that API scope. It cannot read workloads, AI
+The [dashboard](internal/dashboard/) reads all observers' cluster-scoped incidents.
+Workload-namespace filtering uses anchor and affected-resource namespaces without
+changing that cluster-wide API scope. Incident summaries and snapshots have no
+storage-namespace field. It cannot read workloads, AI
 credentials, tool evidence or revision history, call AI, create/delete incidents
 or write their specs.
 
@@ -278,7 +288,9 @@ UID/resourceVersion preconditions prevent triaging a newer revision or recreated
 object. Only `status.triage` is patched; spec, labels, lifecycle and other status
 fields are preserved. Uncertain writes are not retried automatically.
 RBAC permits status-subresource patches more broadly than one field; the
-application enforces triage-only ownership.
+application enforces triage-only ownership. Incident access uses dedicated
+ClusterRoles and ClusterRoleBindings; workload filters and observer labels are
+not authorization boundaries.
 
 Reads fail on incomplete, malformed or oversized snapshots, not partial success.
 The browser renders text safely and retains last successful data with an explicit
@@ -325,7 +337,7 @@ for flags, privacy, retention, ephemeral storage and retrieval.
 | [internal/incident](internal/incident/) | Correlation, domain types, lifecycle and Kubernetes reconciliation |
 | [internal/runner](internal/runner/) | Candidate scheduling, recovery review and stale-result rejection |
 | [internal/output](internal/output/) | Human-readable activity logs and bounded diagnostic transcripts |
-| [internal/dashboard](internal/dashboard/) | Namespaced Incident reads, human triage and embedded browser UI |
+| [internal/dashboard](internal/dashboard/) | Cluster-scoped Incident reads, human triage and embedded browser UI |
 | [build/](build/) | Separate pinned images and allow-listed build contexts |
 | [deploy/](deploy/) | Incident schema, agent Deployment and RBAC |
 | [deploy/dashboard/](deploy/dashboard/) | Independent dashboard Deployment, Service and triage RBAC |

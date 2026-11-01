@@ -53,25 +53,32 @@ rejects kubeconfig flags. Local Make run/deploy/dashboard targets use the curren
 context; `CONTEXT` is only a Make variable for live integration tests.
 
 The agent needs read access to Nodes, Pods, Deployments, ReplicaSets, StatefulSets,
-DaemonSets, Services, EndpointSlices, Jobs and Warning Events. Refer to the
+DaemonSets, Services, EndpointSlices, Jobs and Warning Events. See
+[Resources and health checks](resources-and-checks.md) for the collected facts
+and checks, including grace periods and exceptions. Refer to the
 [agent RBAC](../deploy/rbac.yaml) for exact resource verbs. Incident permissions
-are `get`, `list`, `create` and `patch` in the incident-storage namespace:
+are `get`, `list`, `create` and `patch` on cluster-scoped Incidents:
 
 ```bash
-kubectl auth can-i get incidents.kubescout.benc-uk.github.com -n kubescout
-kubectl auth can-i list incidents.kubescout.benc-uk.github.com -n kubescout
-kubectl auth can-i create incidents.kubescout.benc-uk.github.com -n kubescout
-kubectl auth can-i patch incidents.kubescout.benc-uk.github.com -n kubescout
+kubectl auth can-i get incidents.kubescout.benc-uk.github.com
+kubectl auth can-i list incidents.kubescout.benc-uk.github.com
+kubectl auth can-i create incidents.kubescout.benc-uk.github.com
+kubectl auth can-i patch incidents.kubescout.benc-uk.github.com
 ```
 
 `make incidents-setup` requires namespace/CRD apply permissions. It installs the
-`kubescout` namespace and Incident CRD and waits for establishment, but does not
+`kubescout` runtime namespace and cluster-scoped Incident CRD and waits for establishment, but does not
 grant workload/incident permissions, create a model Secret or start an agent.
 
-The dashboard needs `get`/`list` on Incidents in its selected namespace.
+The dashboard needs cluster-scoped `get`/`list` on Incidents.
 Dismissal/restore additionally requires `patch` on `incidents/status`. Read-only
 credentials allow browsing; write failures appear explicitly. Human triage is
 a real Kubernetes status write in either authentication mode.
+
+Agent and dashboard Incident permissions use separate ClusterRoles and
+ClusterRoleBindings. Their ServiceAccounts remain in the runtime namespace.
+No additional workload write permissions are granted. Observer labels and
+workload-namespace filters do not isolate incident access between teams.
 
 ### Namespace scope and observer identity
 
@@ -100,10 +107,11 @@ Changing it creates separate incident identities; it does not adopt old records.
 Use a new ID when changing scope, and do not run competing replicas with one ID.
 Out-of-scope stored incidents are not treated as recovered.
 
-`--incident-namespace` selects where incidents are stored (default `kubescout`),
-not which workloads are watched. The dashboard's `--namespace` independently
-selects one incident-storage namespace across observers and lifecycle states.
-Its workload-namespace filter does not change Kubernetes API scope.
+Incidents are cluster-scoped and have no `metadata.namespace`. The agent's
+`--incident-namespace` and dashboard's `--namespace` options have been removed.
+The dashboard reads all observers and lifecycle states; its workload-namespace
+filter uses anchor and affected-resource namespaces without changing Kubernetes
+API scope. Agent workload namespace selection is unchanged.
 
 ## Local operation
 
@@ -135,15 +143,7 @@ through `ARGS`. A direct run can select a context explicitly:
   --namespace-watch=apps,backend --observer-id=kind-apps-backend
 ```
 
-For a custom incident namespace, create it separately, grant the needed access
-and pass `ARGS='--incident-namespace=your-namespace'`. Point the dashboard there too:
-
-```bash
-make dash-build
-./build/bin/kubescout-dashboard --auth-mode=kubeconfig --namespace=your-namespace
-```
-
-For the default namespace, `make dash-run` builds and serves the dashboard at
+`make dash-run` builds and serves the cluster-wide incident dashboard at
 http://127.0.0.1:8000. No image, Deployment or port-forward is needed locally.
 The CRD must exist; running the dashboard does not start the agent.
 
@@ -177,7 +177,7 @@ Review [the Deployment](../deploy/deployment.yaml) and [RBAC](../deploy/rbac.yam
 - All namespaces by default. Configure at most one explicit `NAMESPACE_WATCH`
   or `NAMESPACE_IGNORE` environment entry. These entries override same-named
   keys from the Secret's `envFrom`.
-- Incident namespace `kubescout`; workload reads and incident writes have separate RBAC.
+- Cluster-scoped Incidents; workload reads and incident writes have separate RBAC.
 - Model budget **300 requests/hour** in the manifest, versus the binary's default 60.
 - One active replica, with a Recreate strategy; the checked-in replica count is zero.
 
@@ -187,7 +187,7 @@ With model settings in `.env`, run:
 make model-secret
 make deploy ALLOW_MODEL=yes
 kubectl -n kubescout rollout status deployment/kubescout
-kubectl -n kubescout get incidents
+kubectl get incidents
 kubectl -n kubescout logs deployment/kubescout -c agent
 ```
 
@@ -236,7 +236,7 @@ make dash-forward
 ```
 
 Open http://127.0.0.1:8000. The independent Deployment, ClusterIP Service,
-ServiceAccount and namespaced RBAC do not start/scale the agent or mount model
+ServiceAccount and cluster-scoped incident RBAC do not start/scale the agent or mount model
 credentials.
 
 **There is no application login or TLS.** Use localhost port-forward in a trusted
@@ -245,12 +245,11 @@ in-cluster clients can read incidents and dismiss/restore them. Same-origin
 browser protections are not access control. Browser clients never receive the
 ServiceAccount token.
 
-To read a different incident-storage namespace, change the dashboard's
-`--namespace` and the Role/RoleBinding namespaces. The RoleBinding subject still
-identifies the ServiceAccount in its deployment namespace. To move the dashboard
-itself, also update Deployment, Service and ServiceAccount namespaces, create the
-destination namespace separately, and adjust port-forward commands. The Make
-helpers target `kubescout`.
+There is no incident-storage namespace to select. To move the dashboard itself,
+update Deployment, Service and ServiceAccount namespaces and the
+ClusterRoleBinding subject's namespace. Keep the ClusterRole and
+ClusterRoleBinding metadata namespace-free. Create the destination namespace
+separately and adjust port-forward commands; the Make helpers target `kubescout`.
 
 ### Updates and shutdown
 
@@ -273,8 +272,19 @@ make dash-undeploy
 ```
 
 These preserve incidents, the model Secret, namespace and CRD. **Do not use
-`kubectl delete -k deploy` as a shutdown command:** deleting the namespace or CRD
-destroys stored data.
+`kubectl delete -k deploy` as a shutdown command:** deleting the CRD deletes
+all Incident records. Deleting the runtime namespace no longer deletes
+cluster-scoped Incidents, but still destroys namespaced runtime resources,
+including model credentials.
+
+**Development-only scope reset:** namespaced Incident installations cannot be
+upgraded by applying the new scope. Stop the agent and dashboard, explicitly
+delete the old Incident CRD and its records, then install the new cluster-scoped
+CRD and updated RBAC/binaries. Remove obsolete namespaced incident
+Roles/RoleBindings separately. This is destructive: there is no migration,
+record restoration or preservation of history/triage. No Make target or agent
+startup performs the reset automatically; use a fresh development cluster if
+you do not want to reset an existing one.
 
 For older installations, stop the old producer before activating this agent.
 Legacy HealthReport records are not converted, modified or deleted; export or
@@ -283,8 +293,9 @@ report-write RBAC deliberately. Lifecycle records using `phase` require explicit
 migration to `state`; there is no automatic fallback.
 
 Removed flags include `--deterministic-only`, `--report-namespace`, `--report-file`,
-`--output-file` and `--simulate-incidents`. Use AI configuration and
-`--incident-namespace`; diagnostic transcripts are not an incident export format.
+`--output-file`, `--simulate-incidents` and `--incident-namespace`; the dashboard
+also rejects its former `--namespace` option. Use AI configuration and workload
+namespace filters; diagnostic transcripts are not an incident export format.
 The current dashboard resources are named `kubescout-dashboard`. Deploying them
 does not retire an older `k8s-dashboard` installation; remove that separately
 after verification.
@@ -304,8 +315,8 @@ explicit choice is remembered.
   **Overview** shows diagnosis, explanation, recommendations and uncertainty;
   **Resources** lists affected resources; **Record** shows lifecycle, provenance
   and copyable identifiers.
-- The **Problem namespace** belongs to the anchor resource, not the incident
-  storage namespace. Node incidents show `Cluster-scoped`.
+- The **Problem namespace** belongs to the anchor resource. Incident records
+  themselves have no namespace; Node problems show `Cluster-scoped`.
 - Use Left/Right or Home/End within the tabs. Refresh retains the tab and scroll
   position; another incident opens on Overview. Escape, the backdrop or Close
   returns focus to the list. The modal is designed for desktop, not a separate
@@ -327,7 +338,7 @@ Failures retain the last successful data with a stale warning; initial failures
 and deleted/missing incidents are explicit. **An empty list does not prove cluster
 health or agent activity.**
 
-The dashboard reads one complete snapshot, bounded to 1,000 stored incidents
+The dashboard reads one complete cluster-wide snapshot, bounded to 1,000 stored incidents
 (including resolved), 100-record Kubernetes pages and a 10-second deadline.
 Upstream and encoded responses are capped at 8 MiB. Oversized/incomplete snapshots
 fail rather than displaying a partial list. Larger histories require deliberate
@@ -372,8 +383,8 @@ byte or deadline ceilings. Run `./build/bin/kubescout --help` for the full flag 
 **Read incidents from Kubernetes, not logs:**
 
 ```bash
-kubectl -n kubescout get incidents
-kubectl -n kubescout get incident <name> -o yaml
+kubectl get incidents
+kubectl get incident <name> -o yaml
 ```
 
 Console events have UTC timestamps, levels, correlation IDs and origin/phase
@@ -443,7 +454,7 @@ permissions and exposes no log HTTP endpoint.
 | Provider HTTP failure | Authentication (401/403), rate limit (429) or HTTP category; provider bodies are intentionally excluded |
 | Tool limit reached | `local_tool_call_limit`, other `local_tool_*` or `local_cumulative_tool_bytes` categories; examine observed/allowed amounts |
 | Existing incident not resolving | Watch mode, continuous fresh recovery, budgets and an AI resolution decision are required |
-| Dashboard stale or failing | CRD/read permissions, one-namespace scope and complete-snapshot limits |
+| Dashboard stale or failing | Cluster-scoped CRD/read permissions, ClusterRoleBinding and complete-snapshot limits |
 | Dismiss/restore fails | Status-patch permission or stale displayed version; refresh before retrying |
 | Capture incomplete | Writable transcript directory, storage capacity and capture-recovery messages |
 | Image fails to start/pull | Architecture, registry access, rendered image tag, pull policy and kind import destination |

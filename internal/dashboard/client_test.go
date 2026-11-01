@@ -2,7 +2,7 @@
 Purpose: Test dashboard authentication selection and incident-read HTTP flow.
 Flow: Offline TLS servers and generated kubeconfig fixtures exercise explicit
 and current contexts, authentication failures without fallback, and sanitized
-read errors through the client and handler; no live credentials are required.
+cluster-scoped read errors through the client and handler; no live credentials are required.
 */
 package dashboard
 
@@ -52,7 +52,7 @@ func writeKubeconfig(t *testing.T, server *httptest.Server, current string) stri
 }
 
 // TestKubeconfigReadOnlyHTTPFlow checks explicit and current context selection through local TLS fixtures.
-// It verifies scoped authenticated reads and browser responses without raw metadata or fixture credentials.
+// It verifies cluster-scoped authenticated reads and responses without raw metadata or fixture credentials.
 func TestKubeconfigReadOnlyHTTPFlow(t *testing.T) {
 	item := incidentObject(t, "incident-local")
 
@@ -69,12 +69,12 @@ func TestKubeconfigReadOnlyHTTPFlow(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
-		case "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents":
+		case "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents":
 			writePage(w, []map[string]any{item}, "42", "")
-		case "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents/incident-local":
+		case "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents/incident-local":
 			_ = json.NewEncoder(w).Encode(item)
 		default:
-			t.Error("request escaped configured namespace or Incident scope")
+			t.Error("request escaped cluster-scoped Incident endpoints")
 			http.NotFound(w, r)
 		}
 	}))
@@ -108,10 +108,7 @@ func TestKubeconfigReadOnlyHTTPFlow(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			reader, err := NewReader(client, "kubescout")
-			if err != nil {
-				t.Fatal(err)
-			}
+			reader := NewReader(client)
 
 			server := httptest.NewServer(Handler(reader, log.New(io.Discard, "", 0)))
 			defer server.Close()
@@ -197,10 +194,7 @@ func TestKubeconfigPreservesReadErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader, err := NewReader(client, "kubescout")
-	if err != nil {
-		t.Fatal(err)
-	}
+	reader := NewReader(client)
 
 	_, err = reader.List(context.Background())
 	assertCode(t, err, "access_denied")

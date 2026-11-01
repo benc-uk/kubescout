@@ -5,10 +5,9 @@ metadata:
   namespace: kubescout
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: kubescout-dashboard
-  namespace: kubescout
 rules:
   - apiGroups: ["kubescout.benc-uk.github.com"]
     resources: ["incidents"]
@@ -18,13 +17,12 @@ rules:
     verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: kubescout-dashboard
-  namespace: kubescout
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: Role
+  kind: ClusterRole
   name: kubescout-dashboard
 subjects:
   - kind: ServiceAccount

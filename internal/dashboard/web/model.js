@@ -52,7 +52,7 @@ function isResource(resource) {
 }
 
 function isSummary(item) {
-  return item && ["name", "namespace", "title", "observer", "family", "impact"].every((key) => typeof item[key] === "string")
+  return item && ["name", "title", "observer", "family", "impact"].every((key) => typeof item[key] === "string")
     && typeof item.dismissed === "boolean" && /^[a-f0-9]{64}$/.test(item.version)
     && severities.includes(item.severity) && ["open", "resolved"].includes(item.lifecycle?.state)
     && Number.isFinite(Date.parse(item.lifecycle.raised_at)) && Number.isFinite(Date.parse(item.lifecycle.updated_at))
@@ -60,7 +60,7 @@ function isSummary(item) {
 }
 
 export function validateSnapshot(data) {
-  if (!data || typeof data.namespace !== "string" || !Number.isFinite(Date.parse(data.fetched_at))
+  if (!data || !Number.isFinite(Date.parse(data.fetched_at))
       || !Array.isArray(data.incidents) || data.incidents.length > 1000 || !data.incidents.every(isSummary)) {
     throw new Error("The dashboard returned invalid incident data.");
   }

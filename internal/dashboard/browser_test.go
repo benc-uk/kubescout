@@ -1,6 +1,6 @@
 /*
 Purpose: Provide an opt-in, loopback-only dashboard browser-test harness.
-Flow: In-memory incidents and test routes supply desktop modal checks with namespace,
+Flow: In-memory cluster-scoped incidents supply desktop modal checks with workload namespace,
 empty detail lists, rendering, error, latency and revision-scoped triage scenarios. The harness
 serves until signalled and never contacts a live cluster or model.
 */
@@ -41,10 +41,10 @@ func (s *browserSource) List(context.Context) (Snapshot, error) {
 
 	s.requests++
 	if s.mode == "error" {
-		return Snapshot{}, &APIError{503, "access_denied", "Fixture: check namespace RBAC."}
+		return Snapshot{}, &APIError{503, "access_denied", "Fixture: check cluster-scoped incident RBAC."}
 	}
 
-	result := Snapshot{Namespace: "kubescout", FetchedAt: time.Now().UTC(), Incidents: []Summary{}}
+	result := Snapshot{FetchedAt: time.Now().UTC(), Incidents: []Summary{}}
 
 	if s.mode != "empty" {
 		for _, item := range s.items {
@@ -79,7 +79,7 @@ func (s *browserSource) Get(ctx context.Context, name string) (DetailResponse, e
 	}
 
 	if mode == "error" {
-		return DetailResponse{}, &APIError{503, "access_denied", "Fixture: check namespace RBAC."}
+		return DetailResponse{}, &APIError{503, "access_denied", "Fixture: check cluster-scoped incident RBAC."}
 	}
 
 	if mode == "deleted" || found == nil {
@@ -127,7 +127,7 @@ func TestBrowserFixture(t *testing.T) {
 
 	for i := range 64 {
 		obj := incidentObject(t, fmt.Sprintf("incident-%03d", i))
-		reader := &Reader{namespace: "kubescout"}
+		reader := &Reader{}
 
 		item, err := reader.decode(&unstructured.Unstructured{Object: obj})
 		if err != nil {

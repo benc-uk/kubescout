@@ -1,6 +1,6 @@
 /*
 Purpose: Test bounded incident projection and revision-scoped dashboard triage.
-Flow: Offline HTTP and object fixtures check complete pagination, scope,
+Flow: Offline HTTP and object fixtures check complete cluster-scoped pagination,
 schema and size failures, plus human dismiss/restore status patches with
 identity/version preconditions that preserve incident specs and foreign status.
 */
@@ -55,7 +55,7 @@ func incidentObject(t *testing.T, name string) map[string]any {
 
 	return map[string]any{
 		"apiVersion": incident.APIVersion, "kind": "Incident",
-		"metadata": map[string]any{"name": name, "namespace": "kubescout", "resourceVersion": "42", "uid": "private-object-uid",
+		"metadata": map[string]any{"name": name, "resourceVersion": "42", "uid": "private-object-uid",
 			"annotations": map[string]any{"private": "private-annotation"}},
 		"spec": spec, "status": map[string]any{"private": "private-status"},
 	}
@@ -68,7 +68,7 @@ func TestServiceAvailabilityFamily(t *testing.T) {
 	identity := spec["identity"].(map[string]any)
 	identity["family"] = "service-availability"
 	identity["anchor"].(map[string]any)["kind"] = "Service"
-	reader := &Reader{namespace: "kubescout"}
+	reader := &Reader{}
 
 	item, err := reader.decode(&unstructured.Unstructured{Object: obj})
 	if err != nil || item.Family != "service-availability" || item.Anchor.Kind != "Service" {
@@ -86,7 +86,7 @@ func fixtureReader(t *testing.T, handler http.HandlerFunc) *Reader {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || !strings.HasPrefix(r.URL.Path, "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents") {
+		if r.Method != "GET" || !strings.HasPrefix(r.URL.Path, "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents") {
 			t.Errorf("unexpected API scope: %s %s", r.Method, r.URL.Path)
 		}
 
@@ -100,12 +100,7 @@ func fixtureReader(t *testing.T, handler http.HandlerFunc) *Reader {
 		t.Fatal(err)
 	}
 
-	reader, err := NewReader(client, "kubescout")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return reader
+	return NewReader(client)
 }
 
 // writePage emits an Incident list fixture with controlled pagination metadata.
@@ -171,7 +166,7 @@ func TestListPaginationBoundaries(t *testing.T) {
 				return
 			}
 
-			if err != nil || len(result.Incidents) != count || result.Incidents == nil || result.Namespace != "kubescout" || result.FetchedAt.IsZero() {
+			if err != nil || len(result.Incidents) != count || result.Incidents == nil || result.FetchedAt.IsZero() {
 				t.Fatalf("invalid result count=%d: %v", len(result.Incidents), err)
 			}
 
@@ -295,7 +290,6 @@ func TestUpstreamFailures(t *testing.T) {
 }
 
 // TestTimeoutAndNameScope verifies invalid names never reach Kubernetes and caller deadlines stop reads.
-// It also rejects invalid storage namespaces when constructing readers.
 func TestTimeoutAndNameScope(t *testing.T) {
 	var calls atomic.Int32
 
@@ -321,12 +315,6 @@ func TestTimeoutAndNameScope(t *testing.T) {
 
 	if time.Since(start) > time.Second {
 		t.Fatal("ignored caller deadline")
-	}
-
-	for _, namespace := range []string{"", "*", "UPPER", "a/b", strings.Repeat("a", 64)} {
-		if _, err := NewReader(nil, namespace); err == nil {
-			t.Fatalf("accepted namespace %q", namespace)
-		}
 	}
 }
 
@@ -378,7 +366,7 @@ func TestMalformedSchema(t *testing.T) {
 				spec[field] = []any{}
 			}
 
-			reader := &Reader{namespace: "kubescout"}
+			reader := &Reader{}
 			_, err := reader.decode(&unstructured.Unstructured{Object: obj})
 			assertCode(t, err, "invalid_snapshot")
 		})
@@ -431,7 +419,7 @@ func TestTriagePersistenceAndRevision(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 
-				path := "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents/incident-fixture"
+				path := "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents/incident-fixture"
 				if r.Method == "GET" && r.URL.Path == path {
 					_ = json.NewEncoder(w).Encode(obj)
 					return
@@ -494,7 +482,7 @@ func TestTriagePersistenceAndRevision(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			reader, _ := NewReader(client, "kubescout")
+			reader := NewReader(client)
 
 			before, err := reader.Get(t.Context(), "incident-fixture")
 			if err != nil || before.Incident.Dismissed {
@@ -506,7 +494,7 @@ func TestTriagePersistenceAndRevision(t *testing.T) {
 				t.Fatalf("dismiss changed lifecycle or failed: %v", err)
 			}
 
-			restarted, _ := NewReader(client, "kubescout")
+			restarted := NewReader(client)
 
 			persisted, err := restarted.Get(t.Context(), "incident-fixture")
 			if err != nil || !persisted.Incident.Dismissed {
@@ -559,7 +547,7 @@ func TestTriageFailures(t *testing.T) {
 	for _, failure := range []string{"changed", "recreated", "race", "patch-test", "forbidden", "missing", "unknown", "invalid-name", "invalid-version"} {
 		t.Run(failure, func(t *testing.T) {
 			obj := incidentObject(t, "incident-one")
-			reader := &Reader{namespace: "kubescout"}
+			reader := &Reader{}
 
 			seen, err := reader.decode(&unstructured.Unstructured{Object: obj})
 			if err != nil {
@@ -611,7 +599,7 @@ func TestTriageFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			reader, _ = NewReader(client, "kubescout")
+			reader = NewReader(client)
 			name, version := "incident-one", seen.Version
 			want, expectedGets, expectedPatches := "triage_conflict", 1, 1
 
@@ -645,7 +633,7 @@ func TestTriageProjection(t *testing.T) {
 	for _, revision := range []int64{0, 1, 2} {
 		obj := incidentObject(t, "incident-one")
 		obj["status"] = map[string]any{"triage": map[string]any{"dismissedRevision": revision}}
-		reader := &Reader{namespace: "kubescout"}
+		reader := &Reader{}
 
 		got, err := reader.decode(&unstructured.Unstructured{Object: obj})
 		if err != nil || got.Dismissed != (revision == 1) {
@@ -656,7 +644,7 @@ func TestTriageProjection(t *testing.T) {
 	obj := incidentObject(t, "incident-one")
 	before := (&unstructured.Unstructured{Object: obj}).DeepCopy()
 	obj["status"] = map[string]any{"triage": map[string]any{"dismissedRevision": "invalid"}}
-	reader := &Reader{namespace: "kubescout"}
+	reader := &Reader{}
 	_, err := reader.decode(&unstructured.Unstructured{Object: obj})
 	assertCode(t, err, "invalid_snapshot")
 

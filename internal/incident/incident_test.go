@@ -2,7 +2,7 @@
 Purpose: Test incident lifecycle, decision scope and persistence contracts.
 Flow: Offline memory and local Kubernetes HTTP fixtures cover semantic no-ops,
 recovery gating, identity across restarts, ambiguous writes and stale results;
-request checks verify preconditions and preservation of human triage status.
+request checks verify cluster scope, preconditions and preservation of human triage status.
 */
 package incident
 
@@ -107,7 +107,7 @@ func TestIncidentLifecycleAndSemanticNoops(t *testing.T) {
 	}
 }
 
-// TestStoredIncidentNameValidation accepts only the current identity-derived name.
+// TestStoredIncidentNameValidation accepts only cluster-scoped records with the current identity-derived name.
 func TestStoredIncidentNameValidation(t *testing.T) {
 	in, d := fixture()
 	identity := Identity{"fixture", in.Identities[in.Anchor], d.Actions[0].Family}
@@ -123,16 +123,18 @@ func TestStoredIncidentNameValidation(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name  string
-		valid bool
+		name, namespace string
+		valid           bool
 	}{
-		{Name(identity), true},
-		{"incident-invalid", false},
-		{Name(Identity{"other", identity.Anchor, identity.Family}), false},
+		{Name(identity), "", true},
+		{"incident-invalid", "", false},
+		{Name(Identity{"other", identity.Anchor, identity.Family}), "", false},
+		{Name(identity), "kubescout", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			obj := &unstructured.Unstructured{Object: map[string]any{"spec": payload}}
 			obj.SetName(tc.name)
+			obj.SetNamespace(tc.namespace)
 			obj.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "kubescout"})
 
 			record, err := (Kubernetes{Observer: "fixture"}).decode(obj)
@@ -197,7 +199,7 @@ func TestAmbiguousWriteDoesNotCreateDuplicateOrRerunAI(t *testing.T) {
 	}
 }
 
-// TestKubernetesIncidentRequestContract checks namespaced create, lookup and patch requests,
+// TestKubernetesIncidentRequestContract checks cluster-scoped create, lookup and patch requests,
 // state indexing, optimistic concurrency and preservation of human triage status.
 func TestKubernetesIncidentRequestContract(t *testing.T) {
 	in, d := fixture()
@@ -209,7 +211,7 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		if !strings.HasPrefix(r.URL.Path, "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents") {
+		if !strings.HasPrefix(r.URL.Path, "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents") {
 			t.Error("wrong incident scope")
 		}
 
@@ -222,7 +224,7 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 				return
 			}
 
-			if r.URL.Path == "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents" {
+			if r.URL.Path == "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents" {
 				if r.URL.Query().Get("labelSelector") != "app.kubernetes.io/managed-by=kubescout,kubescout.benc-uk.github.com/observer=fixture,kubescout.benc-uk.github.com/state=open" {
 					t.Error("open incident index must select the state label")
 				}
@@ -248,6 +250,10 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 			}
 
 			meta := object["metadata"].(map[string]any)
+			if _, exists := meta["namespace"]; exists {
+				t.Error("cluster-scoped incident must omit metadata.namespace")
+			}
+
 			if meta["labels"].(map[string]any)["kubescout.benc-uk.github.com/state"] != "open" ||
 				object["spec"].(map[string]any)["lifecycle"].(map[string]any)["state"] != "open" {
 				t.Error("create must use state in labels and lifecycle")
@@ -304,7 +310,7 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := Reconciler{Repository: Kubernetes{Client: client, Namespace: "kubescout", Observer: "fixture", Limit: 10, Timeout: time.Second}, Observer: "fixture"}
+	s := Reconciler{Repository: Kubernetes{Client: client, Observer: "fixture", Limit: 10, Timeout: time.Second}, Observer: "fixture"}
 
 	changes, err := s.Apply(t.Context(), in, d, func() bool { return true })
 	if err != nil {

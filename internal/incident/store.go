@@ -1,7 +1,7 @@
 /*
 Purpose: Persist and reconcile AI-directed incident lifecycle changes.
 Flow: Reviewed actions and stored revisions produce material changes through
-scoped Incident writes; offline tests use a memory fixture repository. Retries
+cluster-scoped Incident writes; offline tests use a memory fixture repository. Retries
 reconcile ambiguous writes, preserve identity and leave human triage status untouched.
 */
 package incident
@@ -36,11 +36,10 @@ type Repository interface {
 }
 
 type Kubernetes struct {
-	Client    dynamic.Interface
-	Namespace string
-	Observer  string
-	Limit     int
-	Timeout   time.Duration
+	Client   dynamic.Interface
+	Observer string
+	Limit    int
+	Timeout  time.Duration
 }
 
 // Memory is a fixture repository for tests; production execution uses Kubernetes.
@@ -56,7 +55,7 @@ type Reconciler struct {
 
 var GVR = schema.GroupVersionResource{Group: "kubescout.benc-uk.github.com", Version: "v1alpha1", Resource: "incidents"}
 
-// decode checks stored schema, observer ownership, stable name and lifecycle before returning a record.
+// decode checks cluster scope, stored schema, observer ownership, stable name and lifecycle.
 func (s Kubernetes) decode(obj *unstructured.Unstructured) (*Record, error) {
 	var value Incident
 
@@ -65,7 +64,7 @@ func (s Kubernetes) decode(obj *unstructured.Unstructured) (*Record, error) {
 		return nil, errors.New("invalid stored incident schema")
 	}
 
-	if value.Identity.Observer != s.Observer || obj.GetLabels()["app.kubernetes.io/managed-by"] != "kubescout" ||
+	if obj.GetNamespace() != "" || value.Identity.Observer != s.Observer || obj.GetLabels()["app.kubernetes.io/managed-by"] != "kubescout" ||
 		obj.GetName() != Name(value.Identity) || value.Identity.Anchor.UID == "" ||
 		!slices.Contains(Families, value.Identity.Family) || value.Lifecycle.Revision < 1 {
 		return nil, errors.New("incident ownership or identity mismatch")
@@ -78,7 +77,7 @@ func (s Kubernetes) decode(obj *unstructured.Unstructured) (*Record, error) {
 	return &Record{Name: obj.GetName(), Version: obj.GetResourceVersion(), UID: string(obj.GetUID()), Value: value}, nil
 }
 
-// ListOpen reads the observer's namespaced open-incident index with bounded, consistent pagination.
+// ListOpen reads the observer's cluster-scoped open-incident index with bounded, consistent pagination.
 // Invalid records, duplicate entries and incomplete pagination fail the entire read.
 func (s Kubernetes) ListOpen(ctx context.Context) ([]Record, error) {
 	out := []Record{}
@@ -89,12 +88,12 @@ func (s Kubernetes) ListOpen(ctx context.Context) ([]Record, error) {
 
 	for {
 		callCtx, cancel := context.WithTimeout(ctx, s.Timeout)
-		page, err := s.Client.Resource(GVR).Namespace(s.Namespace).List(callCtx, opts)
+		page, err := s.Client.Resource(GVR).List(callCtx, opts)
 
 		cancel()
 
 		if err != nil {
-			return nil, errors.New("cannot load incident index; check Incident CRD, namespace and RBAC")
+			return nil, errors.New("cannot load incident index; check cluster-scoped Incident CRD and RBAC")
 		}
 
 		if page.GetResourceVersion() == "" || (version != "" && version != page.GetResourceVersion()) {
@@ -133,12 +132,12 @@ func (s Kubernetes) ListOpen(ctx context.Context) ([]Record, error) {
 	}
 }
 
-// Get performs a timed, namespaced lookup and validates ownership; a missing incident returns nil.
+// Get performs a timed, cluster-scoped lookup and validates ownership; a missing incident returns nil.
 func (s Kubernetes) Get(ctx context.Context, name string) (*Record, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()
 
-	obj, err := s.Client.Resource(GVR).Namespace(s.Namespace).Get(ctx, name, metav1.GetOptions{})
+	obj, err := s.Client.Resource(GVR).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
 	}
@@ -150,7 +149,7 @@ func (s Kubernetes) Get(ctx context.Context, name string) (*Record, error) {
 	return s.decode(obj)
 }
 
-// Save creates an Incident or patches agent-owned fields with UID and version preconditions.
+// Save creates a cluster-scoped Incident or patches agent-owned fields with UID and version preconditions.
 // Existing status and foreign metadata are preserved; ambiguous failures require reconciliation.
 func (s Kubernetes) Save(ctx context.Context, r Record) error {
 	payload, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&r.Value)
@@ -160,7 +159,7 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": APIVersion, "kind": "Incident",
-		"metadata": map[string]any{"name": r.Name, "namespace": s.Namespace,
+		"metadata": map[string]any{"name": r.Name,
 			"labels": map[string]any{"app.kubernetes.io/managed-by": "kubescout", "kubescout.benc-uk.github.com/observer": s.Observer, "kubescout.benc-uk.github.com/state": r.Value.Lifecycle.State}},
 		"spec": payload,
 	}}
@@ -169,7 +168,7 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 	defer cancel()
 
 	if r.Version == "" {
-		_, err = s.Client.Resource(GVR).Namespace(s.Namespace).Create(ctx, obj, metav1.CreateOptions{})
+		_, err = s.Client.Resource(GVR).Create(ctx, obj, metav1.CreateOptions{})
 	} else {
 		// Patch only fields owned by this agent. Delivery status and foreign metadata survive.
 		patch, marshalErr := json.Marshal([]map[string]any{
@@ -182,7 +181,7 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 			return errors.New("cannot encode incident update")
 		}
 
-		_, err = s.Client.Resource(GVR).Namespace(s.Namespace).Patch(ctx, r.Name, "application/json-patch+json", patch, metav1.PatchOptions{})
+		_, err = s.Client.Resource(GVR).Patch(ctx, r.Name, "application/json-patch+json", patch, metav1.PatchOptions{})
 	}
 
 	if err != nil {

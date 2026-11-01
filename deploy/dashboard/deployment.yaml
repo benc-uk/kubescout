@@ -30,7 +30,6 @@ spec:
           imagePullPolicy: Never
           args:
             - --auth-mode=in-cluster
-            - --namespace=kubescout
           ports:
             - name: http
               containerPort: 8000

@@ -52,7 +52,7 @@ warrant an incident. **No action is a valid conclusion**, even when a check find
 something concerning. Decisions are validated against the available evidence
 and current observations before being applied.
 
-Incidents are namespaced `Incident` custom resources in the
+Incidents are cluster-scoped `Incident` custom resources in the
 `kubescout.benc-uk.github.com/v1alpha1` API group. They survive agent restarts and
 can be read with kubectl or the dashboard. Console logs and AI transcripts help
 explain agent activity; the Kubernetes resources are the incident record.
@@ -101,7 +101,7 @@ Keep credentials out of source control. The endpoint must use HTTPS and end in
 
 ### Start investigating
 
-Check the selected context, install the incident namespace and CRD, then start
+Check the selected context, install the runtime namespace and cluster-scoped CRD, then start
 watching the `default` namespace:
 
 ```bash
@@ -130,7 +130,7 @@ continuous recovery for resolution.
 In another terminal:
 
 ```bash
-kubectl -n kubescout get incidents
+kubectl get incidents
 make dash-run
 ```
 
@@ -164,7 +164,7 @@ Then provision the model Secret and explicitly start the agent:
 ```bash
 make model-secret
 make deploy ALLOW_MODEL=yes
-kubectl -n kubescout get incidents
+kubectl get incidents
 kubectl -n kubescout logs deployment/kubescout -c agent
 ```
 
@@ -189,6 +189,12 @@ and local-kind workflows, image configuration, dashboard access and safe shutdow
 `make undeploy` stops/removes the agent while retaining incidents; do not delete
 the namespace or CRD to stop it.
 
+Incident storage has no namespace setting. Workload namespace filters still
+control observation, and the agent/dashboard components still run in `kubescout`.
+Existing namespaced Incident installations require a destructive development
+reset, not an in-place upgrade; no migration or history preservation is provided.
+See [updates and shutdown](docs/operations.md#updates-and-shutdown).
+
 ## Important boundaries
 
 - Workload access is read-only. The agent cannot run shell commands, read Pod
@@ -207,6 +213,7 @@ the namespace or CRD to stop it.
 | Guide | What it covers |
 |---|---|
 | [Architecture](ARCHITECTURE.md) | Components, evidence, AI investigation, incident lifecycle and data boundaries |
+| [Resources and health checks](docs/resources-and-checks.md) | Collected Kubernetes resources, retained facts, check rules, thresholds and exceptions |
 | [Operations](docs/operations.md) | Configuration, deployment, dashboard use, logs, troubleshooting and upgrades |
 | [Development](docs/development.md) | Builds, tests, linting, images and the complete Make reference |
 

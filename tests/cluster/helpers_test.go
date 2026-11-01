@@ -4,6 +4,7 @@
 Purpose: Provide live fixture ownership, collector observations and polling helpers.
 Flow: Integration callers select an explicit context and create a test namespace;
 cleanup checks its UID and ownership label before UID-preconditioned deletion.
+Container fixtures also clean up their cluster-scoped Incidents after namespace removal.
 Collector helpers expose private deterministic evidence, not published incidents;
 model fixtures additionally require explicit model-request authorization.
 */
@@ -27,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -38,6 +40,7 @@ type fixture struct {
 	config                            *rest.Config
 	context, namespace, binary, owner string
 	uid                               types.UID
+	incidents                         dynamic.ResourceInterface
 }
 
 // observation is a test-only view of the collector and pure rules. It is not an
@@ -120,13 +123,17 @@ func newFixtureStage(t *testing.T, model bool, stage string) *fixture {
 }
 
 // cleanup verifies the live namespace's UID and ownership label before deleting it with a UID
-// precondition, then waits for removal under a bounded context independent of test cancellation.
+// precondition, then waits for removal before cleaning up any test-owned cluster Incidents.
 func (f *fixture) cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	ns, err := f.client.CoreV1().Namespaces().Get(ctx, f.namespace, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if f.incidents != nil {
+			f.t.Error("fixture namespace missing before ownership verification; refusing incident cleanup")
+		}
+
 		return
 	}
 
@@ -148,6 +155,12 @@ func (f *fixture) cleanup() {
 	for ctx.Err() == nil {
 		_, err := f.client.CoreV1().Namespaces().Get(ctx, f.namespace, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
+			if f.incidents != nil {
+				if err := cleanupFixtureIncidents(ctx, f.incidents, f.namespace); err != nil {
+					f.t.Errorf("cannot clean up test-owned cluster Incidents: %v", err)
+				}
+			}
+
 			return
 		}
 

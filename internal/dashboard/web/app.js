@@ -241,7 +241,7 @@ function render() {
   $("empty-title").textContent = snapshot.incidents.length ? "No matching incidents" : "No stored incidents";
   $("empty-message").textContent = snapshot.incidents.length
     ? "Try another search or reset the filters."
-    : "There are no Incidents in this namespace. This does not establish cluster health.";
+    : "There are no stored Incidents in this cluster. This does not establish cluster health.";
 }
 
 async function refresh() {
@@ -256,7 +256,6 @@ async function refresh() {
     const next = validateSnapshot(await getJSON("/api/incidents", listRequest.signal));
     snapshot = next;
     stale = false;
-    $("namespace").textContent = snapshot.namespace;
     $("freshness").textContent = `Last success: ${date(snapshot.fetched_at)}`;
     $("error").hidden = true;
     updateNamespaces();
@@ -267,7 +266,6 @@ async function refresh() {
     $("error").hidden = false;
     $("freshness").textContent = snapshot ? `Stale · last success: ${date(snapshot.fetched_at)}` : "No successful refresh";
     if (!snapshot) {
-      $("namespace").textContent = "Unavailable";
       $("results").textContent = "Incidents unavailable";
     }
   } finally {

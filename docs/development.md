@@ -98,8 +98,8 @@ the host with Ctrl+C. If port 8000 is occupied, set
 
 Use a desktop browser. The suite covers filtering, sorting, pagination, safe text
 rendering, details, stale/deleted/error states, response races, refresh, themes,
-text sizes and contrast. Go fixtures also cover auth/context selection, namespace
-scope and status-only triage writes. Browser fixtures are test-only, skipped by
+text sizes and contrast. Go fixtures also cover auth/context selection,
+cluster-scoped Incident requests, workload namespaces and status-only triage writes. Browser fixtures are test-only, skipped by
 routine runs and absent from production images.
 
 ## Container images
@@ -155,8 +155,10 @@ make integration-deploy CONTEXT=kind-kind ALLOW_MODEL=yes
 
 The harness uses the `integration` build tag and uniquely named namespaces,
 not the local namespace filters. Credentials need permissions to create and
-clean up its fixtures; container validation also manages owned node RBAC.
-Cleanup verifies ownership/UID. AI no-action is valid: tests do not require a
+clean up its fixtures; container validation also manages owned Node/Incident RBAC
+and cluster-scoped Incidents. Namespace removal stops the fixture agent before
+explicit incident cleanup, which verifies observer ownership and uses
+UID/resourceVersion preconditions. AI no-action is valid: tests do not require a
 manufactured incident. Routine offline checks authorize none of these operations.
 
 ### Failure-injection fixtures
@@ -203,7 +205,7 @@ it never starts the agent. Detailed operational procedures live in the
 | `deploy` | Check Secret, apply manifests and scale agent to one; requires image availability and `ALLOW_MODEL=yes` |
 | `undeploy` | Remove agent Deployment/RBAC; retain incidents, Secret, namespace and CRD |
 | `dash-build` | Build `build/bin/kubescout-dashboard` with embedded assets |
-| `dash-run` | Build/serve local dashboard using current context and `kubescout` namespace; no model calls, but human triage writes status |
+| `dash-run` | Build/serve local dashboard using current context and cluster-scoped Incidents; no model calls, but human triage writes status |
 | `dash-image` | Build separate `DASHBOARD_IMAGE` |
 | `dash-kind-load` | Save/import existing dashboard image; does not deploy |
 | `dash-deploy` | Apply dashboard only; requires namespace, CRD and image |

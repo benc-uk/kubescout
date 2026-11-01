@@ -1,7 +1,7 @@
 /*
-Purpose: Test the dashboard's HTTP routes, triage boundary and shutdown.
+Purpose: Test dashboard HTTP routes, minimal status markup, triage boundary and shutdown.
 Flow: Offline Sources, request recorders and a loopback listener exercise
-embedded assets, bounded JSON, same-origin human actions, explicit failures
+embedded assets, cluster-scoped incident JSON, same-origin human actions, explicit failures
 and graceful cancellation without contacting Kubernetes or an AI model.
 */
 package dashboard
@@ -100,12 +100,13 @@ func TestTriageHTTPBoundary(t *testing.T) {
 	}
 }
 
-// TestHTTPContract checks embedded assets, API routing, security headers, branding, and namespace-query rejection.
+// TestHTTPContract checks assets, routing, security headers, branding without a fixed scope label,
+// and namespace-query rejection.
 func TestHTTPContract(t *testing.T) {
 	var logs bytes.Buffer
 
 	source := fixtureSource{
-		snapshot: Snapshot{Namespace: "kubescout", FetchedAt: time.Now(), Incidents: []Summary{}},
+		snapshot: Snapshot{FetchedAt: time.Now(), Incidents: []Summary{}},
 		detail:   DetailResponse{FetchedAt: time.Now(), Incident: Detail{Summary: Summary{Name: "incident-one"}}},
 	}
 	handler := Handler(source, log.New(&logs, "", 0))
@@ -154,8 +155,9 @@ func TestHTTPContract(t *testing.T) {
 				t.Fatal("API did not return JSON")
 			}
 
-			if test.path == "/api/incidents" && test.status == 200 && !strings.Contains(response.Body.String(), `"incidents":[]`) {
-				t.Fatal("empty list must be an array")
+			if test.path == "/api/incidents" && test.status == 200 &&
+				(!strings.Contains(response.Body.String(), `"incidents":[]`) || strings.Contains(response.Body.String(), `"namespace":`)) {
+				t.Fatal("cluster-scoped list must be an array without a storage namespace")
 			}
 
 			if test.path == "/api/incidents/incident-one" && test.status == 200 &&
@@ -168,6 +170,10 @@ func TestHTTPContract(t *testing.T) {
 					if !strings.Contains(response.Body.String(), text) {
 						t.Fatalf("missing dashboard branding: %s", text)
 					}
+				}
+
+				if strings.Contains(response.Body.String(), "Incident scope") || strings.Contains(response.Body.String(), `id="incident-scope"`) {
+					t.Fatal("dashboard must not display a redundant fixed scope label")
 				}
 			}
 
@@ -187,7 +193,7 @@ func TestHTTPFailuresAndSizeLimit(t *testing.T) {
 	}{
 		{"sanitized", fixtureSource{err: errors.New("private upstream body")}, "internal_error"},
 		{"known", fixtureSource{err: &APIError{503, "access_denied", "Check RBAC."}}, "access_denied"},
-		{"oversized", fixtureSource{snapshot: Snapshot{Namespace: strings.Repeat("x", MaxResponseBytes)}}, "response_too_large"},
+		{"oversized", fixtureSource{snapshot: Snapshot{Incidents: []Summary{{Title: strings.Repeat("x", MaxResponseBytes)}}}}, "response_too_large"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var logs bytes.Buffer

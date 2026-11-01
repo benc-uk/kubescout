@@ -33,7 +33,6 @@ spec:
           imagePullPolicy: Always
           args:
             - --auth-mode=in-cluster
-            - --incident-namespace=kubescout
             - --observer-id=kind-all
             - --model-calls-per-hour=300
             - --ai-log-dir=/var/log/kubescout/ai

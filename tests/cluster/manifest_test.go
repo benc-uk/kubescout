@@ -1,7 +1,7 @@
 /*
 Purpose: Check agent deployment, RBAC and Incident schema contracts offline.
 Flow: Decode checked-in manifests and validate synthetic configuration and incidents
-to check inactive deployment defaults, workload read permissions, incident writes
+to check inactive deployment defaults, workload read permissions, cluster-scoped incident writes
 and lifecycle.state migration plus the bounded transcript mount without activating a cluster or contacting a model.
 Shared decoding helpers also supply manifests to opt-in integration fixtures.
 */
@@ -118,7 +118,7 @@ func TestDeploymentContract(t *testing.T) {
 
 		return ""
 	}, io.Discard)
-	if err != nil || options.Auth != "in-cluster" || options.IncidentNamespace != "kubescout" || options.ObserverID != "kind-all" ||
+	if err != nil || options.Auth != "in-cluster" || options.ObserverID != "kind-all" ||
 		len(options.NamespaceWatch) != 0 || len(options.NamespaceIgnore) != 0 {
 		t.Fatal("incorrect AI runtime arguments")
 	}
@@ -153,7 +153,7 @@ func TestTranscriptDeploymentStorage(t *testing.T) {
 	}
 }
 
-// TestRBACContract checks offline manifests for allow-listed workload reads and namespaced
+// TestRBACContract checks offline manifests for allow-listed workload reads and cluster-scoped
 // Incident reconciliation permissions, rejecting unexpected access.
 func TestRBACContract(t *testing.T) {
 	incidents, binding, workloads, workloadBinding := false, false, false, false
@@ -163,8 +163,23 @@ func TestRBACContract(t *testing.T) {
 
 		switch v := obj.(type) {
 		case *rbacv1.ClusterRole:
+			if v.Namespace != "" {
+				t.Fatal("cluster roles must not specify a namespace")
+			}
+
 			rules = v.Rules
 			switch v.Name {
+			case "kubescout-incidents":
+				if len(rules) != 1 || !slices.Equal(rules[0].Resources, []string{"incidents"}) ||
+					!slices.Equal(rules[0].Verbs, []string{"get", "list", "create", "patch"}) ||
+					!slices.Equal(rules[0].APIGroups, []string{incident.GVR.Group}) ||
+					len(rules[0].ResourceNames) != 0 || len(rules[0].NonResourceURLs) != 0 {
+					t.Fatal("incident permissions exceed reconciliation needs")
+				}
+
+				incidents = true
+
+				continue
 			case "kubescout-nodes":
 				if len(rules) != 1 || !slices.Equal(rules[0].Resources, []string{"nodes"}) {
 					t.Fatal("incorrect node permissions")
@@ -180,26 +195,21 @@ func TestRBACContract(t *testing.T) {
 				t.Fatal("unexpected cluster permissions")
 			}
 		case *rbacv1.ClusterRoleBinding:
+			if v.Namespace != "" {
+				t.Fatal("cluster role bindings must not specify a namespace")
+			}
+
 			if v.Name == "kubescout-resources" {
 				workloadBinding = v.RoleRef.Kind == "ClusterRole" && v.RoleRef.Name == v.Name && len(v.Subjects) == 1 &&
 					v.Subjects[0].Name == "kubescout" && v.Subjects[0].Namespace == "kubescout"
 			}
-		case *rbacv1.Role:
+
 			if v.Name == "kubescout-incidents" {
-				if v.Namespace != "kubescout" || len(v.Rules) != 1 || !slices.Equal(v.Rules[0].Resources, []string{"incidents"}) || !slices.Equal(v.Rules[0].Verbs, []string{"get", "list", "create", "patch"}) || !slices.Equal(v.Rules[0].APIGroups, []string{incident.GVR.Group}) {
-					t.Fatal("incident permissions exceed reconciliation needs")
-				}
-
-				incidents = true
-
-				continue
+				binding = v.RoleRef.Kind == "ClusterRole" && v.RoleRef.Name == v.Name && len(v.Subjects) == 1 &&
+					v.Subjects[0].Kind == "ServiceAccount" && v.Subjects[0].Name == "kubescout" && v.Subjects[0].Namespace == "kubescout"
 			}
-
+		case *rbacv1.Role, *rbacv1.RoleBinding:
 			t.Fatal("unexpected namespaced permissions")
-		case *rbacv1.RoleBinding:
-			if v.Name == "kubescout-incidents" {
-				binding = v.Namespace == "kubescout" && v.RoleRef.Name == v.Name && len(v.Subjects) == 1 && v.Subjects[0].Name == "kubescout" && v.Subjects[0].Namespace == "kubescout"
-			}
 		}
 
 		for _, r := range rules {
@@ -255,7 +265,7 @@ func TestIncidentSchemaAndMigration(t *testing.T) {
 	}
 
 	if crd.Metadata.Name != "incidents."+incident.GVR.Group || crd.Spec.Group != incident.GVR.Group ||
-		crd.Spec.Scope != "Namespaced" || crd.Spec.Names.Kind != "Incident" ||
+		crd.Spec.Scope != "Cluster" || crd.Spec.Names.Kind != "Incident" ||
 		crd.Spec.Names.Plural != "incidents" || crd.Spec.Names.Singular != "incident" || len(crd.Spec.Versions) != 1 {
 		t.Fatal("incorrect incident API")
 	}

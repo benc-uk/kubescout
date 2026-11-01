@@ -3,7 +3,7 @@ Purpose: Bootstrap the KubeScout CLI and coordinate process shutdown and exit co
 Flow: Load validated configuration, select Kubernetes access and wire collection,
 AI investigation, CRD reconciliation, colour-configurable logs and optional rotating AI
 transcripts into once or watch execution.
-Both authentication modes persist Incidents; there is no runtime simulation path.
+Both authentication modes persist cluster-scoped Incidents; there is no runtime simulation path.
 */
 package main
 
@@ -97,7 +97,7 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Transcript: transcript, Incidents: newIncidentReconciler(c, client)}
 	_ = sink.Log("info", "GO", "BOOT", fmt.Sprintf("AI investigation for %s, %s (once=%t)", cluster, c.NamespaceScope(), c.Once))
 
-	_ = sink.Log("info", "GO", "BOOT", "Accepted AI decisions persist to Incident CRDs in namespace "+c.IncidentNamespace)
+	_ = sink.Log("info", "GO", "BOOT", "Accepted AI decisions persist to cluster-scoped Incident records")
 
 	code := 0
 	if c.Once {
@@ -118,10 +118,10 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 	return code
 }
 
-// newIncidentReconciler wires namespaced Kubernetes persistence for either authentication mode.
+// newIncidentReconciler wires cluster-scoped Kubernetes persistence for either authentication mode.
 func newIncidentReconciler(c config.Config, client dynamic.Interface) incident.Reconciler {
 	return incident.Reconciler{
-		Repository: incident.Kubernetes{Client: client, Namespace: c.IncidentNamespace, Observer: c.ObserverID, Limit: c.MaxObjects, Timeout: c.RequestTimeout},
+		Repository: incident.Kubernetes{Client: client, Observer: c.ObserverID, Limit: c.MaxObjects, Timeout: c.RequestTimeout},
 		Observer:   c.ObserverID,
 		Model:      c.Model,
 	}

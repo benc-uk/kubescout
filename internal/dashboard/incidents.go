@@ -1,6 +1,6 @@
 /*
 Purpose: Read dashboard incident views and persist revision-scoped human triage.
-Flow: Bounded, complete Incident reads in one storage namespace become
+Flow: Bounded, complete cluster-scoped Incident reads become
 validated summaries and details. Dismiss/restore uses displayed-version and
 UID/resourceVersion checks to patch status.triage only; it neither calls AI
 nor writes incident specs, and reports upstream failures as explicit errors.
@@ -41,7 +41,6 @@ type Resource struct {
 
 type Summary struct {
 	Name      string             `json:"name"`
-	Namespace string             `json:"namespace"`
 	Observer  string             `json:"observer"`
 	Family    string             `json:"family"`
 	Anchor    Resource           `json:"anchor"`
@@ -60,7 +59,6 @@ type Detail struct {
 }
 
 type Snapshot struct {
-	Namespace string    `json:"namespace"`
 	FetchedAt time.Time `json:"fetched_at"`
 	Incidents []Summary `json:"incidents"`
 }
@@ -77,8 +75,7 @@ type Source interface {
 }
 
 type Reader struct {
-	client    dynamic.NamespaceableResourceInterface
-	namespace string
+	client dynamic.ResourceInterface
 }
 
 const (
@@ -92,29 +89,25 @@ func (e *APIError) Error() string { return e.Message }
 
 var errResponseSize = &APIError{502, "response_too_large", "Incident data exceeds the 8 MiB response limit; narrow the stored incident set."}
 
-// NewReader validates the storage namespace and binds the client to Incident operations.
-func NewReader(client dynamic.Interface, namespace string) (*Reader, error) {
-	if len(validation.IsDNS1123Label(namespace)) != 0 {
-		return nil, errors.New("namespace must be a non-empty Kubernetes namespace name")
-	}
-
-	return &Reader{client: client.Resource(incident.GVR), namespace: namespace}, nil
+// NewReader binds the client to cluster-scoped Incident operations.
+func NewReader(client dynamic.Interface) *Reader {
+	return &Reader{client: client.Resource(incident.GVR)}
 }
 
-// List reads all incident summaries in the configured namespace with time, count, and size bounds.
+// List reads all cluster incident summaries with time, count, and size bounds.
 // Pagination inconsistencies or invalid records fail the whole snapshot rather than returning partial data.
 func (r *Reader) List(ctx context.Context) (Snapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 
-	result := Snapshot{Namespace: r.namespace, Incidents: []Summary{}}
+	result := Snapshot{Incidents: []Summary{}}
 	options := metav1.ListOptions{Limit: 100}
 	tokens, names := map[string]bool{}, map[string]bool{}
 	version := ""
 	encodedSize := 0
 
 	for {
-		page, err := r.client.Namespace(r.namespace).List(ctx, options)
+		page, err := r.client.List(ctx, options)
 		if err != nil {
 			return Snapshot{}, upstreamError(err, false)
 		}
@@ -166,7 +159,7 @@ func (r *Reader) List(ctx context.Context) (Snapshot, error) {
 	}
 }
 
-// Get validates an incident name, performs a bounded namespaced read, and projects its detail view.
+// Get validates an incident name, performs a bounded cluster-scoped read, and projects its detail view.
 func (r *Reader) Get(ctx context.Context, name string) (DetailResponse, error) {
 	if len(validation.IsDNS1123Subdomain(name)) != 0 {
 		return DetailResponse{}, &APIError{400, "invalid_name", "Invalid Incident name."}
@@ -175,7 +168,7 @@ func (r *Reader) Get(ctx context.Context, name string) (DetailResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 
-	obj, err := r.client.Namespace(r.namespace).Get(ctx, name, metav1.GetOptions{})
+	obj, err := r.client.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return DetailResponse{}, upstreamError(err, true)
 	}
@@ -192,7 +185,7 @@ func (r *Reader) Get(ctx context.Context, name string) (DetailResponse, error) {
 	return DetailResponse{FetchedAt: time.Now().UTC(), Incident: item}, nil
 }
 
-// decode validates stored incident fields and projects a view without raw metadata or resource UIDs.
+// decode validates cluster-scoped incident fields and projects a view without raw metadata or resource UIDs.
 // Dismissal applies only when the stored triage revision matches the incident lifecycle revision.
 func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 	var value incident.Incident
@@ -202,7 +195,7 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 		return Detail{}, invalidSnapshot("Stored incident has an invalid schema.")
 	}
 
-	if obj.GetNamespace() != r.namespace || len(validation.IsDNS1123Subdomain(obj.GetName())) != 0 ||
+	if obj.GetNamespace() != "" || len(validation.IsDNS1123Subdomain(obj.GetName())) != 0 ||
 		value.Identity.Observer == "" || !slices.Contains(incident.Families, value.Identity.Family) ||
 		value.Identity.Anchor.Kind == "" || value.Identity.Anchor.Name == "" ||
 		!slices.Contains([]string{"low", "medium", "high", "critical"}, value.Analysis.Severity) ||
@@ -254,7 +247,7 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 
 	return Detail{
 		Summary: Summary{
-			Name: obj.GetName(), Namespace: r.namespace, Observer: value.Identity.Observer,
+			Name: obj.GetName(), Observer: value.Identity.Observer,
 			Family: value.Identity.Family, Anchor: Resource{anchor.Kind, anchor.Namespace, anchor.Name},
 			Resources: refs, Title: value.Analysis.Title, Severity: value.Analysis.Severity,
 			Impact: value.Analysis.Impact, Lifecycle: value.Lifecycle,
@@ -284,7 +277,7 @@ func (r *Reader) SetDismissed(ctx context.Context, name, version string, dismiss
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 
-	obj, err := r.client.Namespace(r.namespace).Get(ctx, name, metav1.GetOptions{})
+	obj, err := r.client.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return DetailResponse{}, upstreamError(err, true)
 	}
@@ -328,13 +321,13 @@ func (r *Reader) SetDismissed(ctx context.Context, name, version string, dismiss
 		return DetailResponse{}, errors.New("cannot encode triage change")
 	}
 
-	updated, err := r.client.Namespace(r.namespace).Patch(ctx, name, types.JSONPatchType, body, metav1.PatchOptions{}, "status")
+	updated, err := r.client.Patch(ctx, name, types.JSONPatchType, body, metav1.PatchOptions{}, "status")
 	if err != nil {
 		switch {
 		case apierrors.IsConflict(err), apierrors.IsInvalid(err):
 			return DetailResponse{}, triageConflict()
 		case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
-			return DetailResponse{}, &APIError{403, "triage_denied", "Cannot change triage status; check patch permission on incidents/status in the dashboard namespace."}
+			return DetailResponse{}, &APIError{403, "triage_denied", "Cannot change triage status; check cluster-scoped patch permission on incidents/status."}
 		case apierrors.IsNotFound(err):
 			return DetailResponse{}, upstreamError(err, true)
 		default:
@@ -373,13 +366,13 @@ func upstreamError(err error, detail bool) error {
 	case errors.Is(err, context.DeadlineExceeded), apierrors.IsTimeout(err), apierrors.IsServerTimeout(err):
 		return &APIError{504, "timeout", "Kubernetes request timed out; refresh to retry."}
 	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
-		return &APIError{503, "access_denied", "Cannot read Incidents; check the dashboard ServiceAccount and namespace RoleBinding."}
+		return &APIError{503, "access_denied", "Cannot read Incidents; check the dashboard ServiceAccount and ClusterRoleBinding."}
 	case apierrors.IsNotFound(err):
 		if detail {
 			return &APIError{404, "not_found", "Incident is no longer available; refresh the list."}
 		}
 
-		return &APIError{503, "unavailable", "Incidents are unavailable; check the CRD and configured namespace."}
+		return &APIError{503, "unavailable", "Incidents are unavailable; check the cluster-scoped Incident CRD."}
 	default:
 		return &APIError{503, "unavailable", "Cannot read Incidents from Kubernetes; check connectivity and configuration."}
 	}

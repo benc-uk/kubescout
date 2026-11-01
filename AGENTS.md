@@ -47,14 +47,14 @@ Earlier deterministic report policies are not the current contract.
   cooldowns, no-action suppression, recovery review and stale-result rejection.
 - [internal/output](internal/output): readable GO/AI activity logs and rotating
   diagnostic AI transcripts. Incident CRDs, never stdout or files, store incidents.
-- [internal/dashboard](internal/dashboard): bounded single-namespace Incident
+- [internal/dashboard](internal/dashboard): bounded cluster-scoped Incident
   reads, revision-scoped human triage and embedded HTML/CSS/native-ESM UI; no JavaScript build step.
 - [build/](build/): separate pinned non-root agent/dashboard images, allow-listed
   contexts and ignored outputs.
 - [deploy/](deploy/): active Incident schema and agent RBAC/Deployment.
   Legacy HealthReport schemas are no longer shipped; retain any existing records.
 - [deploy/dashboard](deploy/dashboard): independent dashboard Deployment, Service
-  and namespaced get/list plus status-patch RBAC; excluded from the agent bundle.
+  and cluster-scoped get/list plus status-patch RBAC; excluded from the agent bundle.
 
 ## AI and data safety
 
@@ -114,12 +114,14 @@ Earlier deterministic report policies are not the current contract.
 - Incident lifecycle uses `state` in Go/JSON and the indexing label. Legacy
   `phase` records require explicit migration; do not silently fall back.
   Kubernetes-owned Pod `status.phase` is unchanged.
-- Agent writes in either authentication mode are restricted to Incident create/patch in the incident
-  namespace. No incident deletion or delivery-status writes.
+- Agent writes in either authentication mode are restricted to cluster-scoped
+  Incident create/patch. No incident deletion or delivery-status writes.
+  Incident records have no storage namespace; keep workload namespace fields and
+  filtering unchanged. Observer labels are not an RBAC isolation boundary.
 - Both authentication modes persist AI-approved Incidents, including local
   `make run` and `make once`. There is no runtime incident simulation mode.
   Tests may inject fixture incident repositories; they are not alternate CLI modes.
-  `make incidents-setup` installs only the incident namespace and CRD in the current
+  `make incidents-setup` installs only the runtime namespace and cluster-scoped CRD in the current
   context; it does not deploy the agent, provision model credentials or call AI.
 - Single replica remains the design. Incident state is restart-aware; model
   quota/no-action state is process-local. Do not imply HA or exactly-once delivery.
@@ -128,7 +130,7 @@ Earlier deterministic report policies are not the current contract.
 
 ## Dashboard boundary
 
-- Read only Incidents from one `--namespace` (default `kubescout`), across
+- Read only cluster-scoped Incidents, with no storage namespace option, across
   observers and lifecycle states. The dashboard must not read workloads, model
   credentials or tool evidence, call AI, or create/delete incidents or write their specs.
 - Human dismissal/restore may patch only `status.triage` using the status subresource,
@@ -138,8 +140,8 @@ Earlier deterministic report policies are not the current contract.
   Browser writes require same-origin checks, a custom action header and bounded JSON.
   Status RBAC is broader than a single field; field ownership is enforced by the application.
 - Workload-namespace filtering uses anchor and affected-resource namespaces; it
-  must not change the incident-storage API scope. Details show the anchor's
-  **Problem namespace**, or `Cluster-scoped` for nodes, not the storage namespace.
+  must not change the cluster-scoped incident API requests. Details show the
+  anchor's **Problem namespace**, or `Cluster-scoped` for nodes.
 - Kubeconfig mode binds `127.0.0.1:8000`; in-cluster mode binds `:8000`.
   Authentication modes never fall back. There is no application login or TLS;
   keep deployed access within a trusted cluster/localhost port-forward. Anyone with
@@ -242,13 +244,17 @@ Secret from `.env`; it does not overwrite an existing Secret or start the agent.
 The Deployment's explicit namespace-filter environment entries override
 same-named keys from the model Secret; configure in-cluster filters there.
 Tests create only owned resources and verify namespace/RBAC UID before cleanup.
+Container fixtures explicitly delete their own cluster-scoped Incidents after
+namespace removal, checking observer ownership and UID/resourceVersion.
 Do not interrupt cluster-wide networking to test recovery.
 
 Keep non-root, read-only filesystem, dropped capabilities, pinned bases and
 credential-free image context. The approved bounded `emptyDir` at
 `/var/log/kubescout` is only for diagnostic AI transcripts; no PVC is provisioned.
 No probes/progress volumes without a request.
-Do not delete the incident namespace or CRD merely to stop the agent.
+Do not delete the runtime namespace or Incident CRD merely to stop the agent.
+Namespaced Incident installations require an explicit destructive development
+reset; no migration, preservation or automatic reset is supported.
 
 ## Incident storage and logging
 

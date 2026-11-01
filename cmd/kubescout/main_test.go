@@ -1,7 +1,7 @@
 /*
 Purpose: Check agent CLI output, configuration failures and local Make contracts.
 Flow: Offline HTTP fixtures, injected clients, command stubs and dry runs verify
-readable execution summaries, colour controls, namespace scope, current-context
+readable execution summaries, colour controls, workload scope, cluster-scoped incidents, current-context
 selection, deployment preflights and lint command failures without live services.
 Incident setup installs only the namespace and CRD, without deploying or calling AI.
 */
@@ -51,7 +51,7 @@ func TestCLIHealthyScopeMakesNoModelOrIncidentWrites(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/nodes") {
 			items = append(items, map[string]any{"apiVersion": "v1", "kind": "Node", "metadata": map[string]any{"name": "node", "uid": "id", "resourceVersion": "1"},
 				"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}})
-		} else if !strings.Contains(r.URL.Path, "/namespaces/apps/") && r.URL.Path != "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents" {
+		} else if !strings.Contains(r.URL.Path, "/namespaces/apps/") && r.URL.Path != "/apis/kubescout.benc-uk.github.com/v1alpha1/incidents" {
 			t.Error("unexpected scope")
 		}
 
@@ -125,6 +125,7 @@ func TestCLIConfigurationAndBootstrapFailures(t *testing.T) {
 	}{
 		{[]string{"--deterministic-only"}, 2},
 		{[]string{"--report-namespace=old"}, 2},
+		{[]string{"--incident-namespace=kubescout"}, 2},
 		{[]string{"--simulate-incidents"}, 2},
 		{[]string{"--auth-mode=in-cluster", "--namespace-watch=apps"}, 2},
 		{[]string{"--help"}, 0},
@@ -142,8 +143,8 @@ func TestCLIConfigurationAndBootstrapFailures(t *testing.T) {
 			t.Fatal("CLI help must use the KubeScout executable name")
 		}
 
-		if slices.Contains(test.args, "--help") && strings.Contains(errOut.String(), "simulate-incidents") {
-			t.Fatal("CLI help must not advertise incident simulation")
+		if slices.Contains(test.args, "--help") && (strings.Contains(errOut.String(), "simulate-incidents") || strings.Contains(errOut.String(), "incident-namespace")) {
+			t.Fatal("CLI help must not advertise removed incident options")
 		}
 	}
 
@@ -352,7 +353,7 @@ func TestMakeNamespaceScopeDefaultsAndIgnore(t *testing.T) {
 }
 
 // TestMakeLocalRunUsesCurrentContext dry-runs local agent and dashboard targets to verify
-// namespace arguments and absence of context overrides without starting either process.
+// workload filters, namespace-free incident access and no context overrides without starting either process.
 func TestMakeLocalRunUsesCurrentContext(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -380,13 +381,16 @@ func TestMakeLocalRunUsesCurrentContext(t *testing.T) {
 					t.Fatalf("incorrect local run context flags: err=%v output=%s", err, output)
 				}
 
-				namespaceFlag := `--namespace-watch "apps,other"`
 				if target == "dash-run" {
-					namespaceFlag = "--namespace=kubescout"
+					if strings.Contains(string(output), "--namespace") {
+						t.Fatalf("dashboard must not select a namespace: output=%s", output)
+					}
+				} else if !strings.Contains(string(output), `--namespace-watch "apps,other"`) {
+					t.Fatalf("incorrect workload namespace: output=%s", output)
 				}
 
-				if !strings.Contains(string(output), namespaceFlag) || strings.Contains(string(output), "--namespace unused") {
-					t.Fatalf("incorrect namespace: output=%s", output)
+				if strings.Contains(string(output), "--incident-namespace") {
+					t.Fatalf("incidents must not select a namespace: output=%s", output)
 				}
 			})
 		}
