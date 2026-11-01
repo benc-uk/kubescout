@@ -30,18 +30,18 @@ import (
 
 // TestLiveDeployment requires container and model authorization to run a bounded in-cluster agent.
 // It creates an owned model Secret, RBAC and workloads, then compares accepted output to stored
-// ClusterIssues; successful AI no-action is valid and fixture cleanup removes owned resources.
+// Incidents; successful AI no-action is valid and fixture cleanup removes owned resources.
 func TestLiveDeployment(t *testing.T) {
-	if os.Getenv("K8S_HEALTH_LIVE_CONTAINER") != "yes" {
+	if os.Getenv("KUBESCOUT_LIVE_CONTAINER") != "yes" {
 		t.Skip("requires explicit container validation approval")
 	}
 
 	requireLiveModel(t)
 	f := newFixtureStage(t, true, "ai-container")
 
-	image := os.Getenv("K8S_HEALTH_IMAGE")
+	image := os.Getenv("KUBESCOUT_IMAGE")
 	if image == "" {
-		t.Fatal("K8S_HEALTH_IMAGE required")
+		t.Fatal("KUBESCOUT_IMAGE required")
 	}
 
 	client, err := dynamic.NewForConfig(f.config)
@@ -51,7 +51,7 @@ func TestLiveDeployment(t *testing.T) {
 
 	store := client.Resource(incident.GVR).Namespace(f.namespace)
 	if _, err := store.List(t.Context(), metav1.ListOptions{Limit: 1}); err != nil {
-		t.Fatal("ClusterIssue CRD must be installed separately")
+		t.Fatal("Incident CRD must be installed separately")
 	}
 
 	f.installRBAC()
@@ -60,13 +60,13 @@ func TestLiveDeployment(t *testing.T) {
 		t.Fatal("invalid model configuration")
 	}
 
-	c, err := config.Parse([]string{"--auth-mode=in-cluster", "--namespace=" + f.namespace, "--observer-id=" + f.namespace}, os.Getenv, &bytes.Buffer{})
+	c, err := config.Parse([]string{"--auth-mode=in-cluster", "--namespace-watch=" + f.namespace, "--observer-id=" + f.namespace}, os.Getenv, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal("model configuration missing or invalid")
 	}
 
 	_, err = f.client.CoreV1().Secrets(f.namespace).Create(t.Context(), &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "k8s-health-model"},
+		ObjectMeta: metav1.ObjectMeta{Name: "kubescout-model"},
 		StringData: map[string]string{"AZURE_OPENAI_ENDPOINT": c.Endpoint, "AZURE_OPENAI_API_KEY": c.APIKey, "AZURE_AI_MODEL_DEPLOYMENT_NAME": c.Model},
 	}, metav1.CreateOptions{})
 	if err != nil {
@@ -78,7 +78,7 @@ func TestLiveDeployment(t *testing.T) {
 	spec := deploymentManifest(t).Spec.Template.Spec
 	spec.RestartPolicy = corev1.RestartPolicyNever
 	spec.Containers[0].Image = image
-	spec.Containers[0].Args = []string{"--once", "--auth-mode=in-cluster", "--namespace=" + f.namespace, "--incident-namespace=" + f.namespace,
+	spec.Containers[0].Args = []string{"--once", "--auth-mode=in-cluster", "--namespace-watch=" + f.namespace, "--incident-namespace=" + f.namespace,
 		"--observer-id=" + f.namespace, "--startup-grace=0s", "--model-calls-per-hour=6", "--request-timeout=30s", "--run-timeout=120s"}
 
 	pod, err := f.client.CoreV1().Pods(f.namespace).Create(t.Context(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "agent-validation"}, Spec: spec}, metav1.CreateOptions{})
@@ -167,7 +167,7 @@ func (f *fixture) installRBAC() {
 				f.t.Fatal(err)
 			}
 		case *rbacv1.ClusterRole:
-			if value.Name == "k8s-health-resources" {
+			if value.Name == "kubescout-resources" {
 				role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: value.Name, Namespace: f.namespace}, Rules: value.Rules}
 				if _, err := f.client.RbacV1().Roles(f.namespace).Create(f.t.Context(), role, metav1.CreateOptions{}); err != nil {
 					f.t.Fatal(err)
@@ -192,9 +192,9 @@ func (f *fixture) installRBAC() {
 				}
 			})
 		case *rbacv1.ClusterRoleBinding:
-			if value.Name == "k8s-health-resources" {
+			if value.Name == "kubescout-resources" {
 				binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: value.Name, Namespace: f.namespace},
-					Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "k8s-health", Namespace: f.namespace}},
+					Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "kubescout", Namespace: f.namespace}},
 					RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: value.RoleRef.Name}}
 				if _, err := f.client.RbacV1().RoleBindings(f.namespace).Create(f.t.Context(), binding, metav1.CreateOptions{}); err != nil {
 					f.t.Fatal(err)

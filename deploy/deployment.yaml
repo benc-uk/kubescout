@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: k8s-health
-  namespace: k8s-health
+  name: kubescout
+  namespace: kubescout
   labels:
-    app.kubernetes.io/name: k8s-health
+    app.kubernetes.io/name: kubescout
 spec:
   replicas: 0
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: k8s-health
+      app.kubernetes.io/name: kubescout
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: k8s-health
+        app.kubernetes.io/name: kubescout
     spec:
-      serviceAccountName: k8s-health
+      serviceAccountName: kubescout
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: 15
       securityContext:
@@ -32,7 +32,7 @@ spec:
           imagePullPolicy: Never
           args:
             - --auth-mode=in-cluster
-            - --incident-namespace=k8s-health
+            - --incident-namespace=kubescout
             - --observer-id=kind-all
             - --model-calls-per-hour=300
           # Omit both lists to watch all namespaces; configure at most one.
@@ -43,7 +43,7 @@ spec:
               value: ""
           envFrom:
             - secretRef:
-                name: k8s-health-model
+                name: kubescout-model
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

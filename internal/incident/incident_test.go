@@ -1,7 +1,7 @@
 /*
 Purpose: Test incident lifecycle, decision scope and persistence contracts.
 Flow: Offline memory and local Kubernetes HTTP fixtures cover semantic no-ops,
-recovery gating, restart and legacy identity, ambiguous writes and stale results;
+recovery gating, identity across restarts, ambiguous writes and stale results;
 request checks verify preconditions and preservation of human triage status.
 */
 package incident
@@ -42,11 +42,11 @@ func fixture() (InvestigationContext, Decision) {
 	return in, d
 }
 
-// TestClusterIssueLifecycleAndSemanticNoops checks material updates, recovery gating and
+// TestIncidentLifecycleAndSemanticNoops checks material updates, recovery gating and
 // restart-safe reopening while ensuring prose-only changes neither write nor replace identity.
-func TestClusterIssueLifecycleAndSemanticNoops(t *testing.T) {
+func TestIncidentLifecycleAndSemanticNoops(t *testing.T) {
 	in, d := fixture()
-	repo := &Memory{Log: io.Discard}
+	repo := &Memory{}
 	s := Reconciler{Repository: repo, Observer: "fixture", Model: "model"}
 
 	if err := Validate(d, in, map[string]bool{"evidence": true}); err != nil {
@@ -59,8 +59,8 @@ func TestClusterIssueLifecycleAndSemanticNoops(t *testing.T) {
 	}
 
 	name := changes[0].Name
-	if !strings.HasPrefix(name, "issue-") || len(name) != len("issue-")+32 {
-		t.Fatalf("incorrect ClusterIssue name: %s", name)
+	if !strings.HasPrefix(name, "inc-") || len(name) != len("inc-")+16 {
+		t.Fatalf("incorrect Incident name: %s", name)
 	}
 
 	in.Incidents, err = s.Existing(t.Context(), in.Identities[in.Anchor])
@@ -107,72 +107,8 @@ func TestClusterIssueLifecycleAndSemanticNoops(t *testing.T) {
 	}
 }
 
-// TestLegacyClusterIssueLifecycle preserves historical names through updates, resolution,
-// restart, recurrence and ambiguous writes without creating another record.
-func TestLegacyClusterIssueLifecycle(t *testing.T) {
-	in, d := fixture()
-	identity := Identity{"fixture", in.Identities[in.Anchor], d.Actions[0].Family}
-
-	r, err := next(nil, identity, d.Actions[0], in, "model", time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	r.Name = legacyName(identity)
-	repo := &Memory{Log: io.Discard, Records: map[string]Record{r.Name: r}}
-	s := Reconciler{Repository: repo, Observer: "fixture", Model: "model"}
-
-	open, err := repo.ListOpen(t.Context())
-	if err != nil || len(open) != 1 || open[0].Name != r.Name {
-		t.Fatalf("legacy open index: %v", err)
-	}
-
-	if _, err := s.Apply(t.Context(), in, d, func() bool { return true }); err == nil {
-		t.Fatal("legacy incident was duplicated by a raise")
-	}
-
-	for _, operation := range []string{"update", "resolve", "update"} {
-		in.Incidents, err = s.Existing(t.Context(), identity.Anchor)
-		if err != nil || len(in.Incidents) != 1 || in.Incidents[0].ID != r.Name {
-			t.Fatalf("legacy lookup: %v", err)
-		}
-
-		in.RecoveryEligible = true
-
-		d.Actions[0].Operation, d.Actions[0].IncidentID, d.Actions[0].Severity = operation, r.Name, "high"
-		if err := Validate(d, in, map[string]bool{"evidence": true}); err != nil {
-			t.Fatal(err)
-		}
-
-		changes, err := s.Apply(t.Context(), in, d, func() bool { return true })
-		if err != nil || len(changes) != 1 || changes[0].Name != r.Name || len(repo.Records) != 1 {
-			t.Fatalf("legacy %s changed identity: changes=%v err=%v", operation, changes, err)
-		}
-
-		s = Reconciler{Repository: repo, Observer: "fixture", Model: "model"}
-	}
-
-	if repo.Records[r.Name].Value.Lifecycle.Recurrences != 1 {
-		t.Fatal("legacy recurrence was not preserved")
-	}
-
-	in.Incidents, err = s.Existing(t.Context(), identity.Anchor)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ambiguous := &ambiguousRepository{Memory: *repo}
-	s.Repository = ambiguous
-	d.Actions[0].Severity = "critical"
-
-	changes, err := s.Apply(t.Context(), in, d, func() bool { return true })
-	if err != nil || len(changes) != 1 || changes[0].Name != r.Name || ambiguous.saves != 1 || len(ambiguous.Records) != 1 {
-		t.Fatalf("legacy ambiguous update changed identity: changes=%v err=%v", changes, err)
-	}
-}
-
-// TestStoredClusterIssueNameValidation accepts both identity-derived prefixes without rewriting stored names.
-func TestStoredClusterIssueNameValidation(t *testing.T) {
+// TestStoredIncidentNameValidation accepts only the current identity-derived name.
+func TestStoredIncidentNameValidation(t *testing.T) {
 	in, d := fixture()
 	identity := Identity{"fixture", in.Identities[in.Anchor], d.Actions[0].Family}
 
@@ -191,15 +127,13 @@ func TestStoredClusterIssueNameValidation(t *testing.T) {
 		valid bool
 	}{
 		{Name(identity), true},
-		{legacyName(identity), true},
-		{"issue-invalid", false},
 		{"incident-invalid", false},
 		{Name(Identity{"other", identity.Anchor, identity.Family}), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			obj := &unstructured.Unstructured{Object: map[string]any{"spec": payload}}
 			obj.SetName(tc.name)
-			obj.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "k8s-health"})
+			obj.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "kubescout"})
 
 			record, err := (Kubernetes{Observer: "fixture"}).decode(obj)
 			if (err == nil) != tc.valid {
@@ -250,7 +184,7 @@ func (r *ambiguousRepository) Save(ctx context.Context, v Record) error {
 // committed write and rejects superseded conclusions before another publication.
 func TestAmbiguousWriteDoesNotCreateDuplicateOrRerunAI(t *testing.T) {
 	in, d := fixture()
-	repo := &ambiguousRepository{Memory: Memory{Log: io.Discard}}
+	repo := &ambiguousRepository{Memory: Memory{}}
 	s := Reconciler{Repository: repo, Observer: "fixture"}
 
 	changes, err := s.Apply(t.Context(), in, d, func() bool { return true })
@@ -275,7 +209,7 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		if !strings.HasPrefix(r.URL.Path, "/apis/health.k8s-ops-agent.io/v1alpha1/namespaces/incidents/clusterissues") {
+		if !strings.HasPrefix(r.URL.Path, "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents") {
 			t.Error("wrong incident scope")
 		}
 
@@ -288,13 +222,13 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 				return
 			}
 
-			if r.URL.Path == "/apis/health.k8s-ops-agent.io/v1alpha1/namespaces/incidents/clusterissues" {
-				if r.URL.Query().Get("labelSelector") != "app.kubernetes.io/managed-by=k8s-health,health.k8s-ops-agent.io/observer=fixture,health.k8s-ops-agent.io/state=open" {
-					t.Error("open issue index must select the state label")
+			if r.URL.Path == "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents" {
+				if r.URL.Query().Get("labelSelector") != "app.kubernetes.io/managed-by=kubescout,kubescout.benc-uk.github.com/observer=fixture,kubescout.benc-uk.github.com/state=open" {
+					t.Error("open incident index must select the state label")
 				}
 
 				json.NewEncoder(w).Encode(map[string]any{
-					"apiVersion": APIVersion, "kind": "ClusterIssueList",
+					"apiVersion": APIVersion, "kind": "IncidentList",
 					"metadata": map[string]any{"resourceVersion": "2"}, "items": []any{object},
 				})
 
@@ -309,18 +243,18 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 				t.Error("invalid create")
 			}
 
-			if object["kind"] != "ClusterIssue" || object["status"] != nil {
+			if object["kind"] != "Incident" || object["status"] != nil {
 				t.Error("incorrect incident object")
 			}
 
 			meta := object["metadata"].(map[string]any)
-			if meta["labels"].(map[string]any)["health.k8s-ops-agent.io/state"] != "open" ||
+			if meta["labels"].(map[string]any)["kubescout.benc-uk.github.com/state"] != "open" ||
 				object["spec"].(map[string]any)["lifecycle"].(map[string]any)["state"] != "open" {
 				t.Error("create must use state in labels and lifecycle")
 			}
 
 			if meta["name"] != Name(Identity{"fixture", in.Identities[in.Anchor], d.Actions[0].Family}) {
-				t.Error("incorrect ClusterIssue name")
+				t.Error("incorrect Incident name")
 			}
 
 			meta["resourceVersion"], meta["uid"] = "1", "incident-uid"
@@ -346,7 +280,7 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 				t.Error("missing identity/resourceVersion preconditions")
 			}
 
-			if patch[3]["path"] != "/metadata/labels/health.k8s-ops-agent.io~1state" {
+			if patch[3]["path"] != "/metadata/labels/kubescout.benc-uk.github.com~1state" {
 				t.Error("update must maintain state label")
 			}
 
@@ -370,7 +304,7 @@ func TestKubernetesIncidentRequestContract(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := Reconciler{Repository: Kubernetes{Client: client, Namespace: "incidents", Observer: "fixture", Limit: 10, Timeout: time.Second}, Observer: "fixture"}
+	s := Reconciler{Repository: Kubernetes{Client: client, Namespace: "kubescout", Observer: "fixture", Limit: 10, Timeout: time.Second}, Observer: "fixture"}
 
 	changes, err := s.Apply(t.Context(), in, d, func() bool { return true })
 	if err != nil {

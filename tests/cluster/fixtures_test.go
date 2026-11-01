@@ -82,7 +82,7 @@ func (f *fixture) gatedPod(name string) *corev1.Pod {
 	p, err := f.client.CoreV1().Pods(f.namespace).Create(f.t.Context(), &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: corev1.PodSpec{TerminationGracePeriodSeconds: new(int64(0)), Containers: []corev1.Container{container()},
-			SchedulingGates: []corev1.PodSchedulingGate{{Name: "k8s-health-stage2/hold"}}},
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: "kubescout-stage2/hold"}}},
 	}, metav1.CreateOptions{})
 	if err != nil {
 		f.t.Fatalf("create gated pod: %v", err)

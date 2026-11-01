@@ -119,28 +119,19 @@ type Change struct {
 	Operation string   `json:"operation"`
 	Name      string   `json:"name"`
 	Incident  Incident `json:"incident"`
-	Simulated bool     `json:"simulated"`
+	// Simulated remains false in runtime output for schema 3.0 compatibility.
+	Simulated bool `json:"simulated"`
 }
 
-const APIVersion = "health.k8s-ops-agent.io/v1alpha1"
+const APIVersion = "kubescout.benc-uk.github.com/v1alpha1"
 const PromptVersion = "incident-v2"
 
-// Name derives a stable ClusterIssue name from observer, anchor identity and incident family.
+// Name derives a stable Incident name from observer, anchor identity and incident family.
 func Name(identity Identity) string {
 	data, _ := json.Marshal(identity)
 	sum := sha256.Sum256(data)
 
-	return "issue-" + hex.EncodeToString(sum[:16])
-}
-
-// legacyName derives the historical incident-prefixed name for in-place record lookup.
-func legacyName(identity Identity) string {
-	return "incident-" + strings.TrimPrefix(Name(identity), "issue-")
-}
-
-// matchesName accepts only the current or historical name derived from the supplied identity.
-func matchesName(name string, identity Identity) bool {
-	return name == Name(identity) || name == legacyName(identity)
+	return "inc-" + hex.EncodeToString(sum[:8])
 }
 
 var Families = []string{"scheduling", "container-failure", "rollout", "job-failure", "node-health", "service-availability"}

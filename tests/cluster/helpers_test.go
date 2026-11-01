@@ -79,12 +79,12 @@ func newFixture(t *testing.T, model bool) *fixture { return newFixtureStage(t, m
 func newFixtureStage(t *testing.T, model bool, stage string) *fixture {
 	t.Helper()
 
-	target := os.Getenv("K8S_HEALTH_LIVE_CONTEXT")
+	target := os.Getenv("KUBESCOUT_LIVE_CONTEXT")
 	if target == "" {
-		t.Fatal("K8S_HEALTH_LIVE_CONTEXT must explicitly select a context")
+		t.Fatal("KUBESCOUT_LIVE_CONTEXT must explicitly select a context")
 	}
 
-	if model && os.Getenv("K8S_HEALTH_LIVE_MODEL") != "yes" {
+	if model && os.Getenv("KUBESCOUT_LIVE_MODEL") != "yes" {
 		t.Skip("requires explicit model request authorisation")
 	}
 
@@ -100,14 +100,14 @@ func newFixtureStage(t *testing.T, model bool, stage string) *fixture {
 		t.Fatal(err)
 	}
 
-	owner := "k8s-health-" + stage
+	owner := "kubescout-" + stage
 
 	ns, err := client.CoreV1().Namespaces().Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: owner + "-", Labels: map[string]string{"app.kubernetes.io/managed-by": owner}}}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	binary, err := filepath.Abs(filepath.Join("..", "..", "build", "bin", "k8s-health"))
+	binary, err := filepath.Abs(filepath.Join("..", "..", "build", "bin", "kubescout"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func (f *fixture) cleanup() {
 
 // args builds kubeconfig arguments scoped to the fixture's explicit context and owned namespace.
 func (f *fixture) args(extra ...string) []string {
-	return append([]string{"--auth-mode=kubeconfig", "--context=" + f.context, "--namespace=" + f.namespace, "--observer-id=" + f.namespace,
+	return append([]string{"--auth-mode=kubeconfig", "--context=" + f.context, "--namespace-watch=" + f.namespace, "--observer-id=" + f.namespace,
 		"--request-timeout=5s", "--run-timeout=90s"}, extra...)
 }
 
@@ -373,7 +373,7 @@ func metric(t *testing.T, name string, since time.Time, r observation, limit tim
 func requireLiveModel(t *testing.T) {
 	t.Helper()
 
-	if os.Getenv("K8S_HEALTH_LIVE_MODEL") != "yes" {
+	if os.Getenv("KUBESCOUT_LIVE_MODEL") != "yes" {
 		t.Skip("requires explicit authorisation for up to six real model requests")
 	}
 }

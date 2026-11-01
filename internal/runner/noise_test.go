@@ -7,7 +7,6 @@ that repeated equivalent conclusions retain one incident without extra writes.
 package runner
 
 import (
-	"io"
 	"testing"
 	"time"
 
@@ -33,7 +32,7 @@ func TestDayOfStableIncidentReviewsCreatesOnlyOneCR(t *testing.T) {
 	action := incident.Action{Operation: "raise", Family: "container-failure", ResourceRefs: []string{key}, Title: "Crash loop", Severity: "medium", Impact: "degraded",
 		Diagnosis: "repeated-exit", Explanation: "Repeated workload failure", EvidenceIDs: []string{"snapshot"}, Recommendations: []string{"Inspect configuration"},
 		Uncertainty: "Cause not yet confirmed", MaterialChange: true}
-	repo := &incident.Memory{Log: io.Discard}
+	repo := &incident.Memory{}
 	reconciler := incident.Reconciler{Repository: repo, Observer: "fixture"}
 
 	changes, err := reconciler.Apply(t.Context(), in, incident.Decision{Outcome: "decisions", Reason: "AI recognised a problem", Actions: []incident.Action{action}}, func() bool { return true })

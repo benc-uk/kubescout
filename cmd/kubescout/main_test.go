@@ -3,6 +3,7 @@ Purpose: Check agent CLI output, configuration failures and local Make contracts
 Flow: Offline HTTP fixtures, injected clients, command stubs and dry runs verify
 no-action and incomplete execution envelopes, namespace scope, current-context
 selection, deployment preflights and lint command failures without live services.
+Incident setup installs only the namespace and CRD, without deploying or calling AI.
 */
 package main
 
@@ -51,7 +52,7 @@ func TestCLIHealthyScopeMakesNoModelOrIncidentWrites(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/nodes") {
 			items = append(items, map[string]any{"apiVersion": "v1", "kind": "Node", "metadata": map[string]any{"name": "node", "uid": "id", "resourceVersion": "1"},
 				"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}})
-		} else if !strings.Contains(r.URL.Path, "/namespaces/apps/") {
+		} else if !strings.Contains(r.URL.Path, "/namespaces/apps/") && r.URL.Path != "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents" {
 			t.Error("unexpected scope")
 		}
 
@@ -72,7 +73,7 @@ func TestCLIHealthyScopeMakesNoModelOrIncidentWrites(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 
-	code := run(t.Context(), []string{"--once", "--auth-mode=kubeconfig", "--kubeconfig=" + path, "--namespace=apps", "--observer-id=fixture"}, &out, &errOut)
+	code := run(t.Context(), []string{"--once", "--auth-mode=kubeconfig", "--kubeconfig=" + path, "--namespace-watch=apps", "--observer-id=fixture"}, &out, &errOut)
 
 	var result output.Result
 	if code != 0 || bytes.Count(out.Bytes(), []byte("\n")) != 1 || json.Unmarshal(out.Bytes(), &result) != nil || len(result.Changes) != 0 || result.Status != "completed" {
@@ -95,7 +96,8 @@ func TestCLIConfigurationAndBootstrapFailures(t *testing.T) {
 	}{
 		{[]string{"--deterministic-only"}, 2},
 		{[]string{"--report-namespace=old"}, 2},
-		{[]string{"--auth-mode=in-cluster", "--namespace=apps"}, 2},
+		{[]string{"--simulate-incidents"}, 2},
+		{[]string{"--auth-mode=in-cluster", "--namespace-watch=apps"}, 2},
 		{[]string{"--help"}, 0},
 	} {
 		var out, errOut bytes.Buffer
@@ -110,11 +112,15 @@ func TestCLIConfigurationAndBootstrapFailures(t *testing.T) {
 		if slices.Contains(test.args, "--help") && !strings.Contains(errOut.String(), "Usage of kubescout:") {
 			t.Fatal("CLI help must use the KubeScout executable name")
 		}
+
+		if slices.Contains(test.args, "--help") && strings.Contains(errOut.String(), "simulate-incidents") {
+			t.Fatal("CLI help must not advertise incident simulation")
+		}
 	}
 
 	var out, errOut bytes.Buffer
 
-	code := runWithClient(t.Context(), []string{"--once", "--auth-mode=in-cluster", "--namespace=apps", "--observer-id=fixture"}, &out, &errOut,
+	code := runWithClient(t.Context(), []string{"--once", "--auth-mode=in-cluster", "--namespace-watch=apps", "--observer-id=fixture"}, &out, &errOut,
 		func(config.Config) (dynamic.Interface, string, error) {
 			return nil, "fixture", errors.New("credentials unavailable")
 		})
@@ -127,7 +133,7 @@ func TestCLIConfigurationAndBootstrapFailures(t *testing.T) {
 	t.Setenv("AZURE_OPENAI_API_KEY", "")
 	out.Reset()
 
-	if code := run(t.Context(), []string{"--once", "--auth-mode=in-cluster", "--namespace=apps", "--observer-id=fixture"}, &out, &errOut); code != 2 {
+	if code := run(t.Context(), []string{"--once", "--auth-mode=in-cluster", "--namespace-watch=apps", "--observer-id=fixture"}, &out, &errOut); code != 2 {
 		t.Fatal("missing model credentials silently downgraded")
 	}
 }
@@ -203,7 +209,7 @@ func TestMakeModelSecretUsesKubectlEnvFile(t *testing.T) {
 			cmd.Dir = root
 			output, err := cmd.CombinedOutput()
 
-			expected := "apply -f deploy/namespace.yaml\n-n k8s-health create secret generic k8s-health-model --from-env-file=.env"
+			expected := "apply -f deploy/namespace.yaml\n-n kubescout create secret generic kubescout-model --from-env-file=.env"
 			if err != nil || strings.TrimSpace(string(output)) != expected {
 				t.Fatalf("Secret creation did not use kubectl and .env directly: %s", output)
 			}
@@ -231,7 +237,7 @@ func TestDeployExplainsMissingSecretWithoutApplying(t *testing.T) {
 			output, err := cmd.CombinedOutput()
 			guidance := "make model-secret"
 
-			preflight := "-n k8s-health get secret k8s-health-model -o name"
+			preflight := "-n kubescout get secret kubescout-model -o name"
 			if err == nil || !strings.Contains(string(output), guidance) ||
 				!strings.Contains(string(output), preflight) ||
 				strings.Contains(string(output), "CONTEXT") || strings.Contains(string(output), "--context") ||
@@ -242,8 +248,8 @@ func TestDeployExplainsMissingSecretWithoutApplying(t *testing.T) {
 	}
 }
 
-// TestMakeLocalKubernetesUsesCurrentContext records stubbed kubectl calls to ensure deployment,
-// forwarding and cleanup targets never override the user's current kubeconfig context.
+// TestMakeLocalKubernetesUsesCurrentContext records stubbed kubectl calls to ensure Incident setup,
+// deployment, forwarding and cleanup targets use the current context without extra mutations.
 func TestMakeLocalKubernetesUsesCurrentContext(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -259,15 +265,21 @@ func TestMakeLocalKubernetesUsesCurrentContext(t *testing.T) {
 		target string
 		calls  []string
 	}{
-		{"deploy", []string{"-n k8s-health get secret k8s-health-model -o name", "apply -k deploy", "-n k8s-health scale deployment/k8s-health --replicas=1"}},
+		{"incidents-setup", []string{"apply -f deploy/namespace.yaml", "apply -f deploy/incidents-crd.yaml", "wait --for=condition=Established --timeout=60s crd/incidents.kubescout.benc-uk.github.com"}},
+		{"deploy", []string{"-n kubescout get secret kubescout-model -o name", "apply -k deploy", "-n kubescout scale deployment/kubescout --replicas=1"}},
 		{"undeploy", []string{"delete -f deploy/deployment.yaml -f deploy/rbac.yaml"}},
 		{"dash-deploy", []string{"apply -k deploy/dashboard"}},
-		{"dash-forward", []string{"-n k8s-health port-forward --address=127.0.0.1 service/kubescout-dashboard 8000:8000"}},
+		{"dash-forward", []string{"-n kubescout port-forward --address=127.0.0.1 service/kubescout-dashboard 8000:8000"}},
 		{"dash-undeploy", []string{"delete -f deploy/dashboard/deployment.yaml -f deploy/dashboard/service.yaml -f deploy/dashboard/rbac.yaml"}},
 	} {
+		allowModel := "yes"
+		if test.target == "incidents-setup" {
+			allowModel = ""
+		}
+
 		for _, context := range []string{"", "selected"} {
 			t.Run(test.target+"/context="+context, func(t *testing.T) {
-				cmd := exec.CommandContext(t.Context(), "make", "-s", test.target, "ALLOW_MODEL=yes", "CONTEXT="+context, "DASHBOARD_CONTEXT="+context, "KUBECTL="+stub)
+				cmd := exec.CommandContext(t.Context(), "make", "-s", test.target, "ALLOW_MODEL="+allowModel, "CONTEXT="+context, "DASHBOARD_CONTEXT="+context, "KUBECTL="+stub, "GO=must-not-run")
 				cmd.Dir = root
 
 				output, err := cmd.CombinedOutput()
@@ -342,7 +354,7 @@ func TestMakeLocalRunUsesCurrentContext(t *testing.T) {
 
 				namespaceFlag := `--namespace-watch "apps,other"`
 				if target == "dash-run" {
-					namespaceFlag = "--namespace=k8s-health"
+					namespaceFlag = "--namespace=kubescout"
 				}
 
 				if !strings.Contains(string(output), namespaceFlag) || strings.Contains(string(output), "--namespace unused") {

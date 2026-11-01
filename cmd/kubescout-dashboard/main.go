@@ -1,6 +1,6 @@
 /*
 Purpose: Bootstrap the standalone dashboard with explicit Kubernetes authentication.
-Flow: Validate flags, select the bind address and serve namespaced ClusterIssue
+Flow: Validate flags, select the bind address and serve namespaced Incident
 views and human triage until shutdown, reporting startup failures through exit codes.
 The dashboard runs separately from AI investigation and incident-spec publication.
 */
@@ -36,7 +36,7 @@ func main() {
 func run(ctx context.Context, args []string, stderr io.Writer, client func(dashboard.ClientOptions) (dynamic.Interface, error), listen func(string, string) (net.Listener, error)) int {
 	flags := flag.NewFlagSet("kubescout-dashboard", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	namespace := flags.String("namespace", "k8s-health", "Namespace containing ClusterIssues")
+	namespace := flags.String("namespace", "kubescout", "Namespace containing Incidents")
 
 	var options dashboard.ClientOptions
 	flags.StringVar(&options.AuthMode, "auth-mode", "in-cluster", "Kubernetes authentication: in-cluster (:8000) or kubeconfig (127.0.0.1:8000)")

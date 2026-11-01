@@ -84,7 +84,7 @@ func (w Writer) WriteResult(r Result) error {
 // atomicWrite encodes and syncs private JSON beside the destination, then replaces it by rename.
 // Failed writes leave the destination unchanged and remove the staging file.
 func atomicWrite(path string, value any) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".k8s-health-")
+	f, err := os.CreateTemp(filepath.Dir(path), ".kubescout-")
 	if err != nil {
 		return err
 	}

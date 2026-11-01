@@ -1,7 +1,7 @@
 /*
 Purpose: Test AI decision validation, tool round trips and transport limits.
 Flow: Offline local HTTP fixtures exercise actual SDK requests, projected
-evidence and no-action on critical signals; malformed output, model failures
+evidence with operation-named citations and no-action; malformed output, model failures
 and exhausted budgets must not yield incident actions.
 */
 package analysis
@@ -78,7 +78,7 @@ func toolResponse(ref string) []any {
 }
 
 // TestResponsesToolRoundTripAndNoAction checks stateless SDK tool history, private-field
-// exclusion and acceptance of no-action using local model and Kubernetes fixtures.
+// exclusion, descriptive tool citations and no-action using local model and Kubernetes fixtures.
 func TestResponsesToolRoundTripAndNoAction(t *testing.T) {
 	in := inputFixture()
 
@@ -123,7 +123,7 @@ func TestResponsesToolRoundTripAndNoAction(t *testing.T) {
 			return
 		}
 
-		if !strings.Contains(string(body["input"]), "function_call_output") || !strings.Contains(string(body["input"]), "tool-1") {
+		if !strings.Contains(string(body["input"]), "function_call_output") || !strings.Contains(string(body["input"]), "inspect-resource-1") {
 			t.Error("stateless tool result missing from second request")
 		}
 

@@ -2,7 +2,7 @@
 Purpose: Construct the standalone dashboard's bounded Kubernetes client.
 Flow: Explicit in-cluster or kubeconfig options select authentication without
 mode fallback. The resulting dynamic client applies request timeouts, rate
-limits and response-body bounds for dashboard issue reads and human triage.
+limits and response-body bounds for dashboard incident reads and human triage.
 */
 package dashboard
 

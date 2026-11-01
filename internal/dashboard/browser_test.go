@@ -1,6 +1,6 @@
 /*
 Purpose: Provide an opt-in, loopback-only dashboard browser-test harness.
-Flow: In-memory issues and test routes supply browser checks with namespace,
+Flow: In-memory incidents and test routes supply browser checks with namespace,
 rendering, error, latency and revision-scoped triage scenarios. The harness
 serves until signalled and never contacts a live cluster or model.
 */
@@ -34,7 +34,7 @@ type browserSource struct {
 	requests int
 }
 
-// List counts browser fixture refreshes and returns summaries, an empty list, or an injected error.
+// List counts browser fixture refreshes and returns incident summaries, an empty list, or an injected error.
 func (s *browserSource) List(context.Context) (Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -44,11 +44,11 @@ func (s *browserSource) List(context.Context) (Snapshot, error) {
 		return Snapshot{}, &APIError{503, "access_denied", "Fixture: check namespace RBAC."}
 	}
 
-	result := Snapshot{Namespace: "issues", FetchedAt: time.Now().UTC(), Items: []Summary{}}
+	result := Snapshot{Namespace: "kubescout", FetchedAt: time.Now().UTC(), Incidents: []Summary{}}
 
 	if s.mode != "empty" {
 		for _, item := range s.items {
-			result.Items = append(result.Items, item.Summary)
+			result.Incidents = append(result.Incidents, item.Summary)
 		}
 	}
 
@@ -83,10 +83,10 @@ func (s *browserSource) Get(ctx context.Context, name string) (DetailResponse, e
 	}
 
 	if mode == "deleted" || found == nil {
-		return DetailResponse{}, &APIError{404, "not_found", "Issue is no longer available; refresh the list."}
+		return DetailResponse{}, &APIError{404, "not_found", "Incident is no longer available; refresh the list."}
 	}
 
-	return DetailResponse{FetchedAt: time.Now().UTC(), Item: *found}, nil
+	return DetailResponse{FetchedAt: time.Now().UTC(), Incident: *found}, nil
 }
 
 // SetDismissed updates fixture triage and its version under lock, rejecting stale versions or injected denial.
@@ -111,10 +111,10 @@ func (s *browserSource) SetDismissed(_ context.Context, name, version string, di
 		item.Dismissed = dismissed
 		item.Version = fmt.Sprintf("%x", sha256.Sum256([]byte(version+"triage")))
 
-		return DetailResponse{FetchedAt: time.Now().UTC(), Item: *item}, nil
+		return DetailResponse{FetchedAt: time.Now().UTC(), Incident: *item}, nil
 	}
 
-	return DetailResponse{}, &APIError{404, "not_found", "Issue no longer available."}
+	return DetailResponse{}, &APIError{404, "not_found", "Incident no longer available."}
 }
 
 // TestBrowserFixture is an opt-in, loopback-only browser harness, never part of the production server.
@@ -126,8 +126,8 @@ func TestBrowserFixture(t *testing.T) {
 	source := &browserSource{}
 
 	for i := range 64 {
-		obj := issueObject(t, fmt.Sprintf("issue-%03d", i))
-		reader := &Reader{namespace: "issues"}
+		obj := incidentObject(t, fmt.Sprintf("incident-%03d", i))
+		reader := &Reader{namespace: "kubescout"}
 
 		item, err := reader.decode(&unstructured.Unstructured{Object: obj})
 		if err != nil {

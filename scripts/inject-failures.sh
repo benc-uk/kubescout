@@ -9,7 +9,7 @@ fi
 CTX=$1
 NS=$2
 TEST="health-demo-$(date +%s)-$RANDOM"
-LABEL=k8s-health-demo=true
+LABEL=kubescout-demo=true
 if [[ ${#NS} -gt 63 || ! "$NS" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
   printf 'Error: invalid namespace: %s\n' "$NS" >&2
   exit 2
@@ -20,8 +20,9 @@ printf '%s\n' \
   '2) Crash loop' \
   '3) Unschedulable pod' \
   '4) Failed Job' \
-  '5) All four' \
+  '5) All five failures' \
   '6) Remove all injected failures' \
+  '7) OOM-killed container (64 MiB limit)' \
   '0) Cancel'
 if ! read -r -p 'Choose failures, separated by spaces (e.g. 1 3): ' -a choices; then
   printf 'Error: no selection received.\n' >&2
@@ -34,7 +35,7 @@ fi
 for choice in "${choices[@]}"; do
   case "$choice" in
     0) printf 'Cancelled.\n'; exit 0 ;;
-    1|2|3|4|5|6) ;;
+    1|2|3|4|5|6|7) ;;
     *) printf 'Error: invalid choice: %s\n' "$choice" >&2; exit 2 ;;
   esac
 done
@@ -51,13 +52,13 @@ if [[ "$selection" == *" 6 "* ]]; then
     exit 0
   fi
   fixtures=$(kubectl --context "$CTX" -n "$NS" get pods,jobs \
-    -o 'jsonpath={range .items[*]}{.kind}{"|"}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.metadata.labels.k8s-health-demo}{"\n"}{end}')
+    -o 'jsonpath={range .items[*]}{.kind}{"|"}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.metadata.labels.kubescout-demo}{"\n"}{end}')
   removed=0
   while IFS='|' read -r kind name uid owner; do
-    [[ "$name" =~ ^health-demo-[0-9]+(-[0-9]+)?-(image|crash|pending|job)$ ]] || continue
+    [[ "$name" =~ ^health-demo-[0-9]+(-[0-9]+)?-(image|crash|pending|job|oom)$ ]] || continue
     [[ -z "$owner" || "$owner" == true ]] || continue
     case "$kind:$name" in
-      Pod:*-image|Pod:*-crash|Pod:*-pending)
+      Pod:*-image|Pod:*-crash|Pod:*-pending|Pod:*-oom)
         resource=pod
         path="/api/v1/namespaces/$NS/pods/$name"
         ;;
@@ -81,7 +82,7 @@ EOF
   exit 0
 fi
 if [[ "$selection" == *" 5 "* ]]; then
-  selection=" 1 2 3 4 "
+  selection=" 1 2 3 4 7 "
 fi
 
 printf 'Fixture prefix: %s\n' "$TEST"
@@ -126,7 +127,7 @@ kind: Job
 metadata:
   name: $TEST-job
   labels:
-    k8s-health-demo: "true"
+    kubescout-demo: "true"
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 60
@@ -138,6 +139,46 @@ spec:
           image: busybox:1.37.0
           command: ["sh", "-c", "exit 1"]
 EOF
+fi
+
+# OOM kill retained in the terminated state rather than hidden by a quick restart.
+if [[ "$selection" == *" 7 "* ]]; then
+  printf 'Cleanup when finished: kubectl --context %q -n %q delete pod %q\n' "$CTX" "$NS" "$TEST-oom"
+  kubectl --context "$CTX" -n "$NS" create -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $TEST-oom
+  labels:
+    kubescout-demo: "true"
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: oom
+      image: python:3.13.9-alpine
+      command: ["python3", "-c", "data = bytearray(128 * 1024 * 1024)"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+EOF
+  printf 'Allocates 128 MiB against a 64 MiB container limit; expected termination reason: OOMKilled.\n'
+  printf 'Inspect termination: kubectl --context %q -n %q get pod %q -o yaml\n' "$CTX" "$NS" "$TEST-oom"
 fi
 
 printf '\nSelected failures created.\n'

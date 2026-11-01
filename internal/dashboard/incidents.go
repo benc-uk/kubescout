@@ -1,6 +1,6 @@
 /*
-Purpose: Read dashboard issue views and persist revision-scoped human triage.
-Flow: Bounded, complete ClusterIssue reads in one storage namespace become
+Purpose: Read dashboard incident views and persist revision-scoped human triage.
+Flow: Bounded, complete Incident reads in one storage namespace become
 validated summaries and details. Dismiss/restore uses displayed-version and
 UID/resourceVersion checks to patch status.triage only; it neither calls AI
 nor writes incident specs, and reports upstream failures as explicit errors.
@@ -62,12 +62,12 @@ type Detail struct {
 type Snapshot struct {
 	Namespace string    `json:"namespace"`
 	FetchedAt time.Time `json:"fetched_at"`
-	Items     []Summary `json:"items"`
+	Incidents []Summary `json:"incidents"`
 }
 
 type DetailResponse struct {
 	FetchedAt time.Time `json:"fetched_at"`
-	Item      Detail    `json:"item"`
+	Incident  Detail    `json:"incident"`
 }
 
 type Source interface {
@@ -82,7 +82,7 @@ type Reader struct {
 }
 
 const (
-	MaxIssues        = 1000
+	MaxIncidents     = 1000
 	MaxResponseBytes = 8 << 20
 	RequestTimeout   = 10 * time.Second
 )
@@ -90,9 +90,9 @@ const (
 // Error exposes the caller-safe message without adding upstream error details.
 func (e *APIError) Error() string { return e.Message }
 
-var errResponseSize = &APIError{502, "response_too_large", "Issue data exceeds the 8 MiB response limit; narrow the stored issue set."}
+var errResponseSize = &APIError{502, "response_too_large", "Incident data exceeds the 8 MiB response limit; narrow the stored incident set."}
 
-// NewReader validates the storage namespace and binds the client to ClusterIssue operations.
+// NewReader validates the storage namespace and binds the client to Incident operations.
 func NewReader(client dynamic.Interface, namespace string) (*Reader, error) {
 	if len(validation.IsDNS1123Label(namespace)) != 0 {
 		return nil, errors.New("namespace must be a non-empty Kubernetes namespace name")
@@ -101,13 +101,13 @@ func NewReader(client dynamic.Interface, namespace string) (*Reader, error) {
 	return &Reader{client: client.Resource(incident.GVR), namespace: namespace}, nil
 }
 
-// List reads all issue summaries in the configured namespace with time, count, and size bounds.
+// List reads all incident summaries in the configured namespace with time, count, and size bounds.
 // Pagination inconsistencies or invalid records fail the whole snapshot rather than returning partial data.
 func (r *Reader) List(ctx context.Context) (Snapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 
-	result := Snapshot{Namespace: r.namespace, Items: []Summary{}}
+	result := Snapshot{Namespace: r.namespace, Incidents: []Summary{}}
 	options := metav1.ListOptions{Limit: 100}
 	tokens, names := map[string]bool{}, map[string]bool{}
 	version := ""
@@ -120,13 +120,13 @@ func (r *Reader) List(ctx context.Context) (Snapshot, error) {
 		}
 
 		if page.GetResourceVersion() == "" || (version != "" && page.GetResourceVersion() != version) {
-			return Snapshot{}, invalidSnapshot("Inconsistent issue pagination; refresh to retry.")
+			return Snapshot{}, invalidSnapshot("Inconsistent incident pagination; refresh to retry.")
 		}
 
 		version = page.GetResourceVersion()
 		for i := range page.Items {
-			if len(result.Items) == MaxIssues {
-				return Snapshot{}, &APIError{502, "issue_limit", "More than 1,000 stored issues; the dashboard cannot display a complete snapshot. Archive issues explicitly outside this dashboard."}
+			if len(result.Incidents) == MaxIncidents {
+				return Snapshot{}, &APIError{502, "incident_limit", "More than 1,000 stored incidents; the dashboard cannot display a complete snapshot. Archive incidents explicitly outside this dashboard."}
 			}
 
 			detail, err := r.decode(&page.Items[i])
@@ -135,12 +135,12 @@ func (r *Reader) List(ctx context.Context) (Snapshot, error) {
 			}
 
 			if names[detail.Name] {
-				return Snapshot{}, invalidSnapshot("Duplicate issue in pagination; refresh to retry.")
+				return Snapshot{}, invalidSnapshot("Duplicate incident in pagination; refresh to retry.")
 			}
 
 			encoded, err := json.Marshal(detail.Summary)
 			if err != nil {
-				return Snapshot{}, invalidSnapshot("Stored issue cannot be encoded.")
+				return Snapshot{}, invalidSnapshot("Stored incident cannot be encoded.")
 			}
 
 			encodedSize += len(encoded) + 1
@@ -149,7 +149,7 @@ func (r *Reader) List(ctx context.Context) (Snapshot, error) {
 			}
 
 			names[detail.Name] = true
-			result.Items = append(result.Items, detail.Summary)
+			result.Incidents = append(result.Incidents, detail.Summary)
 		}
 
 		options.Continue = page.GetContinue()
@@ -159,17 +159,17 @@ func (r *Reader) List(ctx context.Context) (Snapshot, error) {
 		}
 
 		if tokens[options.Continue] {
-			return Snapshot{}, invalidSnapshot("Repeated issue pagination token; refresh to retry.")
+			return Snapshot{}, invalidSnapshot("Repeated incident pagination token; refresh to retry.")
 		}
 
 		tokens[options.Continue] = true
 	}
 }
 
-// Get validates an issue name, performs a bounded namespaced read, and projects its detail view.
+// Get validates an incident name, performs a bounded namespaced read, and projects its detail view.
 func (r *Reader) Get(ctx context.Context, name string) (DetailResponse, error) {
 	if len(validation.IsDNS1123Subdomain(name)) != 0 {
-		return DetailResponse{}, &APIError{400, "invalid_name", "Invalid ClusterIssue name."}
+		return DetailResponse{}, &APIError{400, "invalid_name", "Invalid Incident name."}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
@@ -181,7 +181,7 @@ func (r *Reader) Get(ctx context.Context, name string) (DetailResponse, error) {
 	}
 
 	if obj.GetName() != name {
-		return DetailResponse{}, invalidSnapshot("The API returned a different issue than requested.")
+		return DetailResponse{}, invalidSnapshot("The API returned a different incident than requested.")
 	}
 
 	item, err := r.decode(obj)
@@ -189,17 +189,17 @@ func (r *Reader) Get(ctx context.Context, name string) (DetailResponse, error) {
 		return DetailResponse{}, err
 	}
 
-	return DetailResponse{FetchedAt: time.Now().UTC(), Item: item}, nil
+	return DetailResponse{FetchedAt: time.Now().UTC(), Incident: item}, nil
 }
 
-// decode validates stored issue fields and projects a view without raw metadata or resource UIDs.
+// decode validates stored incident fields and projects a view without raw metadata or resource UIDs.
 // Dismissal applies only when the stored triage revision matches the incident lifecycle revision.
 func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 	var value incident.Incident
 
 	spec, ok := obj.Object["spec"].(map[string]any)
 	if !ok || runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &value) != nil {
-		return Detail{}, invalidSnapshot("Stored issue has an invalid schema.")
+		return Detail{}, invalidSnapshot("Stored incident has an invalid schema.")
 	}
 
 	if obj.GetNamespace() != r.namespace || len(validation.IsDNS1123Subdomain(obj.GetName())) != 0 ||
@@ -211,13 +211,13 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 		value.Lifecycle.Revision < 1 || value.Lifecycle.Recurrences < 0 ||
 		value.Lifecycle.RaisedAt.IsZero() || value.Lifecycle.UpdatedAt.IsZero() ||
 		len(value.Resources) == 0 || len(value.Resources) > 50 {
-		return Detail{}, invalidSnapshot("Stored issue has invalid identity, analysis or lifecycle fields.")
+		return Detail{}, invalidSnapshot("Stored incident has invalid identity, analysis or lifecycle fields.")
 	}
 
 	for _, text := range []string{value.Analysis.Title, value.Analysis.Diagnosis, value.Analysis.Explanation,
 		value.Analysis.Uncertainty, value.Analysis.Model, value.Analysis.PromptVersion, value.Analysis.AnalysisID} {
 		if strings.TrimSpace(text) == "" || len(text) > 16000 {
-			return Detail{}, invalidSnapshot("Stored issue has invalid analysis text.")
+			return Detail{}, invalidSnapshot("Stored incident has invalid analysis text.")
 		}
 	}
 
@@ -226,12 +226,12 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 		limit  int
 	}{{value.Analysis.EvidenceIDs, 50}, {value.Analysis.Recommendations, 10}} {
 		if list.values == nil || len(list.values) > list.limit {
-			return Detail{}, invalidSnapshot("Stored issue has invalid analysis references.")
+			return Detail{}, invalidSnapshot("Stored incident has invalid analysis references.")
 		}
 
 		for _, text := range list.values {
 			if strings.TrimSpace(text) == "" || len(text) > 16000 {
-				return Detail{}, invalidSnapshot("Stored issue has invalid analysis references.")
+				return Detail{}, invalidSnapshot("Stored incident has invalid analysis references.")
 			}
 		}
 	}
@@ -239,7 +239,7 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 	refs := make([]Resource, 0, len(value.Resources))
 	for _, ref := range value.Resources {
 		if ref.Kind == "" || ref.Name == "" {
-			return Detail{}, invalidSnapshot("Stored issue has an invalid resource reference.")
+			return Detail{}, invalidSnapshot("Stored incident has an invalid resource reference.")
 		}
 
 		refs = append(refs, Resource{ref.Kind, ref.Namespace, ref.Name})
@@ -249,7 +249,7 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 
 	dismissedRevision, _, err := unstructured.NestedInt64(obj.Object, "status", "triage", "dismissedRevision")
 	if err != nil || dismissedRevision < 0 {
-		return Detail{}, invalidSnapshot("Stored issue has invalid triage status.")
+		return Detail{}, invalidSnapshot("Stored incident has invalid triage status.")
 	}
 
 	return Detail{
@@ -258,14 +258,14 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 			Family: value.Identity.Family, Anchor: Resource{anchor.Kind, anchor.Namespace, anchor.Name},
 			Resources: refs, Title: value.Analysis.Title, Severity: value.Analysis.Severity,
 			Impact: value.Analysis.Impact, Lifecycle: value.Lifecycle,
-			Dismissed: dismissedRevision == value.Lifecycle.Revision, Version: issueVersion(obj),
+			Dismissed: dismissedRevision == value.Lifecycle.Revision, Version: incidentVersion(obj),
 		},
 		Analysis: value.Analysis,
 	}, nil
 }
 
-// issueVersion hashes the object UID and resource version into an opaque browser concurrency token.
-func issueVersion(obj *unstructured.Unstructured) string {
+// incidentVersion hashes the object UID and resource version into an opaque browser concurrency token.
+func incidentVersion(obj *unstructured.Unstructured) string {
 	sum := sha256.Sum256([]byte(string(obj.GetUID()) + "\x00" + obj.GetResourceVersion()))
 	return hex.EncodeToString(sum[:])
 }
@@ -274,11 +274,11 @@ func issueVersion(obj *unstructured.Unstructured) string {
 // It skips unchanged actions, checks the returned dismissal, and never writes incident specs.
 func (r *Reader) SetDismissed(ctx context.Context, name, version string, dismissed bool) (DetailResponse, error) {
 	if len(validation.IsDNS1123Subdomain(name)) != 0 {
-		return DetailResponse{}, &APIError{400, "invalid_name", "Invalid ClusterIssue name."}
+		return DetailResponse{}, &APIError{400, "invalid_name", "Invalid Incident name."}
 	}
 
 	if decoded, err := hex.DecodeString(version); err != nil || len(decoded) != sha256.Size {
-		return DetailResponse{}, &APIError{400, "invalid_version", "A valid issue version is required."}
+		return DetailResponse{}, &APIError{400, "invalid_version", "A valid incident version is required."}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
@@ -290,7 +290,7 @@ func (r *Reader) SetDismissed(ctx context.Context, name, version string, dismiss
 	}
 
 	if obj.GetName() != name || obj.GetUID() == "" || obj.GetResourceVersion() == "" {
-		return DetailResponse{}, invalidSnapshot("Cannot verify the issue identity for triage.")
+		return DetailResponse{}, invalidSnapshot("Cannot verify the incident identity for triage.")
 	}
 
 	item, err := r.decode(obj)
@@ -303,7 +303,7 @@ func (r *Reader) SetDismissed(ctx context.Context, name, version string, dismiss
 	}
 
 	if item.Dismissed == dismissed {
-		return DetailResponse{FetchedAt: time.Now().UTC(), Item: item}, nil
+		return DetailResponse{FetchedAt: time.Now().UTC(), Incident: item}, nil
 	}
 
 	revision := int64(0)
@@ -334,7 +334,7 @@ func (r *Reader) SetDismissed(ctx context.Context, name, version string, dismiss
 		case apierrors.IsConflict(err), apierrors.IsInvalid(err):
 			return DetailResponse{}, triageConflict()
 		case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
-			return DetailResponse{}, &APIError{403, "triage_denied", "Cannot change triage status; check patch permission on ClusterIssues/status in the dashboard namespace."}
+			return DetailResponse{}, &APIError{403, "triage_denied", "Cannot change triage status; check patch permission on incidents/status in the dashboard namespace."}
 		case apierrors.IsNotFound(err):
 			return DetailResponse{}, upstreamError(err, true)
 		default:
@@ -351,21 +351,21 @@ func (r *Reader) SetDismissed(ctx context.Context, name, version string, dismiss
 		return DetailResponse{}, invalidSnapshot("The triage change was not retained as expected; check the CRD and refresh.")
 	}
 
-	return DetailResponse{FetchedAt: time.Now().UTC(), Item: item}, nil
+	return DetailResponse{FetchedAt: time.Now().UTC(), Incident: item}, nil
 }
 
-// triageConflict tells the browser to refresh before acting on a changed issue.
+// triageConflict tells the browser to refresh before acting on a changed incident.
 func triageConflict() *APIError {
-	return &APIError{409, "triage_conflict", "This issue changed. Refresh and review it before changing its triage status."}
+	return &APIError{409, "triage_conflict", "This incident changed. Refresh and review it before changing its triage status."}
 }
 
-// invalidSnapshot classifies invalid or inconsistent upstream issue data as a failed read.
+// invalidSnapshot classifies invalid or inconsistent upstream incident data as a failed read.
 func invalidSnapshot(message string) *APIError {
 	return &APIError{502, "invalid_snapshot", message}
 }
 
 // upstreamError maps Kubernetes read failures to safe API errors without exposing upstream bodies.
-// Missing individual issues and missing list resources receive distinct responses.
+// Missing individual incidents and missing list resources receive distinct responses.
 func upstreamError(err error, detail bool) error {
 	switch {
 	case errors.Is(err, errResponseSize):
@@ -373,14 +373,14 @@ func upstreamError(err error, detail bool) error {
 	case errors.Is(err, context.DeadlineExceeded), apierrors.IsTimeout(err), apierrors.IsServerTimeout(err):
 		return &APIError{504, "timeout", "Kubernetes request timed out; refresh to retry."}
 	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
-		return &APIError{503, "access_denied", "Cannot read ClusterIssues; check the dashboard ServiceAccount and namespace RoleBinding."}
+		return &APIError{503, "access_denied", "Cannot read Incidents; check the dashboard ServiceAccount and namespace RoleBinding."}
 	case apierrors.IsNotFound(err):
 		if detail {
-			return &APIError{404, "not_found", "Issue is no longer available; refresh the list."}
+			return &APIError{404, "not_found", "Incident is no longer available; refresh the list."}
 		}
 
-		return &APIError{503, "unavailable", "ClusterIssues are unavailable; check the CRD and configured namespace."}
+		return &APIError{503, "unavailable", "Incidents are unavailable; check the CRD and configured namespace."}
 	default:
-		return &APIError{503, "unavailable", "Cannot read ClusterIssues from Kubernetes; check connectivity and configuration."}
+		return &APIError{503, "unavailable", "Cannot read Incidents from Kubernetes; check connectivity and configuration."}
 	}
 }

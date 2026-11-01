@@ -2,8 +2,8 @@
 !go.mod
 !go.sum
 !cmd/
-!cmd/issue-dash/
-!cmd/issue-dash/**
+!cmd/kubescout-dashboard/
+!cmd/kubescout-dashboard/**
 !internal/
 !internal/dashboard/
 !internal/dashboard/**

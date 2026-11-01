@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: k8s-health
+  name: kubescout
   labels:
-    app.kubernetes.io/part-of: k8s-health
+    app.kubernetes.io/part-of: kubescout
     pod-security.kubernetes.io/enforce: restricted

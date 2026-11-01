@@ -1,5 +1,5 @@
 /*
-Purpose: Test dashboard authentication selection and issue-read HTTP flow.
+Purpose: Test dashboard authentication selection and incident-read HTTP flow.
 Flow: Offline TLS servers and generated kubeconfig fixtures exercise explicit
 and current contexts, authentication failures without fallback, and sanitized
 read errors through the client and handler; no live credentials are required.
@@ -54,7 +54,7 @@ func writeKubeconfig(t *testing.T, server *httptest.Server, current string) stri
 // TestKubeconfigReadOnlyHTTPFlow checks explicit and current context selection through local TLS fixtures.
 // It verifies scoped authenticated reads and browser responses without raw metadata or fixture credentials.
 func TestKubeconfigReadOnlyHTTPFlow(t *testing.T) {
-	item := issueObject(t, "issue-local")
+	item := incidentObject(t, "incident-local")
 
 	var calls atomic.Int32
 
@@ -69,12 +69,12 @@ func TestKubeconfigReadOnlyHTTPFlow(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
-		case "/apis/health.k8s-ops-agent.io/v1alpha1/namespaces/issues/clusterissues":
+		case "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents":
 			writePage(w, []map[string]any{item}, "42", "")
-		case "/apis/health.k8s-ops-agent.io/v1alpha1/namespaces/issues/clusterissues/issue-local":
+		case "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents/incident-local":
 			_ = json.NewEncoder(w).Encode(item)
 		default:
-			t.Error("request escaped configured namespace or ClusterIssue scope")
+			t.Error("request escaped configured namespace or Incident scope")
 			http.NotFound(w, r)
 		}
 	}))
@@ -108,7 +108,7 @@ func TestKubeconfigReadOnlyHTTPFlow(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			reader, err := NewReader(client, "issues")
+			reader, err := NewReader(client, "kubescout")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -116,7 +116,7 @@ func TestKubeconfigReadOnlyHTTPFlow(t *testing.T) {
 			server := httptest.NewServer(Handler(reader, log.New(io.Discard, "", 0)))
 			defer server.Close()
 
-			for _, endpoint := range []string{"/api/issues", "/api/issues/issue-local"} {
+			for _, endpoint := range []string{"/api/incidents", "/api/incidents/incident-local"} {
 				response, err := http.Get(server.URL + endpoint)
 				if err != nil {
 					t.Fatal(err)
@@ -125,7 +125,7 @@ func TestKubeconfigReadOnlyHTTPFlow(t *testing.T) {
 				body, err := io.ReadAll(response.Body)
 				response.Body.Close()
 
-				if err != nil || response.StatusCode != 200 || !json.Valid(body) || !strings.Contains(string(body), "issue-local") {
+				if err != nil || response.StatusCode != 200 || !json.Valid(body) || !strings.Contains(string(body), "incident-local") {
 					t.Fatalf("local API request failed: status=%d err=%v", response.StatusCode, err)
 				}
 
@@ -197,7 +197,7 @@ func TestKubeconfigPreservesReadErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader, err := NewReader(client, "issues")
+	reader, err := NewReader(client, "kubescout")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,7 @@
 /*
 Purpose: Check the standalone dashboard's deployment, Service and RBAC manifests.
 Flow: Offline manifest decoding verifies an independent hardened runtime without
-model settings, ClusterIP exposure and namespaced issue reads plus status patches.
+model settings, ClusterIP exposure and namespaced incident reads plus status patches.
 Bundle checks keep dashboard resources separate from the agent and shared resources.
 */
 package cluster
@@ -28,7 +28,7 @@ func TestDashboardDeploymentContract(t *testing.T) {
 	}
 
 	d, ok := objects[0].(*appsv1.Deployment)
-	if !ok || d.Name != "kubescout-dashboard" || d.Namespace != "k8s-health" || d.Spec.Replicas == nil || *d.Spec.Replicas != 1 {
+	if !ok || d.Name != "kubescout-dashboard" || d.Namespace != "kubescout" || d.Spec.Replicas == nil || *d.Spec.Replicas != 1 {
 		t.Fatal("incorrect dashboard deployment")
 	}
 
@@ -46,7 +46,7 @@ func TestDashboardDeploymentContract(t *testing.T) {
 
 	c := p.Containers[0]
 	if c.Name != "dashboard" || c.Image != "localhost/kubescout-dashboard:dev" || c.ImagePullPolicy != corev1.PullNever ||
-		!slices.Equal(c.Args, []string{"--auth-mode=in-cluster", "--namespace=k8s-health"}) || len(c.Env) != 0 || len(c.EnvFrom) != 0 ||
+		!slices.Equal(c.Args, []string{"--auth-mode=in-cluster", "--namespace=kubescout"}) || len(c.Env) != 0 || len(c.EnvFrom) != 0 ||
 		len(c.Ports) != 1 || c.Ports[0].Name != "http" || c.Ports[0].ContainerPort != 8000 {
 		t.Fatal("incorrect dashboard runtime; no model settings allowed")
 	}
@@ -64,7 +64,7 @@ func TestDashboardDeploymentContract(t *testing.T) {
 	}
 
 	service, ok := services[0].(*corev1.Service)
-	if !ok || service.Name != "kubescout-dashboard" || service.Namespace != "k8s-health" ||
+	if !ok || service.Name != "kubescout-dashboard" || service.Namespace != "kubescout" ||
 		service.Spec.Type != corev1.ServiceTypeClusterIP || len(service.Spec.Ports) != 1 ||
 		service.Spec.Ports[0].Port != 8000 || service.Spec.Ports[0].TargetPort.StrVal != "http" ||
 		service.Spec.Selector["app.kubernetes.io/name"] != d.Spec.Template.Labels["app.kubernetes.io/name"] {
@@ -72,7 +72,7 @@ func TestDashboardDeploymentContract(t *testing.T) {
 	}
 }
 
-// TestDashboardRBACAndBundle checks offline namespaced issue-read and status-patch permissions,
+// TestDashboardRBACAndBundle checks offline namespaced incident-read and status-patch permissions,
 // ensuring dashboard bundles remain separate from agent and shared-resource ownership.
 func TestDashboardRBACAndBundle(t *testing.T) {
 	objects := manifests(t, "dashboard/rbac.yaml")
@@ -85,21 +85,21 @@ func TestDashboardRBACAndBundle(t *testing.T) {
 	for _, obj := range objects {
 		switch v := obj.(type) {
 		case *corev1.ServiceAccount:
-			seen["sa"] = v.Name == "kubescout-dashboard" && v.Namespace == "k8s-health"
+			seen["sa"] = v.Name == "kubescout-dashboard" && v.Namespace == "kubescout"
 		case *rbacv1.Role:
-			seen["role"] = v.Name == "kubescout-dashboard" && v.Namespace == "k8s-health" && len(v.Rules) == 2 &&
+			seen["role"] = v.Name == "kubescout-dashboard" && v.Namespace == "kubescout" && len(v.Rules) == 2 &&
 				slices.Equal(v.Rules[0].APIGroups, []string{incident.GVR.Group}) &&
-				slices.Equal(v.Rules[0].Resources, []string{"clusterissues"}) &&
+				slices.Equal(v.Rules[0].Resources, []string{"incidents"}) &&
 				slices.Equal(v.Rules[0].Verbs, []string{"get", "list"}) &&
 				len(v.Rules[0].ResourceNames) == 0 && len(v.Rules[0].NonResourceURLs) == 0 &&
 				slices.Equal(v.Rules[1].APIGroups, []string{incident.GVR.Group}) &&
-				slices.Equal(v.Rules[1].Resources, []string{"clusterissues/status"}) &&
+				slices.Equal(v.Rules[1].Resources, []string{"incidents/status"}) &&
 				slices.Equal(v.Rules[1].Verbs, []string{"patch"}) &&
 				len(v.Rules[1].ResourceNames) == 0 && len(v.Rules[1].NonResourceURLs) == 0
 		case *rbacv1.RoleBinding:
-			seen["binding"] = v.Name == "kubescout-dashboard" && v.Namespace == "k8s-health" &&
+			seen["binding"] = v.Name == "kubescout-dashboard" && v.Namespace == "kubescout" &&
 				v.RoleRef.Kind == "Role" && v.RoleRef.Name == "kubescout-dashboard" && len(v.Subjects) == 1 &&
-				v.Subjects[0].Kind == "ServiceAccount" && v.Subjects[0].Name == "kubescout-dashboard" && v.Subjects[0].Namespace == "k8s-health"
+				v.Subjects[0].Kind == "ServiceAccount" && v.Subjects[0].Name == "kubescout-dashboard" && v.Subjects[0].Namespace == "kubescout"
 		default:
 			t.Fatal("unexpected dashboard permission type")
 		}

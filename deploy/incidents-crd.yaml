@@ -1,14 +1,14 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: clusterissues.health.k8s-ops-agent.io
+  name: incidents.kubescout.benc-uk.github.com
 spec:
-  group: health.k8s-ops-agent.io
+  group: kubescout.benc-uk.github.com
   scope: Namespaced
   names:
-    plural: clusterissues
-    singular: clusterissue
-    kind: ClusterIssue
+    plural: incidents
+    singular: incident
+    kind: Incident
   versions:
     - name: v1alpha1
       served: true
@@ -48,7 +48,7 @@ spec:
                   required: [observer, anchor, family]
                   x-kubernetes-validations:
                     - rule: self == oldSelf
-                      message: ClusterIssue identity is immutable.
+                      message: Incident identity is immutable.
                   properties:
                     observer:
                       type: string

@@ -1,8 +1,8 @@
 /*
 Purpose: Provide handle-scoped resource inspection and Warning event tools.
 Flow: AI tool arguments resolve through host-side identities to bounded,
-read-only Kubernetes requests; approved fields and redacted text return as
-citable evidence, not incident decisions or workload mutations.
+read-only Kubernetes requests; approved fields and redacted text return with
+operation-named citations, not incident decisions or workload mutations.
 */
 package investigation
 
@@ -81,7 +81,7 @@ var resources = map[string]schema.GroupVersionResource{
 }
 
 // Call validates a scoped handle before bounded Kubernetes reads and returns projected, redacted evidence.
-// It tracks invocation and byte budgets, accepted citations and inspected resource versions.
+// It tracks budgets, operation-named citations unique within the session and inspected resource versions.
 func (t Tool) Call(ctx context.Context, args string) (any, error) {
 	s := t.Session
 	if s.Client == nil {
@@ -416,7 +416,7 @@ func (t Tool) Call(ctx context.Context, args string) (any, error) {
 		}
 	}
 
-	id := fmt.Sprintf("tool-%d", s.Calls)
+	id := fmt.Sprintf("%s-%d", strings.ReplaceAll(t.Name(), "_", "-"), s.Calls)
 	result["evidence_id"] = id
 
 	data, err := json.Marshal(result)
@@ -430,6 +430,7 @@ func (t Tool) Call(ctx context.Context, args string) (any, error) {
 	return result, nil
 }
 
+// A regular expression to match sensitive information patterns in strings.
 var sensitive = regexp.MustCompile(`(?i)(authorization|bearer|password|passwd|api[_-]?key|secret|token|://[^/\s]+:[^@\s]+@)`)
 
 // redactValue recursively replaces strings matching sensitive patterns and truncates long strings.

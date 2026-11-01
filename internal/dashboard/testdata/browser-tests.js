@@ -1,4 +1,4 @@
-import { selectIssues, paginate, severityCounts, namespaces, clusterScope, validateSnapshot, validateDetail } from "/model.js";
+import { selectIncidents, paginate, severityCounts, namespaces, clusterScope, validateSnapshot, validateDetail } from "/model.js";
 
 const $ = (id) => document.getElementById(id);
 const results = [];
@@ -27,7 +27,7 @@ function set(id, value) {
   $(id).dispatchEvent(new Event(id === "search" ? "input" : "change", { bubbles: true }));
 }
 function titles() {
-  return [...document.querySelectorAll(".issue-link")].map((node) => node.textContent);
+  return [...document.querySelectorAll(".incident-link")].map((node) => node.textContent);
 }
 async function refresh() {
   await until(() => !$("refresh").disabled, "refresh available");
@@ -49,36 +49,54 @@ function contrast(node) {
 
 try {
   await state("normal");
-  await until(() => $("results").textContent.includes("stored issues"), "initial render");
+  await until(() => $("results").textContent.includes("stored incidents"), "initial render");
   assert($("page-title").textContent === "Incidents", "concise incidents heading");
   assert($("page-title").classList.contains("sr-only") && $("refresh").closest(".connection"),
     "no title banner; refresh sits with snapshot status");
+  assert(!document.querySelector(".observation-note"), "no redundant footer disclaimer");
+  assert($("counts-title").classList.contains("sr-only") && $("counts-stale").closest(".severity-strip")
+    && !$("counts-stale").closest(".sr-only"), "severity heading is hidden visually while stale counts remain visible");
+  const overviewNodes = [$("namespace"), document.querySelector(".counts"), $("freshness"), $("refresh")];
+  const overviewCenters = overviewNodes.map((node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.top + rect.height / 2;
+  });
+  assert(overviewNodes.every((node) => node.closest(".connection"))
+    && Math.max(...overviewCenters) - Math.min(...overviewCenters) <= 2
+    && document.querySelector(".connection").getBoundingClientRect().height <= 80,
+    "namespace, severity counts, freshness and refresh share one compact desktop bar");
+  document.querySelector('[data-severity="low"]').click();
+  assert($("severity").value === "low" && $("state").value === "open"
+    && document.querySelector('[data-severity="low"]').getAttribute("aria-pressed") === "true",
+    "inline severity counts still filter open incidents");
+  document.querySelector('[data-severity="low"]').click();
+  assert($("severity").value === "", "activating the same severity clears the filter");
   const logo = document.querySelector(".brand-logo");
   await until(() => logo.complete && logo.naturalWidth > 0, "brand logo loads");
   assert(document.querySelector('link[rel="icon"]').getAttribute("href") === logo.getAttribute("src"),
     "header and favicon use the local logo");
   assert(getComputedStyle(document.querySelector(".counts")).display === "flex"
-    && getComputedStyle(document.querySelector(".issues-panel")).boxShadow === "none",
+    && getComputedStyle(document.querySelector(".incidents-panel")).boxShadow === "none",
     "compact severity strip and flat incident table");
-  assert(document.querySelectorAll("thead th").length === 5 && document.querySelector("#issue-rows tr").children.length === 5,
+  assert(document.querySelectorAll("thead th").length === 5 && document.querySelector("#incident-rows tr").children.length === 5,
     "no unused chevron column");
-  assert(parseFloat(getComputedStyle(document.querySelector(".issue-link")).fontSize) >= 20
+  assert(parseFloat(getComputedStyle(document.querySelector(".incident-link")).fontSize) >= 20
     && parseFloat(getComputedStyle($("search")).fontSize) >= 18
-    && parseFloat(getComputedStyle(document.querySelector(".issue-meta")).fontSize) >= 15,
-    "larger issue, control and secondary text");
+    && parseFloat(getComputedStyle(document.querySelector(".incident-meta")).fontSize) >= 15,
+    "larger incident, control and secondary text");
   assert([...document.querySelectorAll(".badge, .count-label")].every((node) =>
     parseFloat(getComputedStyle(node).fontSize) >= 18),
     "severity and state labels are at least 18px");
-  const previousTheme = localStorage.getItem("issue-dash-theme");
+  const previousTheme = localStorage.getItem("kubescout-dashboard-theme");
   const initialDark = $("theme-toggle").getAttribute("aria-pressed") === "true";
   for (const theme of ["light", "dark"]) {
     if (($("theme-toggle").getAttribute("aria-pressed") === "true") !== (theme === "dark")) $("theme-toggle").click();
     assert(getComputedStyle(document.documentElement).colorScheme.includes(theme), `${theme} theme applies to native controls`);
-    const readable = [...document.querySelectorAll(".count-card, .badge, .connection, th, .issue-link, .issue-meta, #theme-toggle, #error")]
+    const readable = [...document.querySelectorAll(".count-card, .badge, .connection, th, .incident-link, .incident-meta, #theme-toggle, #direction, #error")]
       .every((node) => contrast(node) >= 4.5);
     assert(readable, `${theme} theme text contrast is at least 4.5:1`);
   }
-  assert(localStorage.getItem("issue-dash-theme") === "dark", "explicit theme choice is saved");
+  assert(localStorage.getItem("kubescout-dashboard-theme") === "dark", "explicit theme choice is saved");
   const setItem = Storage.prototype.setItem;
   try {
     Storage.prototype.setItem = () => { throw new DOMException("Fixture storage denial", "SecurityError"); };
@@ -91,55 +109,104 @@ try {
   $("theme-toggle").click();
   assert($("theme-notice").hidden, "successful theme persistence clears the storage warning");
   if (($("theme-toggle").getAttribute("aria-pressed") === "true") !== initialDark) $("theme-toggle").click();
-  if (previousTheme === null) localStorage.removeItem("issue-dash-theme");
-  else localStorage.setItem("issue-dash-theme", previousTheme);
-  const data = validateSnapshot(await (await fetch("/api/issues")).json());
+  if (previousTheme === null) localStorage.removeItem("kubescout-dashboard-theme");
+  else localStorage.setItem("kubescout-dashboard-theme", previousTheme);
+  const rawSnapshot = await (await fetch("/api/incidents")).json();
+  assert(Array.isArray(rawSnapshot.incidents) && !("items" in rawSnapshot), "incident API returns an incidents collection");
+  const data = validateSnapshot(rawSnapshot);
   const defaults = { search: "", state: "open", severity: "", family: "", namespace: "", sort: "severity", direction: "desc" };
-  const selected = selectIssues(data.items, defaults);
-  assert(selected.length === 60 && selected[0].name === "issue-056", "open-only default with severity and newest-first tie-breaker");
-  assert(selectIssues(data.items, { ...defaults, direction: "asc" })[0].severity === "low", "numeric ascending severity");
-  assert(selectIssues(data.items, { ...defaults, sort: "title", direction: "asc" })[0].name === "issue-000", "title sorting");
-  assert(selectIssues(data.items, { ...defaults, sort: "updated" })[0].name === "issue-059", "updated sorting");
-  assert(selectIssues(data.items, { ...defaults, state: "resolved" }).length === 4, "resolved filtering");
+  const selected = selectIncidents(data.incidents, defaults);
+  assert(selected.length === 60 && selected[0].name === "incident-056", "open-only default with severity and newest-first tie-breaker");
+  assert(selectIncidents(data.incidents, { ...defaults, direction: "asc" })[0].severity === "low", "numeric ascending severity");
+  assert(selectIncidents(data.incidents, { ...defaults, sort: "title", direction: "asc" })[0].name === "incident-000", "title sorting");
+  assert(selectIncidents(data.incidents, { ...defaults, sort: "updated" })[0].name === "incident-059", "updated sorting");
+  assert(selectIncidents(data.incidents, { ...defaults, state: "resolved" }).length === 4, "resolved filtering");
   const stateCases = [
-    { ...data.items[0], name: "open", dismissed: false },
-    { ...data.items[60], name: "resolved", dismissed: false },
-    { ...data.items[0], name: "dismissed-open", dismissed: true },
-    { ...data.items[60], name: "dismissed-resolved", dismissed: true },
+    { ...data.incidents[0], name: "open", dismissed: false },
+    { ...data.incidents[60], name: "resolved", dismissed: false },
+    { ...data.incidents[0], name: "dismissed-open", dismissed: true },
+    { ...data.incidents[60], name: "dismissed-resolved", dismissed: true },
   ];
-  assert(selectIssues(stateCases, defaults).map((item) => item.name).join() === "open"
-    && selectIssues(stateCases, { ...defaults, state: "resolved" }).map((item) => item.name).join() === "resolved"
-    && selectIssues(stateCases, { ...defaults, state: "dismissed" }).length === 2
-    && selectIssues(stateCases, { ...defaults, state: "" }).length === 4,
-    "one state filter separates dismissed issues and includes everything in all states");
-  assert(selectIssues(data.items, { ...defaults, search: "OTHER-OBSERVER", namespace: "payments", severity: "medium" }).length === 1, "combined case-insensitive search and filters");
-  const multiNamespaceIssue = { ...data.items[0], anchor: { kind: "Deployment", namespace: "apps", name: "checkout" },
+  assert(selectIncidents(stateCases, defaults).map((item) => item.name).join() === "open"
+    && selectIncidents(stateCases, { ...defaults, state: "resolved" }).map((item) => item.name).join() === "resolved"
+    && selectIncidents(stateCases, { ...defaults, state: "dismissed" }).length === 2
+    && selectIncidents(stateCases, { ...defaults, state: "" }).length === 4,
+    "one state filter separates dismissed incidents and includes everything in all states");
+  assert(selectIncidents(data.incidents, { ...defaults, search: "OTHER-OBSERVER", namespace: "payments", severity: "medium" }).length === 1, "combined case-insensitive search and filters");
+  const multiNamespaceIncident = { ...data.incidents[0], anchor: { kind: "Deployment", namespace: "apps", name: "checkout" },
     resources: [{ kind: "Pod", namespace: "payments", name: "worker" }] };
-  assert(selectIssues([multiNamespaceIssue], { ...defaults, namespace: "payments" }).length === 1
-    && selectIssues([multiNamespaceIssue], { ...defaults, namespace: "apps" }).length === 1
-    && selectIssues([multiNamespaceIssue], { ...defaults, namespace: "unrelated" }).length === 0,
+  assert(selectIncidents([multiNamespaceIncident], { ...defaults, namespace: "payments" }).length === 1
+    && selectIncidents([multiNamespaceIncident], { ...defaults, namespace: "apps" }).length === 1
+    && selectIncidents([multiNamespaceIncident], { ...defaults, namespace: "unrelated" }).length === 0,
     "namespace filter matches anchors and affected workloads across namespaces");
-  assert(namespaces(data.items[1]).includes(clusterScope), "cluster-scoped resource filter");
+  assert(namespaces(data.incidents[1]).includes(clusterScope), "cluster-scoped resource filter");
   assert(paginate(selected, 1).items.length === 50 && paginate(selected, 999).page === 2, "50-row pagination and clamping");
-  assert(severityCounts(data.items).critical === 15, "counts exclude resolved issues");
-  let rejected = false;
-  try { validateSnapshot({ items: null }); } catch { rejected = true; }
-  assert(rejected, "malformed snapshot rejected");
-  validateDetail(await (await fetch("/api/issues/issue-000")).json());
-  assert(document.querySelectorAll(".issue-link").length === 50 && $("next").disabled === false, "table starts on first page");
+  assert(severityCounts(data.incidents).critical === 15, "counts exclude resolved incidents");
+  assert(document.querySelectorAll(".sort-controls select").length === 1
+    && $("direction").tagName === "BUTTON" && $("direction").type === "button",
+    "sorting uses one selector and a reverse-order button");
+  const sortBounds = document.querySelector(".sort-controls").getBoundingClientRect();
+  const directionBounds = $("direction").getBoundingClientRect();
+  assert(sortBounds.width <= 300 && directionBounds.width >= 44 && directionBounds.height >= 44,
+    "compact sorting group retains a 44px direction target");
+  assert([...document.querySelectorAll("select")].every((node) =>
+    getComputedStyle(node).appearance === "none" && parseFloat(getComputedStyle(node).paddingRight) >= 40),
+    "all dropdowns reserve space between text and chevron");
+  const sortArrow = getComputedStyle(document.querySelector(".sort-inputs"), "::after");
+  assert(parseFloat(sortArrow.right) - directionBounds.width >= 16 && sortArrow.pointerEvents === "none"
+    && [...document.querySelectorAll(".filters label:has(select)")].every((node) =>
+      parseFloat(getComputedStyle(node, "::after").right) >= 16),
+    "dropdown chevrons sit at least 16px inside the edge without intercepting clicks");
+  assert($("direction").value === "desc" && $("direction").getAttribute("aria-label").includes("Highest severity first")
+    && $("direction").title.includes("Switch to lowest severity first"), "default direction explains current order and action");
   $("next").click();
-  assert(document.querySelectorAll(".issue-link").length === 10 && $("page-info").textContent.includes("Page 2"), "next page shows remaining rows");
+  $("direction").focus();
+  $("direction").click();
+  assert($("direction").value === "asc" && document.querySelector("#incident-rows .badge").textContent === "Low"
+    && $("page-info").textContent.includes("Page 1") && document.activeElement === $("direction"),
+    "reversing severity resets pagination and preserves button focus");
+  assert($("direction").getAttribute("aria-label").includes("Lowest severity first")
+    && getComputedStyle($("direction").querySelector("svg")).transform !== "none",
+    "ascending order updates the accessible description and arrow");
+  $("direction").click();
+  assert($("direction").value === "desc" && document.querySelector(".incident-link").dataset.incident === "incident-056"
+    && getComputedStyle($("direction").querySelector("svg")).transform === "none",
+    "reversing again restores descending severity and arrow");
+  for (const [sort, direction, description] of [
+    ["title", "asc", "Title A to Z"], ["updated", "desc", "Newest update first"],
+    ["raised", "desc", "Newest incident first"],
+  ]) {
+    set("sort", sort);
+    assert($("direction").value === direction && $("direction").getAttribute("aria-label").startsWith(description),
+      `${sort} selection keeps its default direction with a meaningful description`);
+    for (let i = 0; i < 2; i++) {
+      const expected = paginate(selectIncidents(data.incidents, { ...defaults, sort, direction: $("direction").value }), 1);
+      assert([...document.querySelectorAll(".incident-link")].map((node) => node.dataset.incident).join()
+        === expected.items.map((item) => item.name).join(), `${sort} ${$("direction").value} button orders the displayed rows`);
+      $("direction").click();
+    }
+  }
+  set("sort", "severity");
+  let rejected = false;
+  try { validateSnapshot({ incidents: null }); } catch { rejected = true; }
+  assert(rejected, "malformed snapshot rejected");
+  const rawDetail = await (await fetch("/api/incidents/incident-000")).json();
+  assert(rawDetail.incident && !("item" in rawDetail), "incident detail API uses an incident property");
+  validateDetail(rawDetail);
+  assert(document.querySelectorAll(".incident-link").length === 50 && $("next").disabled === false, "table starts on first page");
+  $("next").click();
+  assert(document.querySelectorAll(".incident-link").length === 10 && $("page-info").textContent.includes("Page 2"), "next page shows remaining rows");
   set("severity", "critical");
   assert(titles().length === 15 && $("page-info").textContent.includes("Page 1"), "filter resets page");
   set("family", "node-health");
-  assert(!$("empty").hidden && $("empty-title").textContent === "No matching issues", "combined filters and empty state");
+  assert(!$("empty").hidden && $("empty-title").textContent === "No matching incidents", "combined filters and empty state");
   $("reset-filters").click();
   set("family", "service-availability");
   assert(titles().length === 1 && titles()[0].includes("03"), "service availability family filter");
   $("reset-filters").click();
   set("workload-namespace", "payments");
-  assert(titles().length === selectIssues(data.items, { ...defaults, namespace: "payments" }).length
-    && $("namespace").textContent === data.namespace, "namespace dropdown filters workloads without changing issue-storage namespace");
+  assert(titles().length === selectIncidents(data.incidents, { ...defaults, namespace: "payments" }).length
+    && $("namespace").textContent === data.namespace, "namespace dropdown filters workloads without changing incident-storage namespace");
   $("reset-filters").click();
   set("workload-namespace", clusterScope);
   assert(titles().length === 1 && titles()[0].includes("01"), "workload namespace distinguishes cluster-scoped resources");
@@ -148,12 +215,52 @@ try {
   assert(titles().length === 4 && document.querySelectorAll(".badge.resolved").length === 4, "resolved UI view");
   $("reset-filters").click();
   set("search", "onerror");
-  assert(titles().length === 1 && !document.querySelector("#issue-rows img"), "untrusted title rendered as text");
-  document.querySelector(".issue-link").click();
+  assert(titles().length === 1 && !document.querySelector("#incident-rows img"), "untrusted title rendered as text");
+  document.querySelector(".incident-link").click();
   await until(() => $("detail-content").textContent.includes("Recommendations"), "details loaded");
   const problemNamespace = [...$("detail-content").querySelectorAll("dt")].find((node) => node.textContent === "Problem namespace");
   assert(problemNamespace?.nextElementSibling?.textContent === "apps"
-    && !$("detail-content").textContent.includes("Issue namespace"), "details show problem namespace instead of issue-storage namespace");
+    && !$("detail-content").textContent.includes("Incident namespace"), "details show problem namespace instead of incident-storage namespace");
+  const resourceName = [...$("detail-content").querySelectorAll("dt")].find((node) =>
+    node.textContent === "Resource name").nextElementSibling;
+  const namespaceValue = problemNamespace.nextElementSibling;
+  assert(resourceName.querySelector("code").textContent === data.incidents[0].anchor.name
+    && namespaceValue.querySelector("code").textContent === "apps"
+    && !$("incident-rows").querySelector(".copy-button") && !$("namespace").querySelector(".copy-button"),
+    "exact resource names and namespaces are copyable only in the details view");
+  const affectedResources = [...$("detail-content").querySelectorAll(".detail-section")].find((node) =>
+    node.querySelector("h3")?.textContent === "Affected resources");
+  assert(!affectedResources.querySelector(".copy-button") && affectedResources.querySelector("li").textContent
+    === `${data.incidents[0].anchor.kind} / ${data.incidents[0].anchor.namespace}/${data.incidents[0].anchor.name}`,
+    "affected resources remain plain text without copy controls");
+  const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const copied = [];
+  const clipboard = { writeText: async (value) => { copied.push(value); } };
+  try {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+    resourceName.querySelector(".copy-button").click();
+    await until(() => resourceName.querySelector(".copy-feedback").textContent === "Copied", "resource name copied");
+    namespaceValue.querySelector(".copy-button").click();
+    await until(() => namespaceValue.querySelector(".copy-feedback").textContent === "Copied", "namespace copied");
+    assert(copied.join() === `${data.incidents[0].anchor.name},apps`,
+      "clipboard receives only identifiers, without kind prefixes, slashes or UI labels");
+    clipboard.writeText = async () => { throw new DOMException("Fixture clipboard denial", "NotAllowedError"); };
+    namespaceValue.querySelector(".copy-button").click();
+    await until(() => namespaceValue.querySelector(".copy-feedback").textContent.includes("Browser blocked copying"),
+      "clipboard denial reported");
+    assert(document.getSelection().toString() === "apps"
+      && !namespaceValue.querySelector(".copy-button").disabled,
+      "clipboard denial selects the exact value for manual copying and restores the control");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    resourceName.querySelector(".copy-button").click();
+    assert(resourceName.querySelector(".copy-feedback").textContent.includes("Clipboard unavailable")
+      && document.getSelection().toString() === data.incidents[0].anchor.name,
+      "unavailable clipboard explicitly offers manual copying instead of claiming success");
+  } finally {
+    if (clipboardDescriptor) Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
+    else delete navigator.clipboard;
+    document.getSelection().removeAllRanges();
+  }
   assert(parseFloat(getComputedStyle(document.querySelector(".detail-section p")).fontSize) >= 16, "larger detail text");
   assert($("detail").open && !$("detail-content").querySelector("script") && !window.injected, "safe drill-down and untrusted recommendations");
   assert($("detail-content").textContent.includes("Evidence IDs") && $("detail-content").textContent.includes("Revision"), "evidence and lifecycle details");
@@ -165,62 +272,64 @@ try {
   await refresh();
   await until(() => !$("detail-error").hidden, "detail failure");
   assert(!$("error").hidden && $("error").textContent.includes("stale") && titles().length === 1, "failed refresh keeps stale rows");
+  assert(!$("counts-stale").hidden && $("freshness").textContent.includes("Stale"),
+    "combined overview visibly marks both counts and snapshot status stale");
   assert($("detail-error").textContent.includes("stale") && $("detail-content").textContent.includes("Recommendations"), "failed detail refresh keeps stale content");
   await state("deleted");
   await refresh();
-  await until(() => $("detail-freshness").textContent === "Issue unavailable", "deleted detail");
-  assert($("detail-content").textContent === "", "deleted issue clears detail rather than showing current data");
+  await until(() => $("detail-freshness").textContent === "Incident unavailable", "deleted detail");
+  assert($("detail-content").textContent === "", "deleted incident clears detail rather than showing current data");
   $("close-detail").click();
-  await until(() => document.activeElement?.className === "issue-link", "focus restoration");
+  await until(() => document.activeElement?.className === "incident-link", "focus restoration");
   assert(!$("detail").open, "detail closes and restores focus");
   await state("slow");
   $("reset-filters").click();
-  document.querySelector(".issue-link").click();
+  document.querySelector(".incident-link").click();
   $("close-detail").click();
   await until(() => !$("detail").open, "old detail closed");
   set("search", "Workload 01");
   await state("normal");
-  document.querySelector(".issue-link").click();
+  document.querySelector(".incident-link").click();
   await until(() => $("detail-content").textContent.includes("worker-1"), "new selection");
   const nodeNamespace = [...$("detail-content").querySelectorAll("dt")].find((node) => node.textContent === "Problem namespace");
-  assert(nodeNamespace?.nextElementSibling?.textContent === "Cluster-scoped", "node problems display cluster scope rather than issue-storage namespace");
+  assert(nodeNamespace?.nextElementSibling?.textContent === "Cluster-scoped", "node problems display cluster scope rather than incident-storage namespace");
   await sleep(600);
   assert($("detail-content").textContent.includes("worker-1"), "obsolete detail response cannot replace newer selection");
   $("close-detail").click();
   $("reset-filters").click();
   set("search", "onerror");
-  document.querySelector(".issue-link").click();
+  document.querySelector(".incident-link").click();
   await until(() => !$("triage-action").hidden && !$("triage-action").disabled, "dismiss available");
   $("triage-action").click();
-  await until(() => $("triage-action").textContent === "Restore issue" && !$("triage-action").disabled
+  await until(() => $("triage-action").textContent === "Restore incident" && !$("triage-action").disabled
     && titles().length === 0, "dismissal saved and default list refreshed");
   assert($("detail-content").querySelector(".badge.dismissed")
     && !$("detail-content").querySelector(".badge.open, .badge.resolved") && $("count-critical").textContent === "14",
     "dismissed replaces lifecycle badge and is excluded from open severity counts");
   await refresh();
   await until(() => !$("triage-action").disabled, "dismissal survives refresh");
-  assert($("triage-action").textContent === "Restore issue", "unchanged refresh retains dismissal");
+  assert($("triage-action").textContent === "Restore incident", "unchanged refresh retains dismissal");
   $("close-detail").click();
   set("state", "dismissed");
-  assert(titles().length === 1, "dismissed filter exposes hidden issue");
-  assert($("issue-rows").querySelectorAll("td:nth-child(3) .badge").length === 1
-    && $("issue-rows").querySelector("td:nth-child(3) .badge.dismissed"),
+  assert(titles().length === 1, "dismissed filter exposes hidden incident");
+  assert($("incident-rows").querySelectorAll("td:nth-child(3) .badge").length === 1
+    && $("incident-rows").querySelector("td:nth-child(3) .badge.dismissed"),
     "dismissed row shows only its effective state");
   set("state", "");
-  assert(!$("issue-rows").querySelector(".badge.open, .badge.resolved"),
-    "all states view also shows only dismissed for the dismissed issue");
+  assert(!$("incident-rows").querySelector(".badge.open, .badge.resolved"),
+    "all states view also shows only dismissed for the dismissed incident");
   set("state", "dismissed");
-  document.querySelector(".issue-link").click();
+  document.querySelector(".incident-link").click();
   await until(() => !$("triage-action").disabled, "restore available");
   $("triage-action").click();
-  await until(() => $("triage-action").textContent === "Dismiss issue" && !$("triage-action").disabled
+  await until(() => $("triage-action").textContent === "Dismiss incident" && !$("triage-action").disabled
     && titles().length === 0, "restore saved");
   $("close-detail").click();
   set("state", "open");
-  assert(titles().length === 1, "restored issue returns to default view");
-  assert($("issue-rows").querySelector("td:nth-child(3) .badge.open")
-    && !$("issue-rows").querySelector(".badge.dismissed"), "restore displays the underlying lifecycle state");
-  document.querySelector(".issue-link").click();
+  assert(titles().length === 1, "restored incident returns to default view");
+  assert($("incident-rows").querySelector("td:nth-child(3) .badge.open")
+    && !$("incident-rows").querySelector(".badge.dismissed"), "restore displays the underlying lifecycle state");
+  document.querySelector(".incident-link").click();
   await until(() => !$("triage-action").disabled, "dismiss ready again");
   await state("error");
   $("triage-action").click();
@@ -229,22 +338,26 @@ try {
   await state("normal");
   await refresh();
   await until(() => !$("triage-action").disabled, "recovered detail");
+  const previousRevision = [...$("detail-content").querySelectorAll("dt")].find((node) =>
+    node.textContent === "Revision").nextElementSibling.textContent;
   await state("update");
   $("triage-action").click();
   await until(() => !$("triage-error").hidden && $("triage-error").textContent.includes("changed"), "stale detail rejected");
-  await until(() => !$("triage-action").disabled, "fresh detail after conflict");
-  assert($("triage-action").textContent === "Dismiss issue", "conflict does not hide the newer revision");
+  await until(() => !$("triage-action").disabled
+    && [...$("detail-content").querySelectorAll("dt")].find((node) =>
+      node.textContent === "Revision").nextElementSibling.textContent !== previousRevision, "fresh detail after conflict");
+  assert($("triage-action").textContent === "Dismiss incident", "conflict does not hide the newer revision");
   $("triage-action").click();
-  await until(() => $("triage-action").textContent === "Restore issue" && !$("triage-action").disabled, "new revision dismissed");
+  await until(() => $("triage-action").textContent === "Restore incident" && !$("triage-action").disabled, "new revision dismissed");
   await state("update");
   await refresh();
-  await until(() => $("triage-action").textContent === "Dismiss issue" && titles().length === 1, "material update reappears");
-  assert($("count-critical").textContent === "15", "updated issue returns to open severity counts");
+  await until(() => $("triage-action").textContent === "Dismiss incident" && titles().length === 1, "material update reappears");
+  assert($("count-critical").textContent === "15", "updated incident returns to open severity counts");
   $("close-detail").click();
   $("reset-filters").click();
   await state("empty");
   await refresh();
-  assert(!$("empty").hidden && $("empty-title").textContent === "No stored issues", "empty snapshot differs from failure");
+  assert(!$("empty").hidden && $("empty-title").textContent === "No stored incidents", "empty snapshot differs from failure");
   await state("normal");
   const before = (await (await fetch("/__test/state")).json()).requests;
   await until(() => $("empty").hidden, "automatic refresh", 18000);

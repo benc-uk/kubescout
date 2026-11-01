@@ -2,20 +2,20 @@ export const severities = ["critical", "high", "medium", "low"];
 export const clusterScope = "__cluster__";
 const ranks = { critical: 4, high: 3, medium: 2, low: 1 };
 
-export function namespaces(issue) {
-  return [...new Set([issue.anchor, ...issue.resources].map((r) => r.namespace || clusterScope))];
+export function namespaces(incident) {
+  return [...new Set([incident.anchor, ...incident.resources].map((r) => r.namespace || clusterScope))];
 }
 
-export function selectIssues(items, filters) {
+export function selectIncidents(incidents, filters) {
   const search = filters.search.trim().toLowerCase();
-  return items.filter((issue) => {
-    const state = issue.dismissed ? "dismissed" : issue.lifecycle.state;
+  return incidents.filter((incident) => {
+    const state = incident.dismissed ? "dismissed" : incident.lifecycle.state;
     if (filters.state && state !== filters.state) return false;
-    if (filters.severity && issue.severity !== filters.severity) return false;
-    if (filters.family && issue.family !== filters.family) return false;
-    if (filters.namespace && !namespaces(issue).includes(filters.namespace)) return false;
-    const text = [issue.name, issue.title, issue.observer,
-      ...[issue.anchor, ...issue.resources].flatMap((r) => [r.kind, r.name, r.namespace || "cluster-scoped"])]
+    if (filters.severity && incident.severity !== filters.severity) return false;
+    if (filters.family && incident.family !== filters.family) return false;
+    if (filters.namespace && !namespaces(incident).includes(filters.namespace)) return false;
+    const text = [incident.name, incident.title, incident.observer,
+      ...[incident.anchor, ...incident.resources].flatMap((r) => [r.kind, r.name, r.namespace || "cluster-scoped"])]
       .join(" ").toLowerCase();
     return !search || text.includes(search);
   }).sort((a, b) => {
@@ -40,8 +40,8 @@ export function paginate(items, requestedPage, size = 50) {
 
 export function severityCounts(items) {
   const counts = Object.fromEntries(severities.map((s) => [s, 0]));
-  for (const issue of items) {
-    if (issue.lifecycle.state === "open" && !issue.dismissed) counts[issue.severity]++;
+  for (const incident of items) {
+    if (incident.lifecycle.state === "open" && !incident.dismissed) counts[incident.severity]++;
   }
   return counts;
 }
@@ -61,20 +61,20 @@ function isSummary(item) {
 
 export function validateSnapshot(data) {
   if (!data || typeof data.namespace !== "string" || !Number.isFinite(Date.parse(data.fetched_at))
-      || !Array.isArray(data.items) || data.items.length > 1000 || !data.items.every(isSummary)) {
-    throw new Error("The dashboard returned invalid issue data.");
+      || !Array.isArray(data.incidents) || data.incidents.length > 1000 || !data.incidents.every(isSummary)) {
+    throw new Error("The dashboard returned invalid incident data.");
   }
   return data;
 }
 
 export function validateDetail(data) {
-  const analysis = data?.item?.analysis;
-  if (!data || !Number.isFinite(Date.parse(data.fetched_at)) || !isSummary(data.item)
+  const analysis = data?.incident?.analysis;
+  if (!data || !Number.isFinite(Date.parse(data.fetched_at)) || !isSummary(data.incident)
       || !analysis || !["diagnosis", "explanation", "uncertainty", "model", "prompt_version", "analysis_id"]
         .every((key) => typeof analysis[key] === "string")
       || !["recommendations", "evidence_ids"].every((key) => Array.isArray(analysis[key])
         && analysis[key].every((value) => typeof value === "string"))) {
-    throw new Error("The dashboard returned invalid issue details.");
+    throw new Error("The dashboard returned invalid incident details.");
   }
   return data;
 }

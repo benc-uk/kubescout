@@ -6,7 +6,7 @@ This is an **AI-first Kubernetes incident investigation agent**, not a
 deterministic alerting service with optional AI commentary.
 
 - Deterministic rules provide private evidence and scheduling hints only.
-- Only validated AI decisions may raise, update, reopen or resolve a ClusterIssue.
+- Only validated AI decisions may raise, update, reopen or resolve an Incident.
 - AI no-action is valid, including for critical deterministic signals.
 - Never publish a baseline, raw finding, collection outage, model failure or
   tool transition as a user-facing incident.
@@ -26,7 +26,7 @@ the current contract.
 ## Architecture
 
 - [cmd/kubescout](cmd/kubescout): CLI, auth/bootstrap, signals, exit codes.
-- [cmd/issue-dash](cmd/issue-dash): standalone dashboard CLI, explicit Kubernetes
+- [cmd/kubescout-dashboard](cmd/kubescout-dashboard): standalone dashboard CLI, explicit Kubernetes
   authentication and HTTP lifecycle; no AI or incident-spec writes.
 - [internal/config](internal/config): validated options, scheduling/budget limits,
   namespace watch/ignore selection and repository-root `.env` loading;
@@ -42,16 +42,16 @@ the current contract.
 - [instructions.txt](internal/analysis/instructions.txt): embedded AI instructions;
   keep separate from Go and rebuild after changes.
 - [internal/incident](internal/incident): stable correlation/identity, AI conclusion,
-  lifecycle, restart-aware reconciliation and kubeconfig simulation.
+  lifecycle and restart-aware Kubernetes reconciliation.
 - [internal/runner](internal/runner): independent collection and bounded AI work,
   cooldowns, no-action suppression, recovery review and stale-result rejection.
 - [internal/output](internal/output): schema 3.0 incident/execution output and
   separate stderr diagnostics, not a deterministic assessment publisher.
-- [internal/dashboard](internal/dashboard): bounded single-namespace ClusterIssue
+- [internal/dashboard](internal/dashboard): bounded single-namespace Incident
   reads, revision-scoped human triage and embedded HTML/CSS/native-ESM UI; no JavaScript build step.
 - [build/](build/): separate pinned non-root agent/dashboard images, allow-listed
   contexts and ignored outputs.
-- [deploy/](deploy/): active ClusterIssue schema and agent RBAC/Deployment.
+- [deploy/](deploy/): active Incident schema and agent RBAC/Deployment.
   Legacy HealthReport schemas are no longer shipped; retain any existing records.
 - [deploy/dashboard](deploy/dashboard): independent dashboard Deployment, Service
   and namespaced get/list plus status-patch RBAC; excluded from the agent bundle.
@@ -61,7 +61,7 @@ the current contract.
 - Use Go 1.26+ and pinned modules. Prefer the existing Microsoft Agent Framework
   Go `openaiprovider.NewResponsesAgent`; its SDK defaults are not safety limits.
 - Use HTTPS `AZURE_OPENAI_ENDPOINT` ending in `/openai/v1/`, API key and
-  `AZURE_AI_MODEL_DEPLOYMENT_NAME` (`FOUNDRY_MODEL_NAME` fallback).
+  `AZURE_AI_MODEL_DEPLOYMENT_NAME`.
   Do not require Entra or Workload Identity until requested.
 - One investigation at a time. Enforce both the rolling actual-HTTP-request
   quota and per-investigation request/tool/byte/deadline limits.
@@ -90,8 +90,7 @@ the current contract.
   Watch is an allow-list; ignore is a deny-list; neither set watches all
   namespaces, including newly created ones. Nodes are always observed.
   Flags replace their corresponding environment list; the opposite list still
-  applies and must be unset when switching modes. `--namespace` is a deprecated
-  repeatable watch-list alias.
+  applies and must be unset when switching modes.
 - Explicit watch lists use namespace-scoped requests. All/ignore mode uses
   cluster-wide list/watch requests without Namespace-object discovery.
   Filter ignored objects before projection, cache admission and model input;
@@ -106,16 +105,20 @@ the current contract.
   individual finding IDs, model prose hashes or per-run IDs as incident identity.
 - Preserve incident identity across restarts; reread/reconcile ambiguous writes,
   use UID/resourceVersion preconditions and never create a second name on retry.
-  New names use `issue-`; existing `incident-` ClusterIssue names remain supported
-  in place. Choose a new observer ID when changing cluster/observation scope;
+  Names use the `inc-` prefix. Choose a new observer ID when changing
+  cluster/observation scope;
   never resolve out-of-scope stored incidents as if they had recovered.
 - No-op AI conclusions, wording and counters alone must not update an incident.
 - Incident lifecycle uses `state` in Go/JSON and the indexing label. Legacy
   `phase` records require explicit migration; do not silently fall back.
   Kubernetes-owned Pod `status.phase` is unchanged.
-- In-cluster writes are restricted to ClusterIssue create/patch in the incident
+- Agent writes in either authentication mode are restricted to Incident create/patch in the incident
   namespace. No incident deletion or delivery-status writes.
-- Kubeconfig mode runs AI but only simulates incident operations in memory.
+- Both authentication modes persist AI-approved Incidents, including local
+  `make run` and `make once`. There is no runtime incident simulation mode.
+  Tests may inject fixture incident repositories; they are not alternate CLI modes.
+  `make incidents-setup` installs only the incident namespace and CRD in the current
+  context; it does not deploy the agent, provision model credentials or call AI.
 - Single replica remains the design. Incident state is restart-aware; model
   quota/no-action state is process-local. Do not imply HA or exactly-once delivery.
 - Keep old HealthReport records until explicit export/deletion approval. Never
@@ -123,24 +126,24 @@ the current contract.
 
 ## Dashboard boundary
 
-- Read only ClusterIssues from one `--namespace` (default `k8s-health`), across
+- Read only Incidents from one `--namespace` (default `kubescout`), across
   observers and lifecycle states. The dashboard must not read workloads, model
   credentials or tool evidence, call AI, or create/delete incidents or write their specs.
 - Human dismissal/restore may patch only `status.triage` using the status subresource,
-  with UID/resourceVersion preconditions and a version matching the displayed issue.
+  with UID/resourceVersion preconditions and a version matching the displayed Incident.
   Dismissal applies to one lifecycle revision; material AI updates and recurrence
-  restore visibility. The agent continues tracking dismissed issues unchanged.
+  restore visibility. The agent continues tracking dismissed Incidents unchanged.
   Browser writes require same-origin checks, a custom action header and bounded JSON.
   Status RBAC is broader than a single field; field ownership is enforced by the application.
 - Workload-namespace filtering uses anchor and affected-resource namespaces; it
-  must not change the issue-storage API scope. Details show the anchor's
+  must not change the incident-storage API scope. Details show the anchor's
   **Problem namespace**, or `Cluster-scoped` for nodes, not the storage namespace.
 - Kubeconfig mode binds `127.0.0.1:8000`; in-cluster mode binds `:8000`.
   Authentication modes never fall back. There is no application login or TLS;
   keep deployed access within a trusted cluster/localhost port-forward. Anyone with
-  access can dismiss/restore issues using the dashboard's Kubernetes credentials.
+  access can dismiss/restore incidents using the dashboard's Kubernetes credentials.
 - Preserve bounded complete reads, safe text rendering and explicit stale/error
-  states. No stored issues is not proof of cluster health or agent activity.
+  states. No stored incidents is not proof of cluster health or agent activity.
   Keep the dashboard image, ServiceAccount and deployment independent of the agent.
 
 ## Development and operation

@@ -1,5 +1,5 @@
 /*
-Purpose: Check agent deployment, RBAC and ClusterIssue schema contracts offline.
+Purpose: Check agent deployment, RBAC and Incident schema contracts offline.
 Flow: Decode checked-in manifests and validate synthetic configuration and incidents
 to check inactive deployment defaults, workload read permissions, incident writes
 and lifecycle.state migration without activating a cluster or contacting a model.
@@ -91,7 +91,7 @@ func TestDeploymentContract(t *testing.T) {
 	}
 
 	p := d.Spec.Template.Spec
-	if p.ServiceAccountName != "k8s-health" || p.AutomountServiceAccountToken == nil || !*p.AutomountServiceAccountToken {
+	if p.ServiceAccountName != "kubescout" || p.AutomountServiceAccountToken == nil || !*p.AutomountServiceAccountToken {
 		t.Fatal("dedicated identity missing")
 	}
 
@@ -118,7 +118,7 @@ func TestDeploymentContract(t *testing.T) {
 
 		return ""
 	}, io.Discard)
-	if err != nil || options.Auth != "in-cluster" || options.IncidentNamespace != "k8s-health" || options.ObserverID != "kind-all" ||
+	if err != nil || options.Auth != "in-cluster" || options.IncidentNamespace != "kubescout" || options.ObserverID != "kind-all" ||
 		len(options.NamespaceWatch) != 0 || len(options.NamespaceIgnore) != 0 {
 		t.Fatal("incorrect AI runtime arguments")
 	}
@@ -128,7 +128,7 @@ func TestDeploymentContract(t *testing.T) {
 		t.Fatal("default deployment must watch all namespaces with explicit optional filters")
 	}
 
-	if len(c.EnvFrom) != 1 || c.EnvFrom[0].SecretRef == nil || c.EnvFrom[0].SecretRef.Name != "k8s-health-model" {
+	if len(c.EnvFrom) != 1 || c.EnvFrom[0].SecretRef == nil || c.EnvFrom[0].SecretRef.Name != "kubescout-model" {
 		t.Fatal("explicit runtime model Secret reference missing")
 	}
 
@@ -142,7 +142,7 @@ func TestDeploymentContract(t *testing.T) {
 }
 
 // TestRBACContract checks offline manifests for allow-listed workload reads and namespaced
-// ClusterIssue reconciliation permissions, rejecting unexpected access.
+// Incident reconciliation permissions, rejecting unexpected access.
 func TestRBACContract(t *testing.T) {
 	incidents, binding, workloads, workloadBinding := false, false, false, false
 
@@ -153,11 +153,11 @@ func TestRBACContract(t *testing.T) {
 		case *rbacv1.ClusterRole:
 			rules = v.Rules
 			switch v.Name {
-			case "k8s-health-nodes":
+			case "kubescout-nodes":
 				if len(rules) != 1 || !slices.Equal(rules[0].Resources, []string{"nodes"}) {
 					t.Fatal("incorrect node permissions")
 				}
-			case "k8s-health-resources":
+			case "kubescout-resources":
 				workloads = len(rules) == 5 &&
 					slices.Equal(rules[0].Resources, []string{"pods", "services"}) && slices.Equal(rules[0].APIGroups, []string{""}) &&
 					slices.Equal(rules[1].Resources, []string{"events"}) && slices.Equal(rules[1].APIGroups, []string{""}) &&
@@ -168,13 +168,13 @@ func TestRBACContract(t *testing.T) {
 				t.Fatal("unexpected cluster permissions")
 			}
 		case *rbacv1.ClusterRoleBinding:
-			if v.Name == "k8s-health-resources" {
+			if v.Name == "kubescout-resources" {
 				workloadBinding = v.RoleRef.Kind == "ClusterRole" && v.RoleRef.Name == v.Name && len(v.Subjects) == 1 &&
-					v.Subjects[0].Name == "k8s-health" && v.Subjects[0].Namespace == "k8s-health"
+					v.Subjects[0].Name == "kubescout" && v.Subjects[0].Namespace == "kubescout"
 			}
 		case *rbacv1.Role:
-			if v.Name == "k8s-health-incidents" {
-				if v.Namespace != "k8s-health" || len(v.Rules) != 1 || !slices.Equal(v.Rules[0].Resources, []string{"clusterissues"}) || !slices.Equal(v.Rules[0].Verbs, []string{"get", "list", "create", "patch"}) || !slices.Equal(v.Rules[0].APIGroups, []string{incident.GVR.Group}) {
+			if v.Name == "kubescout-incidents" {
+				if v.Namespace != "kubescout" || len(v.Rules) != 1 || !slices.Equal(v.Rules[0].Resources, []string{"incidents"}) || !slices.Equal(v.Rules[0].Verbs, []string{"get", "list", "create", "patch"}) || !slices.Equal(v.Rules[0].APIGroups, []string{incident.GVR.Group}) {
 					t.Fatal("incident permissions exceed reconciliation needs")
 				}
 
@@ -185,8 +185,8 @@ func TestRBACContract(t *testing.T) {
 
 			t.Fatal("unexpected namespaced permissions")
 		case *rbacv1.RoleBinding:
-			if v.Name == "k8s-health-incidents" {
-				binding = v.Namespace == "k8s-health" && v.RoleRef.Name == v.Name && len(v.Subjects) == 1 && v.Subjects[0].Name == "k8s-health" && v.Subjects[0].Namespace == "k8s-health"
+			if v.Name == "kubescout-incidents" {
+				binding = v.Namespace == "kubescout" && v.RoleRef.Name == v.Name && len(v.Subjects) == 1 && v.Subjects[0].Name == "kubescout" && v.Subjects[0].Namespace == "kubescout"
 			}
 		}
 
@@ -212,10 +212,10 @@ func TestRBACContract(t *testing.T) {
 	}
 }
 
-// TestClusterIssueSchemaAndMigration validates synthetic incidents against the checked-in CRD,
-// requiring lifecycle.state and immutable identity while preserving safe legacy-record handling.
-func TestClusterIssueSchemaAndMigration(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "clusterissues-crd.yaml"))
+// TestIncidentSchemaAndMigration validates synthetic incidents against the checked-in CRD,
+// requiring lifecycle.state and immutable identity while preserving safe record handling.
+func TestIncidentSchemaAndMigration(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "incidents-crd.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,9 +242,9 @@ func TestClusterIssueSchemaAndMigration(t *testing.T) {
 		t.Fatal("invalid CRD")
 	}
 
-	if crd.Metadata.Name != "clusterissues."+incident.GVR.Group || crd.Spec.Group != incident.GVR.Group ||
-		crd.Spec.Scope != "Namespaced" || crd.Spec.Names.Kind != "ClusterIssue" ||
-		crd.Spec.Names.Plural != "clusterissues" || crd.Spec.Names.Singular != "clusterissue" || len(crd.Spec.Versions) != 1 {
+	if crd.Metadata.Name != "incidents."+incident.GVR.Group || crd.Spec.Group != incident.GVR.Group ||
+		crd.Spec.Scope != "Namespaced" || crd.Spec.Names.Kind != "Incident" ||
+		crd.Spec.Names.Plural != "incidents" || crd.Spec.Names.Singular != "incident" || len(crd.Spec.Versions) != 1 {
 		t.Fatal("incorrect incident API")
 	}
 
@@ -290,7 +290,7 @@ func TestClusterIssueSchemaAndMigration(t *testing.T) {
 		var payload any
 		json.Unmarshal(raw, &payload)
 
-		obj := map[string]any{"apiVersion": incident.APIVersion, "kind": "ClusterIssue", "metadata": map[string]any{"name": incident.Name(value.Identity)}, "spec": payload}
+		obj := map[string]any{"apiVersion": incident.APIVersion, "kind": "Incident", "metadata": map[string]any{"name": incident.Name(value.Identity)}, "spec": payload}
 		if err := validate.AgainstSchema(&schema, obj, strfmt.Default); err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +305,7 @@ func TestClusterIssueSchemaAndMigration(t *testing.T) {
 	}
 
 	bundle, err := os.ReadFile(filepath.Join("..", "..", "deploy", "kustomization.yaml"))
-	if err != nil || strings.Contains(string(bundle), "healthreports-crd") || !strings.Contains(string(bundle), "clusterissues-crd.yaml") {
+	if err != nil || strings.Contains(string(bundle), "healthreports-crd") || !strings.Contains(string(bundle), "incidents-crd.yaml") {
 		t.Fatal("active bundle retains legacy writer schema")
 	}
 

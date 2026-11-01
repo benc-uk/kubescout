@@ -4,8 +4,8 @@
 Purpose: Exercise live collector failures, recovery, freshness, load and object limits.
 Flow: Opt-in integration tests use an explicit context and owned workload fixtures
 with ownership-checked namespace cleanup; collector checks make no model calls.
-A separately authorized model test runs bounded once execution in kubeconfig mode,
-accepting no-action or simulated incident changes rather than writing ClusterIssues.
+A separately authorized model test runs bounded collection and AI with a fixture
+incident repository; it accepts no-action and never writes live Incidents.
 */
 package cluster
 
@@ -14,20 +14,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/benc-uk/kubescout/internal/analysis"
 	"github.com/benc-uk/kubescout/internal/config"
+	"github.com/benc-uk/kubescout/internal/incident"
+	"github.com/benc-uk/kubescout/internal/kube"
 	"github.com/benc-uk/kubescout/internal/output"
+	"github.com/benc-uk/kubescout/internal/runner"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 )
 
 // TestLiveKubernetes exercises failure, recovery, timed rules and load using owned workloads
@@ -49,7 +55,7 @@ func TestLiveKubernetes(t *testing.T) {
 	d := f.deployment()
 	f.available(d.Name)
 
-	badImage := "busybox:k8s-health-stage2-does-not-exist"
+	badImage := "busybox:kubescout-stage2-does-not-exist"
 	f.image(d.Name, badImage)
 
 	var failing corev1.Pod
@@ -355,8 +361,8 @@ func reconnect(t *testing.T, f *fixture) {
 	observer.stop()
 }
 
-// TestLiveModel requires explicit model authorization and runs bounded once execution against
-// a live Pending fixture, accepting AI no-action or simulated kubeconfig incident changes.
+// TestLiveModel requires model authorization for bounded live collection and AI investigation.
+// A test-only memory repository verifies accepted changes without writing live Incidents.
 func TestLiveModel(t *testing.T) {
 	requireLiveModel(t)
 	f := newFixture(t, true)
@@ -374,13 +380,23 @@ func TestLiveModel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, f.binary, f.args("--once", "--startup-grace=0s", "--model-calls-per-hour=6", "--request-timeout=30s", "--investigation-timeout=120s", "--run-timeout=120s")...)
-	cmd.Env = os.Environ()
+	c, err := config.Parse(f.args("--once", "--startup-grace=0s", "--model-calls-per-hour=6", "--request-timeout=30s", "--investigation-timeout=120s", "--run-timeout=120s"), os.Getenv, io.Discard)
+	if err != nil {
+		t.Fatal("model configuration missing or invalid")
+	}
+
+	client, err := dynamic.NewForConfig(f.config)
+	if err != nil {
+		t.Fatal("cannot create the live fixture client")
+	}
 
 	var out, diag bytes.Buffer
 
-	cmd.Stdout, cmd.Stderr = &out, &diag
-	if err := cmd.Run(); err != nil {
+	repo := &incident.Memory{}
+
+	r := runner.Runner{Config: c, Source: kube.NewSource(client, c), Analyzer: &analysis.Analyzer{Config: c, Kubernetes: client},
+		Incidents: incident.Reconciler{Repository: repo, Observer: c.ObserverID, Model: c.Model}, Output: output.Writer{Out: &out, Err: &diag}}
+	if r.Once(ctx) != 0 {
 		t.Fatalf("bounded live AI run failed: %s", &diag)
 	}
 
@@ -389,5 +405,12 @@ func TestLiveModel(t *testing.T) {
 		t.Fatal("invalid AI execution envelope")
 	}
 
-	t.Logf("validated AI result with %d simulated incident changes; no-action is valid; at most six real model HTTP requests", len(result.Changes))
+	for _, change := range result.Changes {
+		record, err := repo.Get(ctx, change.Name)
+		if err != nil || record == nil || !reflect.DeepEqual(record.Value, change.Incident) {
+			t.Fatal("accepted AI change differs from the fixture incident")
+		}
+	}
+
+	t.Logf("validated AI result with %d fixture incident changes; no-action is valid; at most six real model HTTP requests; no live Incident writes", len(result.Changes))
 }

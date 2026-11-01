@@ -2,7 +2,7 @@
 Purpose: Define and validate runtime options, namespace selection and model settings.
 Flow: Combine CLI flags and environment values into collection, evidence-policy
 and AI scheduling limits; repository-root dotenv loading preserves existing values.
-Configuration requires AI settings and rejects the removed deterministic-only mode.
+Configuration requires AI settings and rejects removed runtime modes.
 */
 package config
 
@@ -90,6 +90,8 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 			return c, errors.New("--report-namespace was replaced by --incident-namespace; HealthReport publication has been removed")
 		case "--report-file":
 			return c, errors.New("--report-file was replaced by --output-file using the schema 3.0 AI incident contract")
+		case "--simulate-incidents":
+			return c, errors.New("--simulate-incidents was removed; accepted AI decisions persist Incidents in both authentication modes")
 		}
 	}
 
@@ -107,9 +109,8 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	f.StringVar(&c.Kubeconfig, "kubeconfig", "", "Optional kubeconfig path")
 	f.Var(&watch, "namespace-watch", "Comma-separated namespaces to watch (NAMESPACE_WATCH); default is all")
 	f.Var(&ignore, "namespace-ignore", "Comma-separated namespaces to ignore (NAMESPACE_IGNORE); mutually exclusive with namespace-watch")
-	f.Var(&watch, "namespace", "Deprecated alias for namespace-watch; repeat to select more")
 	f.StringVar(&c.OutputFile, "output-file", "", "Atomically replace this file with the latest incident output")
-	f.StringVar(&c.IncidentNamespace, "incident-namespace", "k8s-health", "Namespace for ClusterIssue records; kubeconfig mode simulates writes")
+	f.StringVar(&c.IncidentNamespace, "incident-namespace", "kubescout", "Namespace for persisted Incident records")
 	f.StringVar(&c.ObserverID, "observer-id", "", "Required stable unique identity for this cluster and observation scope")
 	f.DurationVar(&c.InvestigationTimeout, "investigation-timeout", 120*time.Second, "Whole AI investigation deadline")
 	f.DurationVar(&c.Cooldown, "incident-cooldown", 2*time.Minute, "Coalesce ordinary changes in the same incident")
@@ -141,7 +142,7 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 
 	f.Visit(func(f *flag.Flag) {
 		switch f.Name {
-		case "namespace-watch", "namespace":
+		case "namespace-watch":
 			watchSet = true
 		case "namespace-ignore":
 			ignoreSet = true
@@ -189,6 +190,7 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 		if c.Context != "" || c.Kubeconfig != "" {
 			return c, errors.New("in-cluster mode rejects --context and --kubeconfig")
 		}
+
 	default:
 		return c, errors.New("--auth-mode must be kubeconfig or in-cluster")
 	}
@@ -213,13 +215,10 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	return c, nil
 }
 
-// LoadModel populates required model settings, accepting the legacy model-name fallback.
+// LoadModel populates required model settings.
 // It validates the HTTPS endpoint and nonempty credentials without making a model request.
 func (c *Config) LoadModel(getenv func(string) string) error {
 	c.Endpoint, c.APIKey, c.Model = getenv("AZURE_OPENAI_ENDPOINT"), getenv("AZURE_OPENAI_API_KEY"), getenv("AZURE_AI_MODEL_DEPLOYMENT_NAME")
-	if c.Model == "" {
-		c.Model = getenv("FOUNDRY_MODEL_NAME")
-	}
 
 	u, err := url.Parse(c.Endpoint)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || (u.Port() != "" && u.Port() != "443") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/openai/v1/" {

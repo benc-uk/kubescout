@@ -2,8 +2,8 @@
 Purpose: Exercise collection, tool-assisted AI and incident persistence together.
 Flow: Offline Kubernetes and model HTTP fixtures drive the real collector,
 Responses agent and reconciler through namespace scopes and Pod/Service cases.
-Assertions check collection-failure retention, projected tool evidence and
-AI-authored ClusterIssue output; no live cluster or model is contacted.
+Assertions check collection-failure retention, projected evidence with named citations and
+AI-authored Incident output; no live cluster or model is contacted.
 */
 package runner
 
@@ -115,7 +115,7 @@ func TestServiceCollectionToolAgentAndIncidentAPI(t *testing.T) {
 }
 
 // collectorToolAgentAndIncidentAPI drives real collection, tool rounds, and reconciliation against local HTTP fixtures.
-// It verifies request counts, projection boundaries, and AI-authored ClusterIssue creation and output.
+// It verifies request counts, projection boundaries and named citations in AI-authored Incidents.
 func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind string) {
 	resource := health.Resource{Kind: kind, Namespace: "apps", Name: "failed", UID: "pod-id"}
 	ref := incident.Ref(resource)
@@ -134,7 +134,7 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		if strings.Contains(r.URL.Path, "/clusterissues") {
+		if strings.Contains(r.URL.Path, "/incidents") {
 			if r.Method == "POST" {
 				creates.Add(1)
 				json.NewDecoder(r.Body).Decode(&stored)
@@ -144,8 +144,8 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 				return
 			}
 
-			if strings.HasSuffix(r.URL.Path, "/clusterissues") {
-				fmt.Fprint(w, `{"apiVersion":"health.k8s-ops-agent.io/v1alpha1","kind":"ClusterIssueList","metadata":{"resourceVersion":"1"},"items":[]}`)
+			if strings.HasSuffix(r.URL.Path, "/incidents") {
+				fmt.Fprint(w, `{"apiVersion":"kubescout.benc-uk.github.com/v1alpha1","kind":"IncidentList","metadata":{"resourceVersion":"1"},"items":[]}`)
 				return
 			}
 
@@ -232,7 +232,7 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 		} else {
 			decision := incident.Decision{Outcome: "decisions", Reason: "The inspected container workload failed", Actions: []incident.Action{
 				{Operation: "raise", Family: family, ResourceRefs: []string{ref}, Title: "Workload failed", Severity: "high", Impact: "unavailable", Diagnosis: "failed-pod",
-					Explanation: "Current inspection confirms Failed phase", EvidenceIDs: []string{"tool-1"}, Recommendations: []string{"Inspect the workload configuration"}, Uncertainty: "The cause is not yet known", MaterialChange: true}}}
+					Explanation: "Current inspection confirms Failed phase", EvidenceIDs: []string{"inspect-resource-1"}, Recommendations: []string{"Inspect the workload configuration"}, Uncertainty: "The cause is not yet known", MaterialChange: true}}}
 			if kind == "Service" {
 				decision.Actions[0].Diagnosis = "no-ready-backends"
 				decision.Actions[0].Explanation = "No ready published backends; application traffic has not been tested"
@@ -255,7 +255,7 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 	var out, diag bytes.Buffer
 
 	r := Runner{Config: cfg, Source: kube.NewSource(client, cfg), Analyzer: &analysis.Analyzer{Config: cfg, Kubernetes: client},
-		Incidents: incident.Reconciler{Repository: incident.Kubernetes{Client: client, Namespace: "incidents", Observer: "fixture", Limit: 100, Timeout: time.Second}, Observer: "fixture", Model: "fixture"},
+		Incidents: incident.Reconciler{Repository: incident.Kubernetes{Client: client, Namespace: "kubescout", Observer: "fixture", Limit: 100, Timeout: time.Second}, Observer: "fixture", Model: "fixture"},
 		Output:    output.Writer{Out: &out, Err: &diag}}
 	if code := r.Once(t.Context()); code != 0 {
 		t.Fatalf("code=%d out=%s diag=%s", code, &out, &diag)
@@ -266,18 +266,23 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 		t.Fatalf("wrong end-to-end output: %s", &out)
 	}
 
-	if stored["kind"] != "ClusterIssue" {
+	if stored["kind"] != "Incident" {
 		t.Fatal("legacy HealthReport was published")
 	}
 
 	name := stored["metadata"].(map[string]any)["name"]
 	if name != incident.Name(incident.Identity{Observer: "fixture", Anchor: resource, Family: family}) ||
-		result.Changes[0].Name != name || !strings.HasPrefix(result.Changes[0].Name, "issue-") {
-		t.Fatal("ClusterIssue create and report names do not match the issue prefix")
+		result.Changes[0].Name != name || !strings.HasPrefix(result.Changes[0].Name, "inc-") {
+		t.Fatal("Incident create and report names do not match")
 	}
 
 	analysisPayload := stored["spec"].(map[string]any)["analysis"].(map[string]any)
 	if analysisPayload["title"] != "Workload failed" || analysisPayload["severity"] != "high" {
 		t.Fatal("deterministic evidence replaced AI judgment")
+	}
+
+	evidenceIDs := analysisPayload["evidence_ids"].([]any)
+	if len(evidenceIDs) != 1 || evidenceIDs[0] != "inspect-resource-1" {
+		t.Fatal("descriptive tool citation was not persisted")
 	}
 }

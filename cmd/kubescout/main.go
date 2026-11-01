@@ -2,7 +2,7 @@
 Purpose: Bootstrap the KubeScout CLI and coordinate process shutdown and exit codes.
 Flow: Load validated configuration, select Kubernetes access and wire collection,
 AI investigation, incident reconciliation and output into once or watch execution.
-Kubeconfig mode simulates incident writes; in-cluster mode uses ClusterIssues.
+Both authentication modes persist Incidents; there is no runtime simulation path.
 */
 package main
 
@@ -39,7 +39,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 // runWithClient validates configuration and wires collection, AI, reconciliation and output.
-// It simulates kubeconfig writes and returns configuration, bootstrap or execution exit codes.
+// It returns configuration, bootstrap or execution exit codes without storage fallback.
 func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer, newClient func(config.Config) (dynamic.Interface, string, error)) int {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -84,14 +84,11 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 
-	var repository incident.Repository = &incident.Memory{Log: stderr}
-	if c.Auth == "in-cluster" {
-		repository = incident.Kubernetes{Client: client, Namespace: c.IncidentNamespace, Observer: c.ObserverID, Limit: c.MaxObjects, Timeout: c.RequestTimeout}
-	}
-
 	r := runner.Runner{Config: c, Source: kube.NewSource(client, c), Analyzer: &analysis.Analyzer{Config: c, Kubernetes: client}, Output: sink,
-		Incidents: incident.Reconciler{Repository: repository, Observer: c.ObserverID, Model: c.Model, Simulated: c.Auth == "kubeconfig"}}
+		Incidents: newIncidentReconciler(c, client)}
 	fmt.Fprintf(stderr, "INFO: AI investigation for %s, %s (once=%t)\n", cluster, c.NamespaceScope(), c.Once)
+
+	fmt.Fprintf(stderr, "INFO: persisting Incidents in namespace %s\n", c.IncidentNamespace)
 
 	code := 0
 	if c.Once {
@@ -105,4 +102,13 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 
 	return code
+}
+
+// newIncidentReconciler wires namespaced Kubernetes persistence for either authentication mode.
+func newIncidentReconciler(c config.Config, client dynamic.Interface) incident.Reconciler {
+	return incident.Reconciler{
+		Repository: incident.Kubernetes{Client: client, Namespace: c.IncidentNamespace, Observer: c.ObserverID, Limit: c.MaxObjects, Timeout: c.RequestTimeout},
+		Observer:   c.ObserverID,
+		Model:      c.Model,
+	}
 }

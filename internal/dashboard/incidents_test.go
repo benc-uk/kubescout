@@ -1,5 +1,5 @@
 /*
-Purpose: Test bounded issue projection and revision-scoped dashboard triage.
+Purpose: Test bounded incident projection and revision-scoped dashboard triage.
 Flow: Offline HTTP and object fixtures check complete pagination, scope,
 schema and size failures, plus human dismiss/restore status patches with
 identity/version preconditions that preserve incident specs and foreign status.
@@ -29,8 +29,8 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// issueObject builds a valid stored incident with private fixture fields to test projection boundaries.
-func issueObject(t *testing.T, name string) map[string]any {
+// incidentObject builds a valid stored incident with private fixture fields to test projection boundaries.
+func incidentObject(t *testing.T, name string) map[string]any {
 	t.Helper()
 
 	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
@@ -54,25 +54,25 @@ func issueObject(t *testing.T, name string) map[string]any {
 	}
 
 	return map[string]any{
-		"apiVersion": incident.APIVersion, "kind": "ClusterIssue",
-		"metadata": map[string]any{"name": name, "namespace": "issues", "resourceVersion": "42", "uid": "private-object-uid",
+		"apiVersion": incident.APIVersion, "kind": "Incident",
+		"metadata": map[string]any{"name": name, "namespace": "kubescout", "resourceVersion": "42", "uid": "private-object-uid",
 			"annotations": map[string]any{"private": "private-annotation"}},
 		"spec": spec, "status": map[string]any{"private": "private-status"},
 	}
 }
 
-// TestServiceAvailabilityFamily checks Service issue decoding and the corresponding embedded family filter.
+// TestServiceAvailabilityFamily checks Service incident decoding and the corresponding embedded family filter.
 func TestServiceAvailabilityFamily(t *testing.T) {
-	obj := issueObject(t, "service-issue")
+	obj := incidentObject(t, "service-incident")
 	spec := obj["spec"].(map[string]any)
 	identity := spec["identity"].(map[string]any)
 	identity["family"] = "service-availability"
 	identity["anchor"].(map[string]any)["kind"] = "Service"
-	reader := &Reader{namespace: "issues"}
+	reader := &Reader{namespace: "kubescout"}
 
 	item, err := reader.decode(&unstructured.Unstructured{Object: obj})
 	if err != nil || item.Family != "service-availability" || item.Anchor.Kind != "Service" {
-		t.Fatalf("service issue rejected: %v", err)
+		t.Fatalf("service incident rejected: %v", err)
 	}
 
 	html, err := assets.ReadFile("web/index.html")
@@ -81,12 +81,12 @@ func TestServiceAvailabilityFamily(t *testing.T) {
 	}
 }
 
-// fixtureReader creates a bounded reader backed by a local HTTP fixture that checks read-only issue scope.
+// fixtureReader creates a bounded reader backed by a local HTTP fixture that checks read-only incident scope.
 func fixtureReader(t *testing.T, handler http.HandlerFunc) *Reader {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || !strings.HasPrefix(r.URL.Path, "/apis/health.k8s-ops-agent.io/v1alpha1/namespaces/issues/clusterissues") {
+		if r.Method != "GET" || !strings.HasPrefix(r.URL.Path, "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents") {
 			t.Errorf("unexpected API scope: %s %s", r.Method, r.URL.Path)
 		}
 
@@ -100,7 +100,7 @@ func fixtureReader(t *testing.T, handler http.HandlerFunc) *Reader {
 		t.Fatal(err)
 	}
 
-	reader, err := NewReader(client, "issues")
+	reader, err := NewReader(client, "kubescout")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,10 +108,10 @@ func fixtureReader(t *testing.T, handler http.HandlerFunc) *Reader {
 	return reader
 }
 
-// writePage emits a ClusterIssue list fixture with controlled pagination metadata.
+// writePage emits an Incident list fixture with controlled pagination metadata.
 func writePage(w http.ResponseWriter, items []map[string]any, version, token string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"apiVersion": incident.APIVersion, "kind": "ClusterIssueList",
+		"apiVersion": incident.APIVersion, "kind": "IncidentList",
 		"metadata": map[string]any{"resourceVersion": version, "continue": token}, "items": items,
 	})
 }
@@ -126,14 +126,14 @@ func assertCode(t *testing.T, err error, code string) {
 	}
 }
 
-// TestListPaginationBoundaries verifies complete unfiltered reads through the issue-count limit.
+// TestListPaginationBoundaries verifies complete unfiltered reads through the incident-count limit.
 // Overflow must fail without returning a partial snapshot.
 func TestListPaginationBoundaries(t *testing.T) {
 	for _, count := range []int{0, 1, 1000, 1001} {
 		t.Run(strconv.Itoa(count), func(t *testing.T) {
 			items := make([]map[string]any, count)
 			for i := range items {
-				items[i] = issueObject(t, fmt.Sprintf("issue-%04d", i))
+				items[i] = incidentObject(t, fmt.Sprintf("incident-%04d", i))
 			}
 
 			var calls atomic.Int32
@@ -161,18 +161,18 @@ func TestListPaginationBoundaries(t *testing.T) {
 			})
 
 			result, err := reader.List(context.Background())
-			if count > MaxIssues {
-				assertCode(t, err, "issue_limit")
+			if count > MaxIncidents {
+				assertCode(t, err, "incident_limit")
 
-				if result.Items != nil {
+				if result.Incidents != nil {
 					t.Fatal("returned partial snapshot")
 				}
 
 				return
 			}
 
-			if err != nil || len(result.Items) != count || result.Items == nil || result.Namespace != "issues" || result.FetchedAt.IsZero() {
-				t.Fatalf("invalid result count=%d: %v", len(result.Items), err)
+			if err != nil || len(result.Incidents) != count || result.Incidents == nil || result.Namespace != "kubescout" || result.FetchedAt.IsZero() {
+				t.Fatalf("invalid result count=%d: %v", len(result.Incidents), err)
 			}
 
 			if calls.Load() != int32(max(1, (count+99)/100)) {
@@ -186,7 +186,7 @@ func TestListPaginationBoundaries(t *testing.T) {
 func TestPaginationFailures(t *testing.T) {
 	for _, problem := range []string{"version", "missing-version", "duplicate", "token", "bad-record", "namespace", "second-page-error"} {
 		t.Run(problem, func(t *testing.T) {
-			item := issueObject(t, "issue-one")
+			item := incidentObject(t, "incident-one")
 
 			var calls atomic.Int32
 
@@ -206,9 +206,9 @@ func TestPaginationFailures(t *testing.T) {
 					case "token":
 						token, items = "next", nil
 					case "bad-record":
-						items = []map[string]any{{"metadata": map[string]any{"name": "issue-two"}}}
+						items = []map[string]any{{"metadata": map[string]any{"name": "incident-two"}}}
 					case "namespace":
-						items = []map[string]any{{"spec": item["spec"], "metadata": map[string]any{"name": "issue-two", "namespace": "other"}}}
+						items = []map[string]any{{"spec": item["spec"], "metadata": map[string]any{"name": "incident-two", "namespace": "other"}}}
 					case "second-page-error":
 						w.WriteHeader(500)
 						return
@@ -226,33 +226,33 @@ func TestPaginationFailures(t *testing.T) {
 
 			assertCode(t, err, want)
 
-			if result.Items != nil {
+			if result.Incidents != nil {
 				t.Fatal("returned partial snapshot")
 			}
 		})
 	}
 }
 
-// TestDetailProjectionAndLifecycle checks supported severity/state combinations and legacy incident names.
+// TestDetailProjectionAndLifecycle checks supported severity/state combinations and detail projection.
 // Projected details must omit private metadata and UIDs.
 func TestDetailProjectionAndLifecycle(t *testing.T) {
 	for _, severity := range []string{"critical", "high", "medium", "low"} {
 		for _, state := range []string{"open", "resolved"} {
 			t.Run(severity+"/"+state, func(t *testing.T) {
-				item := issueObject(t, "incident-legacy")
+				item := incidentObject(t, "incident-fixture")
 				spec := item["spec"].(map[string]any)
 				spec["analysis"].(map[string]any)["severity"] = severity
 				spec["lifecycle"].(map[string]any)["state"] = state
 				reader := fixtureReader(t, func(w http.ResponseWriter, r *http.Request) {
-					if !strings.HasSuffix(r.URL.Path, "/incident-legacy") {
-						t.Error("legacy name changed")
+					if !strings.HasSuffix(r.URL.Path, "/incident-fixture") {
+						t.Error("incident name changed")
 					}
 
 					_ = json.NewEncoder(w).Encode(item)
 				})
 
-				got, err := reader.Get(context.Background(), "incident-legacy")
-				if err != nil || got.Item.Severity != severity || got.Item.Lifecycle.State != state || got.Item.Analysis.Model != "fixture" {
+				got, err := reader.Get(context.Background(), "incident-fixture")
+				if err != nil || got.Incident.Severity != severity || got.Incident.Lifecycle.State != state || got.Incident.Analysis.Model != "fixture" {
 					t.Fatalf("bad detail: %+v %v", got, err)
 				}
 
@@ -287,7 +287,7 @@ func TestUpstreamFailures(t *testing.T) {
 			}
 
 			if status == 404 {
-				_, err = reader.Get(context.Background(), "issue-missing")
+				_, err = reader.Get(context.Background(), "incident-missing")
 				assertCode(t, err, "not_found")
 			}
 		})
@@ -354,11 +354,11 @@ func TestResponseSizeBoundaries(t *testing.T) {
 	assertCode(t, err, "response_too_large")
 }
 
-// TestMalformedSchema rejects invalid analysis, lifecycle, and resource fields, including legacy phase-only records.
+// TestMalformedSchema rejects invalid analysis, lifecycle, and resource fields, including phase-only records.
 func TestMalformedSchema(t *testing.T) {
 	for _, field := range []string{"severity", "state", "legacy-phase", "raised_at", "revision", "title", "recommendations", "resources"} {
 		t.Run(field, func(t *testing.T) {
-			obj := issueObject(t, "issue-bad")
+			obj := incidentObject(t, "incident-bad")
 			spec := obj["spec"].(map[string]any)
 
 			switch field {
@@ -378,7 +378,7 @@ func TestMalformedSchema(t *testing.T) {
 				spec[field] = []any{}
 			}
 
-			reader := &Reader{namespace: "issues"}
+			reader := &Reader{namespace: "kubescout"}
 			_, err := reader.decode(&unstructured.Unstructured{Object: obj})
 			assertCode(t, err, "invalid_snapshot")
 		})
@@ -389,7 +389,7 @@ func TestMalformedSchema(t *testing.T) {
 func TestAggregateSnapshotSizeLimit(t *testing.T) {
 	items := make([]map[string]any, 3)
 	for i := range items {
-		items[i] = issueObject(t, fmt.Sprintf("issue-%d", i))
+		items[i] = incidentObject(t, fmt.Sprintf("incident-%d", i))
 		items[i]["spec"].(map[string]any)["resources"] = []any{
 			map[string]any{"kind": "Deployment", "name": strings.Repeat("x", 3<<20)},
 		}
@@ -410,7 +410,7 @@ func TestAggregateSnapshotSizeLimit(t *testing.T) {
 	got, err := reader.List(context.Background())
 	assertCode(t, err, "response_too_large")
 
-	if got.Items != nil || calls.Load() != 3 {
+	if got.Incidents != nil || calls.Load() != 3 {
 		t.Fatal("oversized aggregate must fail without a partial result")
 	}
 }
@@ -420,7 +420,7 @@ func TestAggregateSnapshotSizeLimit(t *testing.T) {
 func TestTriagePersistenceAndRevision(t *testing.T) {
 	for _, withStatus := range []bool{false, true} {
 		t.Run(fmt.Sprint(withStatus), func(t *testing.T) {
-			obj := issueObject(t, "incident-legacy")
+			obj := incidentObject(t, "incident-fixture")
 			if !withStatus {
 				delete(obj, "status")
 			}
@@ -431,7 +431,7 @@ func TestTriagePersistenceAndRevision(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 
-				path := "/apis/health.k8s-ops-agent.io/v1alpha1/namespaces/issues/clusterissues/incident-legacy"
+				path := "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents/incident-fixture"
 				if r.Method == "GET" && r.URL.Path == path {
 					_ = json.NewEncoder(w).Encode(obj)
 					return
@@ -494,43 +494,43 @@ func TestTriagePersistenceAndRevision(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			reader, _ := NewReader(client, "issues")
+			reader, _ := NewReader(client, "kubescout")
 
-			before, err := reader.Get(t.Context(), "incident-legacy")
-			if err != nil || before.Item.Dismissed {
+			before, err := reader.Get(t.Context(), "incident-fixture")
+			if err != nil || before.Incident.Dismissed {
 				t.Fatalf("unexpected initial triage: %v", err)
 			}
 
-			dismissed, err := reader.SetDismissed(t.Context(), "incident-legacy", before.Item.Version, true)
-			if err != nil || !dismissed.Item.Dismissed || dismissed.Item.Lifecycle.Revision != before.Item.Lifecycle.Revision {
+			dismissed, err := reader.SetDismissed(t.Context(), "incident-fixture", before.Incident.Version, true)
+			if err != nil || !dismissed.Incident.Dismissed || dismissed.Incident.Lifecycle.Revision != before.Incident.Lifecycle.Revision {
 				t.Fatalf("dismiss changed lifecycle or failed: %v", err)
 			}
 
-			restarted, _ := NewReader(client, "issues")
+			restarted, _ := NewReader(client, "kubescout")
 
-			persisted, err := restarted.Get(t.Context(), "incident-legacy")
-			if err != nil || !persisted.Item.Dismissed {
+			persisted, err := restarted.Get(t.Context(), "incident-fixture")
+			if err != nil || !persisted.Incident.Dismissed {
 				t.Fatalf("dismissal not durable: %v", err)
 			}
 
-			_, err = reader.SetDismissed(t.Context(), "incident-legacy", persisted.Item.Version, true)
+			_, err = reader.SetDismissed(t.Context(), "incident-fixture", persisted.Incident.Version, true)
 			if err != nil || patches != 1 {
 				t.Fatalf("unchanged dismissal must not write: %v", err)
 			}
 
-			_, err = reader.SetDismissed(t.Context(), "incident-legacy", before.Item.Version, false)
+			_, err = reader.SetDismissed(t.Context(), "incident-fixture", before.Incident.Version, false)
 			assertCode(t, err, "triage_conflict")
 
 			if patches != 1 {
 				t.Fatal("stale browser reached write")
 			}
 
-			restored, err := reader.SetDismissed(t.Context(), "incident-legacy", persisted.Item.Version, false)
-			if err != nil || restored.Item.Dismissed || patches != 2 {
+			restored, err := reader.SetDismissed(t.Context(), "incident-fixture", persisted.Incident.Version, false)
+			if err != nil || restored.Incident.Dismissed || patches != 2 {
 				t.Fatalf("restore failed: %v", err)
 			}
 
-			_, err = reader.SetDismissed(t.Context(), "incident-legacy", restored.Item.Version, true)
+			_, err = reader.SetDismissed(t.Context(), "incident-fixture", restored.Incident.Version, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -545,8 +545,8 @@ func TestTriagePersistenceAndRevision(t *testing.T) {
 			lifecycle["recurrences"] = int64(1)
 			obj["metadata"].(map[string]any)["resourceVersion"] = "99"
 
-			updated, err := reader.Get(t.Context(), "incident-legacy")
-			if err != nil || updated.Item.Dismissed || patches != 3 {
+			updated, err := reader.Get(t.Context(), "incident-fixture")
+			if err != nil || updated.Incident.Dismissed || patches != 3 {
 				t.Fatalf("new revision must reappear without a status write: %v", err)
 			}
 		})
@@ -558,8 +558,8 @@ func TestTriagePersistenceAndRevision(t *testing.T) {
 func TestTriageFailures(t *testing.T) {
 	for _, failure := range []string{"changed", "recreated", "race", "patch-test", "forbidden", "missing", "unknown", "invalid-name", "invalid-version"} {
 		t.Run(failure, func(t *testing.T) {
-			obj := issueObject(t, "issue-one")
-			reader := &Reader{namespace: "issues"}
+			obj := incidentObject(t, "incident-one")
+			reader := &Reader{namespace: "kubescout"}
 
 			seen, err := reader.decode(&unstructured.Unstructured{Object: obj})
 			if err != nil {
@@ -611,8 +611,8 @@ func TestTriageFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			reader, _ = NewReader(client, "issues")
-			name, version := "issue-one", seen.Version
+			reader, _ = NewReader(client, "kubescout")
+			name, version := "incident-one", seen.Version
 			want, expectedGets, expectedPatches := "triage_conflict", 1, 1
 
 			switch failure {
@@ -643,9 +643,9 @@ func TestTriageFailures(t *testing.T) {
 // TestTriageProjection checks revision-scoped dismissal and malformed triage rejection without spec mutation.
 func TestTriageProjection(t *testing.T) {
 	for _, revision := range []int64{0, 1, 2} {
-		obj := issueObject(t, "issue-one")
+		obj := incidentObject(t, "incident-one")
 		obj["status"] = map[string]any{"triage": map[string]any{"dismissedRevision": revision}}
-		reader := &Reader{namespace: "issues"}
+		reader := &Reader{namespace: "kubescout"}
 
 		got, err := reader.decode(&unstructured.Unstructured{Object: obj})
 		if err != nil || got.Dismissed != (revision == 1) {
@@ -653,10 +653,10 @@ func TestTriageProjection(t *testing.T) {
 		}
 	}
 
-	obj := issueObject(t, "issue-one")
+	obj := incidentObject(t, "incident-one")
 	before := (&unstructured.Unstructured{Object: obj}).DeepCopy()
 	obj["status"] = map[string]any{"triage": map[string]any{"dismissedRevision": "invalid"}}
-	reader := &Reader{namespace: "issues"}
+	reader := &Reader{namespace: "kubescout"}
 	_, err := reader.decode(&unstructured.Unstructured{Object: obj})
 	assertCode(t, err, "invalid_snapshot")
 

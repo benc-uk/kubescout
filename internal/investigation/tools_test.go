@@ -1,7 +1,7 @@
 /*
 Purpose: Test investigation tool scope, projection and invocation limits.
 Flow: Offline Kubernetes HTTP fixtures check handles before API access,
-excluded private fields and namespace-aware node event pagination; malformed,
+operation-named citations, private-field exclusion and node event pagination; malformed,
 out-of-scope or over-budget reads must not return accepted tool evidence.
 */
 package investigation
@@ -23,7 +23,7 @@ import (
 )
 
 // TestToolScopeRedactionAndInvocationBudget checks pre-read argument validation, private-field
-// exclusion and the shared eight-call limit against a local Kubernetes fixture.
+// exclusion, unique inspection citations and the eight-call limit against a local Kubernetes fixture.
 func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 	calls := 0
 
@@ -53,14 +53,20 @@ func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 		}
 	}
 
-	if calls != 0 {
-		t.Fatal("scope validation occurred after API access")
+	if calls != 0 || len(s.Citations) != 0 {
+		t.Fatal("invalid arguments reached the API or registered evidence")
 	}
 
 	for i := 0; i < 8; i++ {
 		result, err := tool.Call(t.Context(), `{"resource_ref":"allowed"}`)
 		if err != nil {
 			t.Fatal(err)
+		}
+
+		expected := fmt.Sprintf("inspect-resource-%d", i+1)
+		evidence, ok := result.(map[string]any)
+		if !ok || evidence["evidence_id"] != expected || !s.Citations[expected] || len(s.Citations) != i+1 {
+			t.Fatal("inspection citation is not descriptive, unique and registered")
 		}
 
 		data, _ := json.Marshal(result)
@@ -75,7 +81,7 @@ func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 }
 
 // TestNodeEventsRespectNamespaceSelection checks all/watch/ignore event scope and
-// rejects invalid targets, inconsistent pagination and over-budget results without partial evidence.
+// verifies Warning-event citations and rejects invalid or over-budget reads without partial evidence.
 func TestNodeEventsRespectNamespaceSelection(t *testing.T) {
 	for _, tt := range []struct {
 		name           string
@@ -186,14 +192,19 @@ func TestNodeEventsRespectNamespaceSelection(t *testing.T) {
 			}
 
 			if tt.invalid {
-				if calls > 20 || result != nil {
-					t.Fatal("tool exceeded HTTP budget or returned a partial result")
+				if calls > 20 || result != nil || len(s.Citations) != 0 {
+					t.Fatal("tool exceeded HTTP budget or returned accepted partial evidence")
 				}
 
 				return
 			}
 
-			events := result.(map[string]any)["events"].([]map[string]any)
+			evidence := result.(map[string]any)
+			if evidence["evidence_id"] != "related-warning-events-1" || !s.Citations["related-warning-events-1"] || len(s.Citations) != 1 {
+				t.Fatal("Warning-event citation is not descriptive and registered")
+			}
+
+			events := evidence["events"].([]map[string]any)
 			if len(events) != tt.want || calls != tt.requests {
 				t.Fatalf("events=%d requests=%d", len(events), calls)
 			}

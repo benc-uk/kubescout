@@ -1,7 +1,7 @@
 /*
 Purpose: Verify dashboard CLI validation, startup failures and HTTP shutdown.
 Flow: Offline injected clients, listeners and a local Kubernetes HTTP fixture
-exercise authentication options, loopback binding and namespaced issue reads.
+exercise authentication options, loopback binding and namespaced Incident reads.
 Tests use no live cluster or model and do not publish incident conclusions.
 */
 package main
@@ -107,7 +107,7 @@ func TestGracefulExit(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- run(ctx, []string{"--namespace=issues"}, &output,
+		done <- run(ctx, []string{"--namespace=kubescout"}, &output,
 			func(dashboard.ClientOptions) (dynamic.Interface, error) { return client, nil },
 			func(network, address string) (net.Listener, error) {
 				listener, err := net.Listen(network, "127.0.0.1:0")
@@ -120,7 +120,7 @@ func TestGracefulExit(t *testing.T) {
 
 	select {
 	case code := <-done:
-		if code != 0 || !strings.Contains(output.String(), "namespace issues") {
+		if code != 0 || !strings.Contains(output.String(), "namespace kubescout") {
 			t.Fatalf("shutdown code %d: %s", code, &output)
 		}
 
@@ -140,7 +140,7 @@ func TestLocalOptionsAndLoopback(t *testing.T) {
 	var output bytes.Buffer
 
 	code := run(context.Background(), []string{
-		"--auth-mode=kubeconfig", "--context=selected", "--kubeconfig=fixture", "--namespace=issues",
+		"--auth-mode=kubeconfig", "--context=selected", "--kubeconfig=fixture", "--namespace=kubescout",
 	}, &output, func(options dashboard.ClientOptions) (dynamic.Interface, error) {
 		if options != (dashboard.ClientOptions{AuthMode: "kubeconfig", Context: "selected", Kubeconfig: "fixture"}) {
 			t.Fatalf("incorrect options: %+v", options)
@@ -160,15 +160,15 @@ func TestLocalOptionsAndLoopback(t *testing.T) {
 }
 
 // TestKubeconfigServerLifecycle serves dashboard requests against a local Kubernetes fixture
-// and checks namespaced issue output and graceful cancellation without live cluster access.
+// and checks namespaced Incident output and graceful cancellation without live cluster access.
 func TestKubeconfigServerLifecycle(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || r.URL.Path != "/apis/health.k8s-ops-agent.io/v1alpha1/namespaces/issues/clusterissues" {
+		if r.Method != "GET" || r.URL.Path != "/apis/kubescout.benc-uk.github.com/v1alpha1/namespaces/kubescout/incidents" {
 			t.Error("unexpected Kubernetes request")
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"apiVersion":"health.k8s-ops-agent.io/v1alpha1","kind":"ClusterIssueList","metadata":{"resourceVersion":"42"},"items":[]}`)
+		_, _ = io.WriteString(w, `{"apiVersion":"kubescout.benc-uk.github.com/v1alpha1","kind":"IncidentList","metadata":{"resourceVersion":"42"},"items":[]}`)
 	}))
 	defer upstream.Close()
 
@@ -196,7 +196,7 @@ func TestKubeconfigServerLifecycle(t *testing.T) {
 	done := make(chan int, 1)
 	go func() {
 		done <- run(ctx, []string{
-			"--auth-mode=kubeconfig", "--kubeconfig=" + path, "--namespace=issues",
+			"--auth-mode=kubeconfig", "--kubeconfig=" + path, "--namespace=kubescout",
 		}, &output, dashboard.Client, func(network, address string) (net.Listener, error) {
 			if network != "tcp" || address != "127.0.0.1:8000" {
 				t.Error("incorrect local listener")
@@ -207,7 +207,7 @@ func TestKubeconfigServerLifecycle(t *testing.T) {
 	}()
 
 	httpClient := &http.Client{Timeout: 3 * time.Second}
-	for _, path := range []string{"/", "/api/issues"} {
+	for _, path := range []string{"/", "/api/incidents"} {
 		response, err := httpClient.Get("http://" + listener.Addr().String() + path)
 		if err != nil {
 			t.Fatal(err)
@@ -220,7 +220,7 @@ func TestKubeconfigServerLifecycle(t *testing.T) {
 			t.Fatalf("local request failed: status=%d err=%v", response.StatusCode, err)
 		}
 
-		if path == "/api/issues" && (!strings.Contains(string(body), `"namespace":"issues"`) || !strings.Contains(string(body), `"items":[]`)) {
+		if path == "/api/incidents" && (!strings.Contains(string(body), `"namespace":"kubescout"`) || !strings.Contains(string(body), `"incidents":[]`)) {
 			t.Fatal("incorrect local API response")
 		}
 	}

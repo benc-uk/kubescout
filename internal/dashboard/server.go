@@ -1,6 +1,6 @@
 /*
 Purpose: Serve the standalone dashboard's embedded UI and bounded HTTP API.
-Flow: Issue reads and same-origin, typed human-triage requests reach a Source;
+Flow: Incident reads and same-origin, typed human-triage requests reach a Source;
 responses use bounded JSON and browser security headers. Listener lifecycle
 supports graceful shutdown. This service does not run the AI investigation
 loop or expose incident-spec writes.
@@ -24,7 +24,7 @@ import (
 //go:embed web/*
 var assets embed.FS
 
-// Handler serves embedded assets and bounded issue APIs with browser security headers and error logging.
+// Handler serves embedded assets and bounded incident APIs with browser security headers and error logging.
 // Human triage requires same-origin checks and typed input; no AI or incident-spec writes are exposed.
 func Handler(source Source, logger *log.Logger) http.Handler {
 	mux := http.NewServeMux()
@@ -66,7 +66,7 @@ func Handler(source Source, logger *log.Logger) http.Handler {
 			logger.Print("ERROR: could not write API response")
 		}
 	}
-	mux.HandleFunc("/api/issues", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/incidents", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
 			writeError(w, &APIError{405, "method_not_allowed", "Only GET is supported."})
@@ -77,7 +77,7 @@ func Handler(source Source, logger *log.Logger) http.Handler {
 		result, err := source.List(r.Context())
 		writeJSON(w, result, err)
 	})
-	mux.HandleFunc("/api/issues/{name}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/incidents/{name}", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
 			writeError(w, &APIError{405, "method_not_allowed", "Only GET is supported."})
@@ -88,7 +88,7 @@ func Handler(source Source, logger *log.Logger) http.Handler {
 		result, err := source.Get(r.Context(), r.PathValue("name"))
 		writeJSON(w, result, err)
 	})
-	mux.HandleFunc("/api/issues/{name}/triage", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/incidents/{name}/triage", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
 			writeError(w, &APIError{405, "method_not_allowed", "Only POST is supported."})
@@ -109,7 +109,7 @@ func Handler(source Source, logger *log.Logger) http.Handler {
 
 		version, dismissed, err := decodeTriage(http.MaxBytesReader(w, r.Body, 1024))
 		if err != nil {
-			writeError(w, &APIError{400, "invalid_triage", "Expected only an issue version and a dismissed boolean."})
+			writeError(w, &APIError{400, "invalid_triage", "Expected only an incident version and a dismissed boolean."})
 			return
 		}
 
@@ -158,7 +158,7 @@ func Handler(source Source, logger *log.Logger) http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
 
 		if r.URL.RawQuery != "" {
-			writeError(w, &APIError{400, "invalid_query", "Query parameters are not supported; the issue namespace is configured on the server."})
+			writeError(w, &APIError{400, "invalid_query", "Query parameters are not supported; the incident namespace is configured on the server."})
 			return
 		}
 

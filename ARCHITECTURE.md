@@ -9,7 +9,7 @@ Kubernetes change
     -> deterministic evidence
     -> scheduled AI investigation
     -> validated decision
-    -> ClusterIssue
+    -> Incident
     -> dashboard
 ```
 
@@ -23,8 +23,8 @@ deterministic-only incident publisher.
 
 | Step | What happens | Code responsible | Decisions made | Deterministic or AI? |
 |---|---|---|---|---|
-| **1. Start the process** | Loads configuration, authenticates to Kubernetes and wires together the collector, analyzer, incident store and runner. | [`runWithClient`](cmd/kubescout/main.go) | Which namespaces to observe, which model to use, watch versus once, real incident writes versus simulation. | **Deterministic** |
-| **2. Recover existing incidents** | Loads this observer's open ClusterIssues so restarting does not forget unresolved problems. | [`Runner.loadOpen`](internal/runner/runner.go), [`Kubernetes.ListOpen`](internal/incident/store.go) | Rejects stored incidents outside the configured observation scope. | **Deterministic** |
+| **1. Start the process** | Loads configuration, authenticates to Kubernetes and wires together the collector, analyzer, incident store and runner. | [`runWithClient`](cmd/kubescout/main.go) | Which namespaces to observe, which model to use, watch versus once and where to persist incidents. | **Deterministic** |
+| **2. Recover existing incidents** | Loads this observer's open Incidents so restarting does not forget unresolved problems. | [`Runner.loadOpen`](internal/runner/runner.go), [`Kubernetes.ListOpen`](internal/incident/store.go) | Rejects stored incidents outside the configured observation scope. | **Deterministic** |
 | **3. Subscribe to Kubernetes** | Creates client-go informers. Each performs an initial paginated **LIST**, then a **WATCH** for added, modified and deleted objects. | [`resources` and `Source.runEpoch`](internal/kube/source.go) | Watches supported resource types within the configured scope. Only Warning-type Kubernetes Events are collected. | **Deterministic** |
 | **4. Filter and simplify objects** | Converts API objects into a limited internal representation before storing them in the cache. | [`project`](internal/kube/project.go), [`Source.project` and `Source.watch`](internal/kube/source.go) | Rejects invalid identities, filters ignored namespaces and enforces object limits. Retains approved facts, not entire raw objects. | **Deterministic** |
 | **5. Wake the runner** | Informer add/update/delete callbacks send a notification. The runner reads the **current cached snapshot**, rather than passing each raw change directly to AI. A timer also wakes it. | [`Source.notify` and informer callbacks](internal/kube/source.go), [`Runner.Watch`](internal/runner/runner.go) | Coalesces notifications. Refuses incomplete collection; a broken watch triggers cache rebuilding, not a healthy result. | **Deterministic** |
@@ -90,14 +90,14 @@ The model does not receive arbitrary access to the cluster. A resource handle
 refers to an already-authorized resource in this investigation. The host keeps
 the mapping to Kubernetes identity private and validates tool requests against it.
 
-## 4. Turning the conclusion into a stored issue
+## 4. Turning the conclusion into a stored Incident
 
 | Step | What happens | Code responsible | Decisions made | Deterministic or AI? |
 |---|---|---|---|---|
 | **12. Validate the response** | Parses strict JSON and checks the proposed actions. | [`analysis.Validate`](internal/analysis/analysis.go), [`incident.Validate`](internal/incident/types.go) | Rejects malformed output, unknown citations/handles, duplicate incidents, invalid values and resolution without recovery eligibility. This validates the contract, not the truth of the diagnosis. | **Deterministic** |
 | **13. Reject stale decisions** | Compares current observations with the investigation's evidence fingerprint and inspected resource versions. | [`Runner.current` and `toolsCurrent`](internal/runner/runner.go) | If relevant evidence changed or collection became incomplete while AI was working, discards the result rather than publishing stale conclusions. | **Deterministic** |
-| **14. Reconcile and save** | Converts accepted actions into incident changes, using stable identity and concurrency preconditions. | [`Reconciler.Apply`, `next` and `Kubernetes.Save`](internal/incident/store.go) | Suppresses wording-only/nonmaterial updates; advances revision for accepted changes; preserves identity across recurrence. In-cluster creates/patches ClusterIssues; kubeconfig mode simulates writes. | **Deterministic execution of an AI decision** |
-| **15. Publish and display** | Agent emits accepted material changes on stdout. Separately, the dashboard reads stored ClusterIssues through its own server. | [`Writer.WriteChange`](internal/output/writer.go), [`Reader.List`](internal/dashboard/issues.go), [browser `refresh`](internal/dashboard/web/app.js) | Diagnostics/no-action go to stderr. Dashboard polls approximately every 15 seconds while visible; it does not receive the agent's stream or call AI. | **Deterministic** |
+| **14. Reconcile and save** | Converts accepted actions into incident changes, using stable identity and concurrency preconditions. | [`Reconciler.Apply`, `next` and `Kubernetes.Save`](internal/incident/store.go) | Suppresses wording-only/nonmaterial updates; advances revision for accepted changes; preserves identity across recurrence. Both authentication modes create/patch Incidents; there is no runtime simulation mode. | **Deterministic execution of an AI decision** |
+| **15. Publish and display** | Agent emits accepted material changes on stdout. Separately, the dashboard reads stored Incidents through its own server. | [`Writer.WriteChange`](internal/output/writer.go), [`Reader.List`](internal/dashboard/incidents.go), [browser `refresh`](internal/dashboard/web/app.js) | Diagnostics/no-action go to stderr. Dashboard polls approximately every 15 seconds while visible; it does not receive the agent's stream or call AI. | **Deterministic** |
 
 Incident identity combines the observer, anchor resource identity and problem
 family. The reconciler rereads ambiguous writes and uses UID/resourceVersion
@@ -111,7 +111,7 @@ not evidence of health.
 
 | Event | Deterministic part | AI part |
 |---|---|---|
-| Service has no backends | The Service rule finds zero ready endpoints, creates evidence and schedules investigation. | Decides whether this is a meaningful availability problem and whether to raise an issue. |
+| Service has no backends | The Service rule finds zero ready endpoints, creates evidence and schedules investigation. | Decides whether this is a meaningful availability problem and whether to raise an Incident. |
 | You create a matching backend Pod | Pod and EndpointSlice changes arrive through watches; cached evidence is recomputed. | Nothing necessarily happens immediately. |
 | Ready endpoints appear | The original warning disappears. The existing open incident remains a candidate. Continuous fresh recovery starts being tracked. | Still no automatic resolution. |
 | Recovery remains stable | After the recovery window, code permits a recovery review. | Reviews current evidence and chooses `resolve` or `no_action`. |
@@ -129,7 +129,7 @@ Defaults are defined in [configuration parsing](internal/config/config.go).
 | `--batch-window` | 5 seconds | Groups bursts of changes before investigation. |
 | `--incident-cooldown` | 2 minutes | Limits ordinary changed-evidence reviews for the same candidate. Increased urgency can bypass this cooldown. |
 | `--review-interval` | 15 minutes | Revisits unresolved/no-action cases even without new evidence. |
-| `--recovery-window` | 2 minutes | Requires continuous fresh recovery before AI may resolve an issue. |
+| `--recovery-window` | 2 minutes | Requires continuous fresh recovery before AI may resolve an Incident. |
 | `--check-interval` | 15 seconds | Configures time-based re-evaluation. The watch loop ticks at the smaller of this and the batch window. |
 | `--model-calls-per-hour` | 60 | Caps actual model HTTP attempts, including tool rounds, in a rolling hour. |
 
@@ -142,12 +142,13 @@ or prevent a lifecycle change.
   cannot establish continuous recovery, so it does not automatically resolve an
   existing incident. It emits one execution envelope, including an empty changes
   array when no changes are accepted.
-- **Human dismissal:** [`Reader.SetDismissed`](internal/dashboard/issues.go)
+- **Human dismissal:** [`Reader.SetDismissed`](internal/dashboard/incidents.go)
   writes revision-scoped triage status, not the AI lifecycle. The agent continues
   tracking the incident. A material AI change or recurrence advances the lifecycle
   revision and makes the old dismissal ineffective.
 - **Dashboard separation:** the dashboard is a separate process and reads stored
-  ClusterIssues. It cannot see the agent's in-memory kubeconfig simulation.
+  Incidents, including those persisted by local agent runs. Test-only
+  fixture repositories are not visible in the dashboard.
 
 **Bottom line: rules detect evidence; AI interprets it; deterministic safeguards
 control publication.**

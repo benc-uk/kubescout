@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kubescout-dashboard
-  namespace: k8s-health
+  namespace: kubescout
   labels:
     app.kubernetes.io/name: kubescout-dashboard
 spec:
@@ -30,7 +30,7 @@ spec:
           imagePullPolicy: Never
           args:
             - --auth-mode=in-cluster
-            - --namespace=k8s-health
+            - --namespace=kubescout
           ports:
             - name: http
               containerPort: 8000

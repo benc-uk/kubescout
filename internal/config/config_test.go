@@ -39,7 +39,7 @@ func TestNamespaceSelection(t *testing.T) {
 		{name: "environment ignore", env: map[string]string{"NAMESPACE_IGNORE": "system"}, ignore: []string{"system"}},
 		{name: "flag replaces environment", args: []string{"--namespace-watch=apps"}, env: map[string]string{"NAMESPACE_WATCH": "invalid,name/"}, watch: []string{"apps"}},
 		{name: "ignore flag replaces environment", args: []string{"--namespace-ignore=system"}, env: map[string]string{"NAMESPACE_IGNORE": "other"}, ignore: []string{"system"}},
-		{name: "legacy repeatable", args: []string{"--namespace=beta", "--namespace=apps"}, watch: []string{"apps", "beta"}},
+		{name: "removed namespace alias", args: []string{"--namespace=beta"}, invalid: true},
 		{name: "both flags", args: []string{"--namespace-watch=apps", "--namespace-ignore=system"}, invalid: true},
 		{name: "both environment", env: map[string]string{"NAMESPACE_WATCH": "apps", "NAMESPACE_IGNORE": "system"}, invalid: true},
 		{name: "mixed watch", args: []string{"--namespace-watch=apps"}, env: map[string]string{"NAMESPACE_IGNORE": "system"}, invalid: true},
@@ -89,7 +89,7 @@ func TestNamespaceSelection(t *testing.T) {
 // TestConfiguration verifies offline defaults and validation of authentication, scope and budgets,
 // including rejection of removed flags and preservation of the current kubeconfig context.
 func TestConfiguration(t *testing.T) {
-	base := []string{"--auth-mode", "kubeconfig", "--context", "kind-test", "--namespace", "apps", "--observer-id", "test"}
+	base := []string{"--auth-mode", "kubeconfig", "--context", "kind-test", "--namespace-watch", "apps", "--observer-id", "test"}
 
 	for _, test := range []struct {
 		name    string
@@ -98,6 +98,9 @@ func TestConfiguration(t *testing.T) {
 	}{
 		{"default watch", nil, false},
 		{"once", []string{"--once"}, false},
+		{"removed simulation", []string{"--simulate-incidents"}, true},
+		{"removed simulation false", []string{"--simulate-incidents=false"}, true},
+		{"removed incluster simulation", []string{"--auth-mode=in-cluster", "--context=", "--simulate-incidents"}, true},
 		{"zero request", []string{"--request-timeout=0s"}, true},
 		{"deadline ordering", []string{"--request-timeout=121s"}, true},
 		{"negative grace", []string{"--startup-grace=-1s"}, true},
@@ -108,8 +111,9 @@ func TestConfiguration(t *testing.T) {
 		{"blank context", []string{"--context= "}, true},
 		{"incluster context", []string{"--auth-mode=in-cluster"}, true},
 		{"incluster", []string{"--auth-mode=in-cluster", "--context="}, false},
-		{"wildcard ns", []string{"--namespace=*"}, true},
-		{"empty ns", []string{"--namespace="}, true},
+		{"wildcard ns", []string{"--namespace-watch=*"}, true},
+		{"empty ns", []string{"--namespace-watch="}, true},
+		{"removed namespace alias", []string{"--namespace=apps"}, true},
 		{"incident namespace", []string{"--incident-namespace=observer"}, false},
 		{"empty incident namespace", []string{"--incident-namespace="}, true},
 		{"wildcard incident namespace", []string{"--incident-namespace=*"}, true},
@@ -131,7 +135,7 @@ func TestConfiguration(t *testing.T) {
 				t.Fatal("watch must be default")
 			}
 
-			if test.name == "default watch" && c.IncidentNamespace != "k8s-health" {
+			if test.name == "default watch" && c.IncidentNamespace != "kubescout" {
 				t.Fatal("unexpected report namespace default")
 			}
 
@@ -145,23 +149,22 @@ func TestConfiguration(t *testing.T) {
 		t.Fatal("scope must be explicit")
 	}
 
-	c, err := Parse([]string{"--auth-mode=kubeconfig", "--namespace=apps", "--observer-id=test"}, testEnv, io.Discard)
+	c, err := Parse([]string{"--auth-mode=kubeconfig", "--namespace-watch=apps", "--observer-id=test"}, testEnv, io.Discard)
 	if err != nil || c.Context != "" {
 		t.Fatalf("omitted context must use kubeconfig's current context: %v", err)
 	}
 }
 
-// TestModelEndpointAndFallback validates HTTPS endpoint restrictions and the legacy model-name
-// fallback using synthetic settings without connecting to a model.
-func TestModelEndpointAndFallback(t *testing.T) {
+// TestModelEndpoint validates HTTPS endpoint restrictions using synthetic settings without connecting to a model.
+func TestModelEndpoint(t *testing.T) {
 	for _, endpoint := range []string{
 		"https://resource.openai.azure.com/openai/v1/", "https://resource:443/openai/v1/",
 		"http://resource/openai/v1/", "https://user:pass@resource/openai/v1/", "https://resource/api/projects/test",
 		"https://resource:444/openai/v1/", "https://resource/openai/v1/?key=x",
 	} {
 		t.Run(endpoint, func(t *testing.T) {
-			env := map[string]string{"AZURE_OPENAI_ENDPOINT": endpoint, "AZURE_OPENAI_API_KEY": "test-key", "FOUNDRY_MODEL_NAME": "test-model"}
-			c, err := Parse([]string{"--auth-mode=in-cluster", "--namespace=apps", "--observer-id=test"}, func(k string) string { return env[k] }, io.Discard)
+			env := map[string]string{"AZURE_OPENAI_ENDPOINT": endpoint, "AZURE_OPENAI_API_KEY": "test-key", "AZURE_AI_MODEL_DEPLOYMENT_NAME": "test-model"}
+			c, err := Parse([]string{"--auth-mode=in-cluster", "--namespace-watch=apps", "--observer-id=test"}, func(k string) string { return env[k] }, io.Discard)
 
 			valid := endpoint == "https://resource.openai.azure.com/openai/v1/" || endpoint == "https://resource:443/openai/v1/"
 			if (err == nil) != valid {
@@ -169,10 +172,24 @@ func TestModelEndpointAndFallback(t *testing.T) {
 			}
 
 			if valid && c.Model != "test-model" {
-				t.Fatal("fallback not used")
+				t.Fatal("model deployment setting not used")
 			}
 		})
 	}
+
+	t.Run("removed Foundry model setting", func(t *testing.T) {
+		env := map[string]string{
+			"AZURE_OPENAI_ENDPOINT": "https://resource.openai.azure.com/openai/v1/",
+			"AZURE_OPENAI_API_KEY":  "test-key",
+			"FOUNDRY_MODEL_NAME":    "test-model",
+		}
+		_, err := Parse([]string{"--auth-mode=in-cluster", "--observer-id=test"}, func(key string) string {
+			return env[key]
+		}, io.Discard)
+		if err == nil {
+			t.Fatal("removed Foundry model setting was accepted")
+		}
+	})
 }
 
 // TestDotEnvOnlyRepositoryRoot uses synthetic filesystem fixtures to check root-only dotenv loading,
@@ -187,25 +204,25 @@ func TestDotEnvOnlyRepositoryRoot(t *testing.T) {
 		}
 	}
 	write(filepath.Join(root, "go.mod"), "module github.com/benc-uk/kubescout\n")
-	write(filepath.Join(root, ".env"), "K8S_HEALTH_TEST_VALUE=file\n")
+	write(filepath.Join(root, ".env"), "KUBESCOUT_TEST_VALUE=file\n")
 
 	sub := filepath.Join(root, "sub")
 	if err := os.Mkdir(sub, 0700); err != nil {
 		t.Fatal(err)
 	}
 
-	write(filepath.Join(sub, ".env"), "K8S_HEALTH_TEST_VALUE=wrong\n")
-	t.Setenv("K8S_HEALTH_TEST_VALUE", "environment")
+	write(filepath.Join(sub, ".env"), "KUBESCOUT_TEST_VALUE=wrong\n")
+	t.Setenv("KUBESCOUT_TEST_VALUE", "environment")
 
 	if err := LoadDotEnv(sub, filepath.Join(root, "bin", "health")); err != nil {
 		t.Fatal(err)
 	}
 
-	if os.Getenv("K8S_HEALTH_TEST_VALUE") != "environment" {
+	if os.Getenv("KUBESCOUT_TEST_VALUE") != "environment" {
 		t.Fatal("overrode existing environment")
 	}
 
-	if err := os.Unsetenv("K8S_HEALTH_TEST_VALUE"); err != nil {
+	if err := os.Unsetenv("KUBESCOUT_TEST_VALUE"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,7 +230,7 @@ func TestDotEnvOnlyRepositoryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if os.Getenv("K8S_HEALTH_TEST_VALUE") != "file" {
+	if os.Getenv("KUBESCOUT_TEST_VALUE") != "file" {
 		t.Fatal("did not load root .env")
 	}
 

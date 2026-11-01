@@ -1,8 +1,8 @@
 /*
 Purpose: Persist and reconcile AI-directed incident lifecycle changes.
 Flow: Reviewed actions and stored revisions produce material changes through
-scoped ClusterIssue writes or kubeconfig memory simulation; retries reconcile
-ambiguous writes, preserve identity and leave human triage status untouched.
+scoped Incident writes; offline tests use a memory fixture repository. Retries
+reconcile ambiguous writes, preserve identity and leave human triage status untouched.
 */
 package incident
 
@@ -11,8 +11,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"reflect"
 	"slices"
 	"time"
@@ -45,19 +43,18 @@ type Kubernetes struct {
 	Timeout   time.Duration
 }
 
+// Memory is a fixture repository for tests; production execution uses Kubernetes.
 type Memory struct {
 	Records map[string]Record
-	Log     io.Writer
 }
 
 type Reconciler struct {
 	Repository Repository
 	Observer   string
 	Model      string
-	Simulated  bool
 }
 
-var GVR = schema.GroupVersionResource{Group: "health.k8s-ops-agent.io", Version: "v1alpha1", Resource: "clusterissues"}
+var GVR = schema.GroupVersionResource{Group: "kubescout.benc-uk.github.com", Version: "v1alpha1", Resource: "incidents"}
 
 // decode checks stored schema, observer ownership, stable name and lifecycle before returning a record.
 func (s Kubernetes) decode(obj *unstructured.Unstructured) (*Record, error) {
@@ -68,8 +65,8 @@ func (s Kubernetes) decode(obj *unstructured.Unstructured) (*Record, error) {
 		return nil, errors.New("invalid stored incident schema")
 	}
 
-	if value.Identity.Observer != s.Observer || obj.GetLabels()["app.kubernetes.io/managed-by"] != "k8s-health" ||
-		!matchesName(obj.GetName(), value.Identity) || value.Identity.Anchor.UID == "" ||
+	if value.Identity.Observer != s.Observer || obj.GetLabels()["app.kubernetes.io/managed-by"] != "kubescout" ||
+		obj.GetName() != Name(value.Identity) || value.Identity.Anchor.UID == "" ||
 		!slices.Contains(Families, value.Identity.Family) || value.Lifecycle.Revision < 1 {
 		return nil, errors.New("incident ownership or identity mismatch")
 	}
@@ -81,11 +78,11 @@ func (s Kubernetes) decode(obj *unstructured.Unstructured) (*Record, error) {
 	return &Record{Name: obj.GetName(), Version: obj.GetResourceVersion(), UID: string(obj.GetUID()), Value: value}, nil
 }
 
-// ListOpen reads the observer's namespaced open-issue index with bounded, consistent pagination.
+// ListOpen reads the observer's namespaced open-incident index with bounded, consistent pagination.
 // Invalid records, duplicate entries and incomplete pagination fail the entire read.
 func (s Kubernetes) ListOpen(ctx context.Context) ([]Record, error) {
 	out := []Record{}
-	opts := metav1.ListOptions{Limit: 100, LabelSelector: "app.kubernetes.io/managed-by=k8s-health,health.k8s-ops-agent.io/observer=" + s.Observer + ",health.k8s-ops-agent.io/state=open"}
+	opts := metav1.ListOptions{Limit: 100, LabelSelector: "app.kubernetes.io/managed-by=kubescout,kubescout.benc-uk.github.com/observer=" + s.Observer + ",kubescout.benc-uk.github.com/state=open"}
 	seen := map[string]bool{}
 	names := map[string]bool{}
 	version := ""
@@ -97,7 +94,7 @@ func (s Kubernetes) ListOpen(ctx context.Context) ([]Record, error) {
 		cancel()
 
 		if err != nil {
-			return nil, errors.New("cannot load incident index; check ClusterIssue CRD, namespace and RBAC")
+			return nil, errors.New("cannot load incident index; check Incident CRD, namespace and RBAC")
 		}
 
 		if page.GetResourceVersion() == "" || (version != "" && version != page.GetResourceVersion()) {
@@ -136,7 +133,7 @@ func (s Kubernetes) ListOpen(ctx context.Context) ([]Record, error) {
 	}
 }
 
-// Get performs a timed, namespaced lookup and validates ownership; a missing issue returns nil.
+// Get performs a timed, namespaced lookup and validates ownership; a missing incident returns nil.
 func (s Kubernetes) Get(ctx context.Context, name string) (*Record, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()
@@ -153,7 +150,7 @@ func (s Kubernetes) Get(ctx context.Context, name string) (*Record, error) {
 	return s.decode(obj)
 }
 
-// Save creates a ClusterIssue or patches agent-owned fields with UID and version preconditions.
+// Save creates an Incident or patches agent-owned fields with UID and version preconditions.
 // Existing status and foreign metadata are preserved; ambiguous failures require reconciliation.
 func (s Kubernetes) Save(ctx context.Context, r Record) error {
 	payload, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&r.Value)
@@ -162,9 +159,9 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 	}
 
 	obj := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": APIVersion, "kind": "ClusterIssue",
+		"apiVersion": APIVersion, "kind": "Incident",
 		"metadata": map[string]any{"name": r.Name, "namespace": s.Namespace,
-			"labels": map[string]any{"app.kubernetes.io/managed-by": "k8s-health", "health.k8s-ops-agent.io/observer": s.Observer, "health.k8s-ops-agent.io/state": r.Value.Lifecycle.State}},
+			"labels": map[string]any{"app.kubernetes.io/managed-by": "kubescout", "kubescout.benc-uk.github.com/observer": s.Observer, "kubescout.benc-uk.github.com/state": r.Value.Lifecycle.State}},
 		"spec": payload,
 	}}
 
@@ -179,7 +176,7 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 			{"op": "test", "path": "/metadata/resourceVersion", "value": r.Version},
 			{"op": "test", "path": "/metadata/uid", "value": r.UID},
 			{"op": "replace", "path": "/spec", "value": payload},
-			{"op": "add", "path": "/metadata/labels/health.k8s-ops-agent.io~1state", "value": r.Value.Lifecycle.State},
+			{"op": "add", "path": "/metadata/labels/kubescout.benc-uk.github.com~1state", "value": r.Value.Lifecycle.State},
 		})
 		if marshalErr != nil {
 			return errors.New("cannot encode incident update")
@@ -195,7 +192,7 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 	return nil
 }
 
-// ListOpen returns only unresolved simulated records without accessing Kubernetes.
+// ListOpen returns unresolved fixture records without accessing Kubernetes.
 func (s *Memory) ListOpen(context.Context) ([]Record, error) {
 	out := []Record{}
 
@@ -208,7 +205,7 @@ func (s *Memory) ListOpen(context.Context) ([]Record, error) {
 	return out, nil
 }
 
-// Get retrieves a simulated record by name, returning nil when it has not been stored.
+// Get retrieves a fixture record by name, returning nil when it has not been stored.
 func (s *Memory) Get(_ context.Context, name string) (*Record, error) {
 	r, ok := s.Records[name]
 	if !ok {
@@ -218,17 +215,8 @@ func (s *Memory) Get(_ context.Context, name string) (*Record, error) {
 	return &r, nil
 }
 
-// Save logs a simulated create or update before storing the record; log failures prevent mutation.
+// Save stores a fixture record in memory without Kubernetes access or operational logging.
 func (s *Memory) Save(_ context.Context, r Record) error {
-	operation := "create"
-	if _, ok := s.Records[r.Name]; ok {
-		operation = "update"
-	}
-
-	if _, err := fmt.Fprintf(s.Log, "INFO: would %s ClusterIssue %s state=%s revision=%d (kubeconfig simulation)\n", operation, r.Name, r.Value.Lifecycle.State, r.Value.Lifecycle.Revision); err != nil {
-		return errors.New("incident simulation log failed")
-	}
-
 	if s.Records == nil {
 		s.Records = map[string]Record{}
 	}
@@ -238,17 +226,12 @@ func (s *Memory) Save(_ context.Context, r Record) error {
 	return nil
 }
 
-// get checks the current stable name first and tries the historical name only when absent.
+// get reads the record at its stable identity-derived name.
 func (s Reconciler) get(ctx context.Context, identity Identity) (*Record, error) {
-	r, err := s.Repository.Get(ctx, Name(identity))
-	if err != nil || r != nil {
-		return r, err
-	}
-
-	return s.Repository.Get(ctx, legacyName(identity))
+	return s.Repository.Get(ctx, Name(identity))
 }
 
-// Existing loads model-visible summaries for every stored family on an anchor, including resolved issues.
+// Existing loads model-visible summaries for every stored family on an anchor, including resolved incidents.
 func (s Reconciler) Existing(ctx context.Context, anchor health.Resource) ([]Existing, error) {
 	out := []Existing{}
 
@@ -275,7 +258,7 @@ func (s Reconciler) Apply(ctx context.Context, in InvestigationContext, d Decisi
 		identity := Identity{s.Observer, in.Identities[in.Anchor], a.Family}
 
 		name := Name(identity)
-		if a.IncidentID != "" && !matchesName(a.IncidentID, identity) {
+		if a.IncidentID != "" && a.IncidentID != Name(identity) {
 			return changes, errors.New("incident action identity mismatch")
 		}
 
@@ -366,7 +349,7 @@ func (s Reconciler) Apply(ctx context.Context, in InvestigationContext, d Decisi
 				op = "reopen"
 			}
 
-			changes = append(changes, Change{op, name, desired.Value, s.Simulated})
+			changes = append(changes, Change{Operation: op, Name: name, Incident: desired.Value})
 		}
 	}
 

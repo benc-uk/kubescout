@@ -163,7 +163,7 @@ func TestOnceNoActionAndFailuresNeverCreateIncidents(t *testing.T) {
 				source.err = errors.New("disconnected")
 			}
 
-			repo := &incident.Memory{Log: &diag}
+			repo := &incident.Memory{}
 			ai := &fakeAI{fail: test.model}
 
 			r := Runner{Config: options(), Source: source, Analyzer: ai, Incidents: incident.Reconciler{Repository: repo, Observer: "fixture"}, Output: output.Writer{Out: &out, Err: &diag}}
@@ -184,7 +184,7 @@ func TestOnceNoActionAndFailuresNeverCreateIncidents(t *testing.T) {
 func TestModelDoesNotBlockFreshnessOrCauseRenewalReports(t *testing.T) {
 	source := &fakeSource{objects: []health.Object{failedPod()}, events: make(chan struct{}, 1)}
 	ai := &fakeAI{started: make(chan struct{}, 1), release: make(chan struct{})}
-	repo := &incident.Memory{Log: io.Discard}
+	repo := &incident.Memory{}
 
 	var out bytes.Buffer
 

@@ -74,13 +74,13 @@ func TestTriageHTTPBoundary(t *testing.T) {
 			source := fixtureSource{triage: func(name, version string, dismissed bool) (DetailResponse, error) {
 				calls++
 
-				if name != "issue-one" || version != "seen" || dismissed != (tt.name == "dismiss") {
+				if name != "incident-one" || version != "seen" || dismissed != (tt.name == "dismiss") {
 					t.Fatal("incorrect typed triage request")
 				}
 
 				return DetailResponse{}, nil
 			}}
-			request := httptest.NewRequest(tt.method, "http://dashboard/api/issues/issue-one/triage", strings.NewReader(tt.body))
+			request := httptest.NewRequest(tt.method, "http://dashboard/api/incidents/incident-one/triage", strings.NewReader(tt.body))
 			request.Header.Set("Origin", tt.origin)
 			request.Header.Set("Sec-Fetch-Site", tt.site)
 			request.Header.Set("Content-Type", tt.content)
@@ -104,7 +104,10 @@ func TestTriageHTTPBoundary(t *testing.T) {
 func TestHTTPContract(t *testing.T) {
 	var logs bytes.Buffer
 
-	source := fixtureSource{snapshot: Snapshot{Namespace: "issues", FetchedAt: time.Now(), Items: []Summary{}}}
+	source := fixtureSource{
+		snapshot: Snapshot{Namespace: "kubescout", FetchedAt: time.Now(), Incidents: []Summary{}},
+		detail:   DetailResponse{FetchedAt: time.Now(), Incident: Detail{Summary: Summary{Name: "incident-one"}}},
+	}
 	handler := Handler(source, log.New(&logs, "", 0))
 
 	for _, test := range []struct {
@@ -118,13 +121,13 @@ func TestHTTPContract(t *testing.T) {
 		{"GET", "/logo.png", "image/png", 200},
 		{"HEAD", "/", "text/html", 200},
 		{"POST", "/", "text/plain", 405},
-		{"GET", "/api/issues", "application/json", 200},
-		{"GET", "/api/issues/issue-one", "application/json", 200},
-		{"POST", "/api/issues", "application/json", 405},
-		{"PATCH", "/api/issues/issue-one", "application/json", 405},
-		{"DELETE", "/api/issues/issue-one", "application/json", 405},
+		{"GET", "/api/incidents", "application/json", 200},
+		{"GET", "/api/incidents/incident-one", "application/json", 200},
+		{"POST", "/api/incidents", "application/json", 405},
+		{"PATCH", "/api/incidents/incident-one", "application/json", 405},
+		{"DELETE", "/api/incidents/incident-one", "application/json", 405},
 		{"GET", "/api/secret", "application/json", 404},
-		{"GET", "/api/issues?namespace=other", "application/json", 400},
+		{"GET", "/api/incidents?namespace=other", "application/json", 400},
 		{"GET", "/missing", "text/plain", 404},
 		{"GET", "/web/", "text/plain", 404},
 		{"GET", "/testdata/browser.html", "text/plain", 404},
@@ -144,15 +147,20 @@ func TestHTTPContract(t *testing.T) {
 			}
 
 			if response.Header().Get("Cache-Control") != "no-store" {
-				t.Fatal("issue data must not be cached")
+				t.Fatal("incident data must not be cached")
 			}
 
 			if strings.Contains(test.path, "/api/") && !json.Valid(response.Body.Bytes()) {
 				t.Fatal("API did not return JSON")
 			}
 
-			if test.path == "/api/issues" && test.status == 200 && !strings.Contains(response.Body.String(), `"items":[]`) {
+			if test.path == "/api/incidents" && test.status == 200 && !strings.Contains(response.Body.String(), `"incidents":[]`) {
 				t.Fatal("empty list must be an array")
+			}
+
+			if test.path == "/api/incidents/incident-one" && test.status == 200 &&
+				(!strings.Contains(response.Body.String(), `"incident":`) || strings.Contains(response.Body.String(), `"item":`)) {
+				t.Fatal("incident detail must use the incident response property")
 			}
 
 			if test.method == "GET" && test.path == "/" {
@@ -186,7 +194,7 @@ func TestHTTPFailuresAndSizeLimit(t *testing.T) {
 
 			handler := Handler(test.source, log.New(&logs, "", 0))
 			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, httptest.NewRequest("GET", "/api/issues", nil))
+			handler.ServeHTTP(response, httptest.NewRequest("GET", "/api/incidents", nil))
 
 			if response.Code < 500 || !strings.Contains(response.Body.String(), test.code) || !strings.Contains(logs.String(), test.code) {
 				t.Fatalf("failure not explicit: %s / %s", response.Body, &logs)

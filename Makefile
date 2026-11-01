@@ -20,13 +20,13 @@ KIND_CLUSTER ?= kind
 KIND_PROVIDER ?= podman
 KUBECTL ?= kubectl
 
-.PHONY: help setup lint-setup lint build run once test check integration integration-model integration-deploy image kind-load model-secret deploy undeploy
+.PHONY: help setup lint-setup lint build run once test check integration integration-model integration-deploy image kind-load incidents-setup model-secret deploy undeploy
 .PHONY: dash-build dash-run dash-image dash-kind-load dash-deploy dash-forward dash-undeploy
 
 help: ## 📖 Show available targets
 	@awk 'BEGIN {FS = ":.*## "; print "\n☸ KubeScout · Your AI Kubernetes investigator.\n"} \
 		/^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2} \
-		END {print "\nExample (real AI calls, simulated issue writes):\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps ALLOW_MODEL=yes\n\nLocal defaults: current kubeconfig context, all namespaces, OBSERVER_ID=local-dev-<username>\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nALLOW_MODEL=yes is a Make confirmation gate; model credentials are still required.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md: Make targets and variables, prerequisites and deployment steps.\n"}' $(MAKEFILE_LIST)
+		END {print "\nExample (real AI calls and persisted Incidents):\n  make incidents-setup\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps ALLOW_MODEL=yes\n\nLocal defaults: current kubeconfig context, all namespaces, OBSERVER_ID=local-dev-<username>\nLocal credentials need get/list/create/patch access to Incidents in kubescout.\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nALLOW_MODEL=yes is a Make confirmation gate; model credentials are still required.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md: Make targets and variables, prerequisites and deployment steps.\n"}' $(MAKEFILE_LIST)
 
 setup: ## 📦 Download pinned Go dependencies and install the linter
 	$(GO) mod download
@@ -43,8 +43,8 @@ lint: ## 🧹 Lint all Go code and integration fixtures without running them
 build: ## 🔨 Build the Go binary
 	@$(GO) build -trimpath -o build/bin/kubescout ./cmd/kubescout
 
-run: ## 👀 Watch with AI in kubeconfig mode (ALLOW_MODEL=yes)
-once: ## 🚀 Run one AI assessment in kubeconfig mode (ALLOW_MODEL=yes)
+run: ## 👀 Watch with AI and persist Incidents locally (ALLOW_MODEL=yes)
+once: ## 🚀 Run one AI assessment and persist Incidents locally (ALLOW_MODEL=yes)
 
 run once: build
 	@test -n "$(OBSERVER_ID)" && test "$(ALLOW_MODEL)" = yes || { printf '❌ Set OBSERVER_ID and ALLOW_MODEL=yes\n' >&2; exit 2; }
@@ -62,16 +62,16 @@ integration-model: ## 🤖 Live AI test, at most six model requests (CONTEXT, AL
 integration integration-model: build
 	@test -n "$(CONTEXT)" || { printf '❌ Set CONTEXT explicitly\n' >&2; exit 2; }
 	@if [ "$@" = integration-model ]; then test "$(ALLOW_MODEL)" = yes || { printf '❌ Set ALLOW_MODEL=yes to authorise up to six model requests\n' >&2; exit 2; }; fi
-	@K8S_HEALTH_LIVE_CONTEXT="$(CONTEXT)" \
-		K8S_HEALTH_LIVE_MODEL="$(ALLOW_MODEL)" $(GO) test -tags=integration -count=1 -v \
+	@KUBESCOUT_LIVE_CONTEXT="$(CONTEXT)" \
+		KUBESCOUT_LIVE_MODEL="$(ALLOW_MODEL)" $(GO) test -tags=integration -count=1 -v \
 		-timeout 10m -run '$(if $(filter integration-model,$@),^TestLiveModel$$,^TestLive(Kubernetes|Connectivity)$$)' ./tests/cluster
 
 integration-deploy: build ## 🧪 Live in-cluster AI test (imported IMAGE, CRD, CONTEXT, ALLOW_MODEL=yes)
 	@test -n "$(CONTEXT)" || { printf '❌ Set CONTEXT explicitly\n' >&2; exit 2; }
 	@test "$(ALLOW_MODEL)" = yes || { printf '❌ Set ALLOW_MODEL=yes to authorise up to six model requests\n' >&2; exit 2; }
-	@K8S_HEALTH_LIVE_CONTEXT="$(CONTEXT)" \
-		K8S_HEALTH_LIVE_MODEL="$(ALLOW_MODEL)" K8S_HEALTH_LIVE_CONTAINER=yes \
-		K8S_HEALTH_CONTAINER_ENGINE="$(CONTAINER_ENGINE)" K8S_HEALTH_IMAGE="$(IMAGE)" \
+	@KUBESCOUT_LIVE_CONTEXT="$(CONTEXT)" \
+		KUBESCOUT_LIVE_MODEL="$(ALLOW_MODEL)" KUBESCOUT_LIVE_CONTAINER=yes \
+		KUBESCOUT_CONTAINER_ENGINE="$(CONTAINER_ENGINE)" KUBESCOUT_IMAGE="$(IMAGE)" \
 		$(GO) test -tags=integration -count=1 -v \
 		-timeout 10m -run '^TestLiveDeployment$$' ./tests/cluster
 
@@ -93,25 +93,30 @@ kind-load: ## ☸ Import IMAGE into kind's KIND_CLUSTER (does not deploy)
 		mv build/out/kubescout.tar.tmp build/out/kubescout.tar
 	KIND_EXPERIMENTAL_PROVIDER="$(KIND_PROVIDER)" $(KIND) load image-archive build/out/kubescout.tar --name "$(KIND_CLUSTER)"
 
+incidents-setup: ## ☸ Install Incident namespace and CRD only (current context; no agent/model)
+	$(KUBECTL) apply -f deploy/namespace.yaml
+	$(KUBECTL) apply -f deploy/incidents-crd.yaml
+	$(KUBECTL) wait --for=condition=Established --timeout=60s crd/incidents.kubescout.benc-uk.github.com
+
 model-secret: ## 🔐 Ensure namespace and create model Secret from .env (current context)
 	$(KUBECTL) apply -f deploy/namespace.yaml
-	$(KUBECTL) -n k8s-health create secret generic k8s-health-model --from-env-file=.env
+	$(KUBECTL) -n kubescout create secret generic kubescout-model --from-env-file=.env
 
 deploy: ## 🚀 Apply manifests and start ongoing AI (current context, Secret, ALLOW_MODEL=yes)
 	@test "$(ALLOW_MODEL)" = yes || { printf '❌ Set ALLOW_MODEL=yes to authorise ongoing AI investigations\n' >&2; exit 2; }
-	@$(KUBECTL) -n k8s-health get secret k8s-health-model -o name || { \
+	@$(KUBECTL) -n kubescout get secret kubescout-model -o name || { \
 		printf '❌ Model Secret is unavailable in the current context. Check access or run: make model-secret\n' >&2; exit 1; }
 	$(KUBECTL) apply -k deploy
-	$(KUBECTL) -n k8s-health scale deployment/k8s-health --replicas=1
+	$(KUBECTL) -n kubescout scale deployment/kubescout --replicas=1
 
-undeploy: ## 🧹 Remove Deployment/RBAC; retain issues, Secret, namespace and CRDs (current context)
+undeploy: ## 🧹 Remove Deployment/RBAC; retain Incidents, Secret, namespace and CRDs (current context)
 	$(KUBECTL) delete -f deploy/deployment.yaml -f deploy/rbac.yaml
 
 dash-build: ## 🔨 Build the standalone dashboard (no JavaScript build step)
-	$(GO) build -trimpath -o build/bin/kubescout-dashboard ./cmd/issue-dash
+	$(GO) build -trimpath -o build/bin/kubescout-dashboard ./cmd/kubescout-dashboard
 
 dash-run: dash-build ## 🌐 Run the KubeScout dashboard locally on 127.0.0.1:8000 (current context)
-	./build/bin/kubescout-dashboard --auth-mode=kubeconfig --namespace=k8s-health
+	./build/bin/kubescout-dashboard --auth-mode=kubeconfig --namespace=kubescout
 
 dash-image: ## 📦 Build the separate non-root DASHBOARD_IMAGE
 	$(CONTAINER_ENGINE) build $(if $(filter podman,$(notdir $(CONTAINER_ENGINE))),--ignorefile build/Dockerfile.dashboard.dockerignore,) \
@@ -129,8 +134,8 @@ dash-deploy: ## 🚀 Deploy only the dashboard (current context; imported image,
 	$(KUBECTL) apply -k deploy/dashboard
 
 dash-forward: ## 🌐 Open localhost:8000 access (current context)
-	$(KUBECTL) -n k8s-health port-forward --address=127.0.0.1 service/kubescout-dashboard 8000:8000
+	$(KUBECTL) -n kubescout port-forward --address=127.0.0.1 service/kubescout-dashboard 8000:8000
 
-dash-undeploy: ## 🧹 Remove only dashboard resources; retain agent and issues (current context)
+dash-undeploy: ## 🧹 Remove only dashboard resources; retain agent and Incidents (current context)
 	$(KUBECTL) delete -f deploy/dashboard/deployment.yaml \
 		-f deploy/dashboard/service.yaml -f deploy/dashboard/rbac.yaml

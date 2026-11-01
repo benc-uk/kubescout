@@ -1,4 +1,4 @@
-import { severities, clusterScope, namespaces, selectIssues, paginate, severityCounts, validateSnapshot, validateDetail } from "./model.js";
+import { severities, clusterScope, namespaces, selectIncidents, paginate, severityCounts, validateSnapshot, validateDetail } from "./model.js";
 
 const $ = (id) => document.getElementById(id);
 let snapshot = null;
@@ -12,7 +12,7 @@ let detailRequest;
 let detailData = null;
 let opener;
 let triageRequest;
-const themeKey = "issue-dash-theme";
+const themeKey = "kubescout-dashboard-theme";
 const systemTheme = matchMedia("(prefers-color-scheme: dark)");
 let preferredTheme = null;
 
@@ -73,12 +73,90 @@ function resourceText(resource) {
   return `${resource.kind} / ${resource.namespace ? `${resource.namespace}/` : ""}${resource.name}`;
 }
 
+function copyable(value, description) {
+  const group = element("span", undefined, "copyable");
+  const text = element("code", value, "copy-value");
+  const button = element("button", undefined, "copy-button");
+  button.type = "button";
+  button.title = `Copy ${description}`;
+  button.setAttribute("aria-label", `Copy ${description}`);
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("width", "16");
+  icon.setAttribute("height", "16");
+  icon.setAttribute("aria-hidden", "true");
+  icon.setAttribute("focusable", "false");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M9 9h11v11H9zM5 15H4V4h11v1");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.8");
+  path.setAttribute("stroke-linejoin", "round");
+  icon.append(path);
+  button.append(icon);
+  const feedback = element("span", undefined, "copy-feedback");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
+  let feedbackTimer;
+  const report = (message, temporary = false) => {
+    clearTimeout(feedbackTimer);
+    feedback.textContent = message;
+    feedback.hidden = false;
+    if (temporary) feedbackTimer = setTimeout(() => { feedback.hidden = true; }, 2000);
+  };
+  const selectManually = (message) => {
+    const selection = document.getSelection();
+    if (!selection) {
+      report(`${message} Select the value and copy it manually.`);
+      return;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    report(`${message} Text selected; press Ctrl+C or Cmd+C.`);
+  };
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      if (!navigator.clipboard?.writeText) {
+        selectManually("Clipboard unavailable.");
+        return;
+      }
+      await navigator.clipboard.writeText(value);
+      report("Copied", true);
+    } catch (error) {
+      if (!["NotAllowedError", "SecurityError"].includes(error.name)) throw error;
+      selectManually("Browser blocked copying.");
+    } finally {
+      button.disabled = false;
+    }
+  });
+  group.append(text, button, feedback);
+  return group;
+}
+
 function filters() {
   return {
     search: $("search").value, state: $("state").value, severity: $("severity").value,
     family: $("family").value, namespace: $("workload-namespace").value,
     sort: $("sort").value, direction: $("direction").value,
   };
+}
+
+function setDirection(direction) {
+  const button = $("direction");
+  const ascending = direction === "asc";
+  const orders = {
+    severity: ["Lowest severity first", "Highest severity first"],
+    updated: ["Oldest update first", "Newest update first"],
+    raised: ["Oldest incident first", "Newest incident first"],
+    title: ["Title A to Z", "Title Z to A"],
+  }[$("sort").value];
+  button.value = direction;
+  const description = `${orders[ascending ? 0 : 1]}. Switch to ${orders[ascending ? 1 : 0].toLowerCase()}.`;
+  button.setAttribute("aria-label", description);
+  button.title = description;
 }
 
 async function getJSON(path, signal, options = {}) {
@@ -108,7 +186,7 @@ function errorText(error) {
 function updateNamespaces() {
   const select = $("workload-namespace");
   const current = select.value;
-  const values = [...new Set(snapshot.items.flatMap(namespaces))].sort();
+  const values = [...new Set(snapshot.incidents.flatMap(namespaces))].sort();
   if (current && !values.includes(current)) values.push(current);
   select.replaceChildren(new Option("All namespaces", ""));
   for (const value of values) {
@@ -119,50 +197,50 @@ function updateNamespaces() {
 
 function render() {
   if (!snapshot) return;
-  const focusedIssue = document.activeElement?.dataset.issue;
+  const focusedIncident = document.activeElement?.dataset.incident;
   const current = filters();
-  const visible = selectIssues(snapshot.items, current);
+  const visible = selectIncidents(snapshot.incidents, current);
   const result = paginate(visible, page);
   page = result.page;
-  $("results").textContent = `${visible.length} matching / ${snapshot.items.length} stored issues${stale ? " (stale)" : ""}`;
+  $("results").textContent = `${visible.length} matching / ${snapshot.incidents.length} stored incidents${stale ? " (stale)" : ""}`;
   $("page-info").textContent = `Page ${page} of ${result.pages} · 50 per page`;
   $("previous").disabled = page === 1;
   $("next").disabled = page === result.pages;
-  const counts = severityCounts(snapshot.items);
+  const counts = severityCounts(snapshot.incidents);
   for (const severity of severities) {
     $(`count-${severity}`).textContent = counts[severity];
     document.querySelector(`[data-severity="${severity}"]`).setAttribute("aria-pressed",
       String(current.severity === severity && current.state === "open"));
   }
   $("counts-stale").hidden = !stale;
-  const rows = result.items.map((issue) => {
+  const rows = result.items.map((incident) => {
     const row = element("tr");
     const severity = element("td");
-    severity.append(badge(issue.severity));
+    severity.append(badge(incident.severity));
     const content = element("td");
-    const link = element("button", issue.title, "issue-link");
+    const link = element("button", incident.title, "incident-link");
     link.type = "button";
-    link.dataset.issue = issue.name;
+    link.dataset.incident = incident.name;
     link.setAttribute("aria-haspopup", "dialog");
-    row.addEventListener("click", () => openDetail(issue, link));
-    content.append(link, element("span", resourceText(issue.anchor), "resource"),
-      element("span", `${label(issue.family)} · ${issue.observer}`, "issue-meta"));
+    row.addEventListener("click", () => openDetail(incident, link));
+    content.append(link, element("span", resourceText(incident.anchor), "resource"),
+      element("span", `${label(incident.family)} · ${incident.observer}`, "incident-meta"));
     const state = element("td");
-    state.append(badge(issue.dismissed ? "dismissed" : issue.lifecycle.state));
-    const updated = element("td", date(issue.lifecycle.updated_at), "timestamp");
-    row.append(severity, content, state, element("td", label(issue.impact)), updated);
+    state.append(badge(incident.dismissed ? "dismissed" : incident.lifecycle.state));
+    const updated = element("td", date(incident.lifecycle.updated_at), "timestamp");
+    row.append(severity, content, state, element("td", label(incident.impact)), updated);
     return row;
   });
-  $("issue-rows").replaceChildren(...rows);
-  if (focusedIssue) {
-    const replacement = [...document.querySelectorAll("[data-issue]")].find((node) => node.dataset.issue === focusedIssue);
+  $("incident-rows").replaceChildren(...rows);
+  if (focusedIncident) {
+    const replacement = [...document.querySelectorAll("[data-incident]")].find((node) => node.dataset.incident === focusedIncident);
     (replacement || $("refresh")).focus();
   }
   $("empty").hidden = visible.length > 0;
-  $("empty-title").textContent = snapshot.items.length ? "No matching issues" : "No stored issues";
-  $("empty-message").textContent = snapshot.items.length
+  $("empty-title").textContent = snapshot.incidents.length ? "No matching incidents" : "No stored incidents";
+  $("empty-message").textContent = snapshot.incidents.length
     ? "Try another search or reset the filters."
-    : "There are no ClusterIssues in this namespace. This does not establish cluster health.";
+    : "There are no Incidents in this namespace. This does not establish cluster health.";
 }
 
 async function refresh() {
@@ -174,7 +252,7 @@ async function refresh() {
   $("refresh").textContent = "Refreshing...";
   listRequest = new AbortController();
   try {
-    const next = validateSnapshot(await getJSON("/api/issues", listRequest.signal));
+    const next = validateSnapshot(await getJSON("/api/incidents", listRequest.signal));
     snapshot = next;
     stale = false;
     $("namespace").textContent = snapshot.namespace;
@@ -184,12 +262,12 @@ async function refresh() {
   } catch (error) {
     if (listRequest.signal.aborted) return;
     stale = true;
-    $("error").textContent = `${snapshot ? "Showing stale data. " : "Issues are unavailable. "}${errorText(error)} Retrying automatically; you can also refresh manually.`;
+    $("error").textContent = `${snapshot ? "Showing stale data. " : "Incidents are unavailable. "}${errorText(error)} Retrying automatically; you can also refresh manually.`;
     $("error").hidden = false;
     $("freshness").textContent = snapshot ? `Stale · last success: ${date(snapshot.fetched_at)}` : "No successful refresh";
     if (!snapshot) {
       $("namespace").textContent = "Unavailable";
-      $("results").textContent = "Issues unavailable";
+      $("results").textContent = "Incidents unavailable";
     }
   } finally {
     refreshing = false;
@@ -222,34 +300,40 @@ function listSection(title, values, ordered = false) {
 }
 
 function renderDetail(data) {
-  const issue = data.item;
+  const incident = data.incident;
   const expanded = $("detail-content").querySelector("details")?.open || false;
-  $("detail-title").textContent = issue.title;
+  $("detail-title").textContent = incident.title;
   $("detail-freshness").textContent = `Last success: ${date(data.fetched_at)}`;
   const tags = element("div", undefined, "detail-tags");
-  tags.append(badge(issue.severity), badge(issue.dismissed ? "dismissed" : issue.lifecycle.state),
-    element("span", `${label(issue.impact)} impact`, "muted"));
+  tags.append(badge(incident.severity), badge(incident.dismissed ? "dismissed" : incident.lifecycle.state),
+    element("span", `${label(incident.impact)} impact`, "muted"));
   const facts = element("dl", undefined, "facts");
   const entries = [
-    ["Issue", issue.name], ["Problem namespace", issue.anchor.namespace || "Cluster-scoped"], ["Observer", issue.observer],
-    ["Problem family", label(issue.family)], ["Anchor", resourceText(issue.anchor)],
-    ["Raised", date(issue.lifecycle.raised_at)], ["Updated", date(issue.lifecycle.updated_at)],
-    ["Resolved", date(issue.lifecycle.resolved_at)], ["Revision", issue.lifecycle.revision],
-    ["Recurrences", issue.lifecycle.recurrences],
+    ["Incident", copyable(incident.name, "incident name")],
+    ["Problem namespace", incident.anchor.namespace ? copyable(incident.anchor.namespace, "namespace") : "Cluster-scoped"],
+    ["Resource kind", incident.anchor.kind], ["Resource name", copyable(incident.anchor.name, "resource name")],
+    ["Observer", copyable(incident.observer, "observer ID")], ["Problem family", label(incident.family)],
+    ["Raised", date(incident.lifecycle.raised_at)], ["Updated", date(incident.lifecycle.updated_at)],
+    ["Resolved", date(incident.lifecycle.resolved_at)], ["Revision", incident.lifecycle.revision],
+    ["Recurrences", incident.lifecycle.recurrences],
   ];
-  for (const [key, value] of entries) facts.append(element("dt", key), element("dd", String(value)));
+  for (const [key, value] of entries) {
+    const entry = element("dd");
+    entry.append(value instanceof Node ? value : String(value));
+    facts.append(element("dt", key), entry);
+  }
   const provenance = element("details", undefined, "provenance");
   provenance.open = expanded;
   provenance.append(element("summary", "Evidence references and model provenance"),
-    listSection("Evidence IDs (references only)", issue.analysis.evidence_ids),
-    section("Model", issue.analysis.model), section("Prompt version", issue.analysis.prompt_version),
-    section("Analysis ID", issue.analysis.analysis_id),
+    listSection("Evidence IDs (references only)", incident.analysis.evidence_ids),
+    section("Model", incident.analysis.model), section("Prompt version", incident.analysis.prompt_version),
+    section("Analysis ID", incident.analysis.analysis_id),
     element("p", "Only the latest stored conclusion is available, not raw evidence or revision history.", "muted"));
-  $("detail-content").replaceChildren(tags, section("Diagnosis", issue.analysis.diagnosis),
-    section("Explanation", issue.analysis.explanation),
-    listSection("Recommendations", issue.analysis.recommendations, true),
-    section("Uncertainty", issue.analysis.uncertainty),
-    listSection("Affected resources", issue.resources.map(resourceText)),
+  $("detail-content").replaceChildren(tags, section("Diagnosis", incident.analysis.diagnosis),
+    section("Explanation", incident.analysis.explanation),
+    listSection("Recommendations", incident.analysis.recommendations, true),
+    section("Uncertainty", incident.analysis.uncertainty),
+    listSection("Affected resources", incident.resources.map(resourceText)),
     facts, provenance);
   updateTriageAction();
 }
@@ -259,12 +343,12 @@ function updateTriageAction() {
   const action = $("triage-action");
   action.hidden = !detailData;
   action.disabled = !detailData || !!triageRequest || refreshing || stale || !$("detail-error").hidden;
-  action.textContent = triageRequest ? "Saving..." : detailData?.item.dismissed ? "Restore issue" : "Dismiss issue";
+  action.textContent = triageRequest ? "Saving..." : detailData?.incident.dismissed ? "Restore incident" : "Dismiss incident";
 }
 
 $("triage-action").addEventListener("click", async () => {
   if (!detailData || $("triage-action").disabled) return;
-  const issue = detailData.item;
+  const incident = detailData.incident;
   const request = new AbortController();
   triageRequest = request;
   detailRequest?.abort();
@@ -272,17 +356,17 @@ $("triage-action").addEventListener("click", async () => {
   $("triage-error").hidden = true;
   updateTriageAction();
   try {
-    const data = validateDetail(await getJSON(`/api/issues/${encodeURIComponent(issue.name)}/triage`, request.signal, {
+    const data = validateDetail(await getJSON(`/api/incidents/${encodeURIComponent(incident.name)}/triage`, request.signal, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-KubeScout-Action": "triage" },
-      body: JSON.stringify({ version: issue.version, dismissed: !issue.dismissed }),
+      body: JSON.stringify({ version: incident.version, dismissed: !incident.dismissed }),
     }));
-    if (selected === issue.name) {
+    if (selected === incident.name) {
       detailData = data;
       renderDetail(data);
     }
   } catch (error) {
-    if (selected === issue.name) {
+    if (selected === incident.name) {
       $("triage-error").textContent = `${errorText(error)} Refresh and review the current status before retrying.`;
       $("triage-error").hidden = false;
     }
@@ -298,7 +382,7 @@ async function loadDetail(name) {
   const request = new AbortController();
   detailRequest = request;
   try {
-    const data = validateDetail(await getJSON(`/api/issues/${encodeURIComponent(name)}`, request.signal));
+    const data = validateDetail(await getJSON(`/api/incidents/${encodeURIComponent(name)}`, request.signal));
     if (request.signal.aborted || selected !== name) return;
     detailData = data;
     $("detail-error").hidden = true;
@@ -314,23 +398,23 @@ async function loadDetail(name) {
     $("detail-error").hidden = false;
     $("detail-freshness").textContent = detailData
       ? `Stale · last success: ${date(detailData.fetched_at)}`
-      : missing ? "Issue unavailable" : "No successful detail refresh";
+      : missing ? "Incident unavailable" : "No successful detail refresh";
     updateTriageAction();
   }
 }
 
-function openDetail(issue, trigger) {
+function openDetail(incident, trigger) {
   opener = trigger;
-  selected = issue.name;
+  selected = incident.name;
   detailData = null;
-  $("detail-title").textContent = issue.title;
+  $("detail-title").textContent = incident.title;
   $("detail-freshness").textContent = "Loading latest details...";
   $("detail-error").hidden = true;
   $("triage-error").hidden = true;
   updateTriageAction();
   $("detail-content").replaceChildren();
   $("detail").showModal();
-  loadDetail(issue.name);
+  loadDetail(incident.name);
 }
 
 $("close-detail").addEventListener("click", () => $("detail").close());
@@ -350,7 +434,7 @@ $("detail").addEventListener("close", () => {
   detailData = null;
   updateTriageAction();
   detailRequest?.abort();
-  const replacement = [...document.querySelectorAll("[data-issue]")].find((node) => node.dataset.issue === name);
+  const replacement = [...document.querySelectorAll("[data-incident]")].find((node) => node.dataset.incident === name);
   (opener?.isConnected ? opener : replacement || $("refresh")).focus();
 });
 $("filters").addEventListener("submit", (event) => event.preventDefault());
@@ -358,11 +442,15 @@ for (const id of ["search", "state", "severity", "family", "workload-namespace"]
   $(id).addEventListener(id === "search" ? "input" : "change", () => { page = 1; render(); });
 }
 $("sort").addEventListener("change", () => {
-  $("direction").value = $("sort").value === "title" ? "asc" : "desc";
+  setDirection($("sort").value === "title" ? "asc" : "desc");
   page = 1;
   render();
 });
-$("direction").addEventListener("change", () => { page = 1; render(); });
+$("direction").addEventListener("click", () => {
+  setDirection($("direction").value === "desc" ? "asc" : "desc");
+  page = 1;
+  render();
+});
 $("reset-filters").addEventListener("click", () => { $("filters").reset(); page = 1; render(); });
 for (const card of document.querySelectorAll("[data-severity]")) {
   card.addEventListener("click", () => {
