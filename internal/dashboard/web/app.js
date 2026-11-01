@@ -12,6 +12,7 @@ let detailRequest;
 let detailData = null;
 let opener;
 let triageRequest;
+const detailTabs = ["overview", "resources", "record"];
 const themeKey = "kubescout-dashboard-theme";
 const systemTheme = matchMedia("(prefers-color-scheme: dark)");
 let preferredTheme = null;
@@ -280,8 +281,8 @@ async function refresh() {
   }
 }
 
-function section(title, text) {
-  const block = element("section", undefined, "detail-section");
+function section(title, text, className = "") {
+  const block = element("section", undefined, `detail-section detail-card ${className}`.trim());
   block.append(element("h3", title), element("p", text, "prose"));
   return block;
 }
@@ -293,22 +294,77 @@ function listSection(title, values, ordered = false) {
     block.append(element("p", "None recorded", "muted"));
   } else {
     const list = element(ordered ? "ol" : "ul");
-    for (const value of values) list.append(element("li", value));
+    for (const value of values) {
+      const item = element("li");
+      item.append(element("span", value));
+      list.append(item);
+    }
     block.append(list);
   }
   return block;
 }
 
+function factList(entries) {
+  const facts = element("dl", undefined, "facts");
+  for (const [key, value] of entries) {
+    const pair = element("div");
+    const entry = element("dd");
+    entry.append(value instanceof Node ? value : String(value));
+    pair.append(element("dt", key), entry);
+    facts.append(pair);
+  }
+  return facts;
+}
+
+function selectDetailTab(name) {
+  for (const tab of detailTabs) {
+    const active = name === tab;
+    $(`detail-tab-${tab}`).setAttribute("aria-selected", String(active));
+    $(`detail-tab-${tab}`).tabIndex = active ? 0 : -1;
+    $(`detail-${tab}`).hidden = !active;
+  }
+  $("detail-body").scrollTop = 0;
+}
+
+function clearDetail() {
+  if ($("detail-content").contains(document.activeElement) || $("detail-tabs").contains(document.activeElement)) {
+    $("close-detail").focus();
+  }
+  $("detail-content").hidden = true;
+  $("detail-tabs").hidden = true;
+  $("detail-tags").hidden = true;
+  $("detail-tags").replaceChildren();
+  $("detail-resource").hidden = true;
+  $("detail-resource").textContent = "";
+  $("detail-resource-count").textContent = "";
+  for (const tab of detailTabs) $(`detail-${tab}`).replaceChildren();
+  selectDetailTab("overview");
+}
+
 function renderDetail(data) {
   const incident = data.incident;
-  const expanded = $("detail-content").querySelector("details")?.open || false;
+  const scrollTop = $("detail-body").scrollTop;
+  const focusedCopy = $("detail-content").contains(document.activeElement)
+    ? document.activeElement.closest(".copy-button")?.getAttribute("aria-label") : null;
   $("detail-title").textContent = incident.title;
   $("detail-freshness").textContent = `Last success: ${date(data.fetched_at)}`;
-  const tags = element("div", undefined, "detail-tags");
-  tags.append(badge(incident.severity), badge(incident.dismissed ? "dismissed" : incident.lifecycle.state),
+  $("detail-tags").replaceChildren(badge(incident.severity), badge(incident.dismissed ? "dismissed" : incident.lifecycle.state),
     element("span", `${label(incident.impact)} impact`, "muted"));
-  const facts = element("dl", undefined, "facts");
-  const entries = [
+  $("detail-tags").hidden = false;
+  $("detail-resource").textContent = resourceText(incident.anchor);
+  $("detail-resource").hidden = false;
+  $("detail-resource-count").textContent = incident.resources.length;
+  const overview = element("div", undefined, "detail-overview-grid");
+  const recommendations = listSection("Recommendations", incident.analysis.recommendations, true);
+  recommendations.classList.add("detail-card");
+  overview.append(section("Explanation", incident.analysis.explanation), recommendations);
+  $("detail-overview").replaceChildren(section("AI diagnosis", incident.analysis.diagnosis, "detail-diagnosis"),
+    overview, section("What is uncertain", incident.analysis.uncertainty, "detail-uncertainty"));
+  const resources = listSection("Affected resources", incident.resources.map(resourceText));
+  resources.classList.add("detail-card", "detail-resources");
+  $("detail-resources").replaceChildren(resources,
+    element("p", "Resource references from the latest stored incident. This view does not read workloads or show live resource status.", "muted"));
+  const facts = factList([
     ["Incident", copyable(incident.name, "incident name")],
     ["Problem namespace", incident.anchor.namespace ? copyable(incident.anchor.namespace, "namespace") : "Cluster-scoped"],
     ["Resource kind", incident.anchor.kind], ["Resource name", copyable(incident.anchor.name, "resource name")],
@@ -316,26 +372,41 @@ function renderDetail(data) {
     ["Raised", date(incident.lifecycle.raised_at)], ["Updated", date(incident.lifecycle.updated_at)],
     ["Resolved", date(incident.lifecycle.resolved_at)], ["Revision", incident.lifecycle.revision],
     ["Recurrences", incident.lifecycle.recurrences],
-  ];
-  for (const [key, value] of entries) {
-    const entry = element("dd");
-    entry.append(value instanceof Node ? value : String(value));
-    facts.append(element("dt", key), entry);
-  }
-  const provenance = element("details", undefined, "provenance");
-  provenance.open = expanded;
-  provenance.append(element("summary", "Evidence references and model provenance"),
+  ]);
+  const provenance = element("section", undefined, "provenance");
+  provenance.append(element("h3", "Evidence references and model provenance"),
     listSection("Evidence IDs (references only)", incident.analysis.evidence_ids),
-    section("Model", incident.analysis.model), section("Prompt version", incident.analysis.prompt_version),
-    section("Analysis ID", incident.analysis.analysis_id),
+    factList([["Model", incident.analysis.model], ["Prompt version", incident.analysis.prompt_version],
+      ["Analysis ID", incident.analysis.analysis_id]]),
     element("p", "Only the latest stored conclusion is available, not raw evidence or revision history.", "muted"));
-  $("detail-content").replaceChildren(tags, section("Diagnosis", incident.analysis.diagnosis),
-    section("Explanation", incident.analysis.explanation),
-    listSection("Recommendations", incident.analysis.recommendations, true),
-    section("Uncertainty", incident.analysis.uncertainty),
-    listSection("Affected resources", incident.resources.map(resourceText)),
-    facts, provenance);
+  const record = element("section", undefined, "detail-card");
+  record.append(element("h3", "Incident record"), facts, provenance);
+  $("detail-record").replaceChildren(record);
+  $("detail-content").hidden = false;
+  $("detail-tabs").hidden = false;
+  $("detail-loading").hidden = true;
+  $("detail-body").scrollTop = scrollTop;
+  if (focusedCopy) {
+    [...$("detail-content").querySelectorAll(".copy-button")].find((button) =>
+      button.getAttribute("aria-label") === focusedCopy)?.focus({ preventScroll: true });
+  }
   updateTriageAction();
+}
+
+for (const [index, name] of detailTabs.entries()) {
+  const button = $(`detail-tab-${name}`);
+  button.addEventListener("click", () => selectDetailTab(name));
+  button.addEventListener("keydown", (event) => {
+    let next;
+    if (event.key === "ArrowRight") next = (index + 1) % detailTabs.length;
+    else if (event.key === "ArrowLeft") next = (index + detailTabs.length - 1) % detailTabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = detailTabs.length - 1;
+    else return;
+    event.preventDefault();
+    selectDetailTab(detailTabs[next]);
+    $(`detail-tab-${detailTabs[next]}`).focus();
+  });
 }
 
 function updateTriageAction() {
@@ -392,8 +463,9 @@ async function loadDetail(name) {
     const missing = error.status === 404;
     if (missing) {
       detailData = null;
-      $("detail-content").replaceChildren();
+      clearDetail();
     }
+    $("detail-loading").hidden = true;
     $("detail-error").textContent = `${detailData ? "Showing stale details. " : ""}${errorText(error)}`;
     $("detail-error").hidden = false;
     $("detail-freshness").textContent = detailData
@@ -411,13 +483,15 @@ function openDetail(incident, trigger) {
   $("detail-freshness").textContent = "Loading latest details...";
   $("detail-error").hidden = true;
   $("triage-error").hidden = true;
+  clearDetail();
+  $("detail-loading").hidden = false;
   updateTriageAction();
-  $("detail-content").replaceChildren();
   $("detail").showModal();
   loadDetail(incident.name);
 }
 
 $("close-detail").addEventListener("click", () => $("detail").close());
+$("close-detail-footer").addEventListener("click", () => $("detail").close());
 $("detail").addEventListener("click", (event) => {
   const dialog = event.currentTarget;
   if (event.target !== dialog) return;

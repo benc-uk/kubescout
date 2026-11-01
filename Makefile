@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-# Make overrides are not loaded from .env; see README.md for defaults and scope.
+# Make overrides are not loaded from .env; see docs/development.md for the Make reference.
 GO ?= go
 GOLANGCI_LINT_VERSION := v2.15.0
 GOLANGCI_LINT := $(CURDIR)/build/bin/golangci-lint/$(GOLANGCI_LINT_VERSION)/golangci-lint
@@ -28,7 +28,7 @@ KUBECTL ?= kubectl
 help: ## 📖 Show available targets
 	@awk 'BEGIN {FS = ":.*## "; print "\n☸ KubeScout · Your AI Kubernetes investigator.\n"} \
 		/^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2} \
-		END {print "\nExample (real AI calls and persisted Incidents):\n  make incidents-setup\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps ALLOW_MODEL=yes\n\nLocal defaults: current kubeconfig context, all namespaces, OBSERVER_ID=local-dev-<username>\nLocal credentials need get/list/create/patch access to Incidents in kubescout.\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nALLOW_MODEL=yes is a Make confirmation gate; model credentials are still required.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md: Make targets and variables, prerequisites and deployment steps.\n"}' $(MAKEFILE_LIST)
+		END {print "\nExample (real AI calls and persisted Incidents):\n  make incidents-setup\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps ALLOW_MODEL=yes\n\nLocal defaults: current kubeconfig context, all namespaces, OBSERVER_ID=local-dev-<username>\nLocal credentials need get/list/create/patch access to Incidents in kubescout.\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nALLOW_MODEL=yes is a Make confirmation gate; model credentials are still required.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md for getting started; docs/operations.md for configuration and deployment;\ndocs/development.md for the Make reference, prerequisites and tests.\n"}' $(MAKEFILE_LIST)
 
 setup: ## 📦 Download pinned Go dependencies and install the linter
 	$(GO) mod download

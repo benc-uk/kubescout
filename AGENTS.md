@@ -18,10 +18,10 @@ deterministic alerting service with optional AI commentary.
 - No shell/kubectl agent tool, remediation, external sender, Pod logs,
   Foundry-hosted execution or AKS provisioning without a separate request.
 
-See [README.md](README.md) for the current architecture and
-[IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) for historical decisions and
-the superseding AI-first design. Earlier deterministic report policies are not
-the current contract.
+See [README.md](README.md) for the project overview,
+[ARCHITECTURE.md](ARCHITECTURE.md) for the AI-first design and
+[the operations guide](docs/operations.md) for configuration and deployment.
+Earlier deterministic report policies are not the current contract.
 
 ## Architecture
 
@@ -218,7 +218,7 @@ not execute live tests, contact the cluster or call the model.
 
 Use `make dash-build` / `make dash-run` for the standalone local dashboard.
 Its image/import/deploy/forward/cleanup targets use the `dash-` prefix; see
-[README.md](README.md#make-targets-and-variables) for prerequisites and variables.
+[the development guide](docs/development.md#make-reference) for prerequisites and variables.
 Rebuild the relevant binary/image after changing embedded AI instructions or
 dashboard assets.
 
@@ -276,7 +276,7 @@ Do not delete the incident namespace or CRD merely to stop the agent.
   2: invalid configuration. Never silently fall back when model config is missing.
 - Watch exit 0: graceful signal; 1: bootstrap/unrecoverable console failure;
   2: invalid config. Failed investigations create no incidents.
-- See [README logging guidance](README.md#operator-logs-and-ai-transcripts)
+- See [operator logging guidance](docs/operations.md#logs-and-ai-transcripts)
   for defaults, file access and ephemeral-storage limits.
 
 When changing Foundry integration in VS Code, consult the

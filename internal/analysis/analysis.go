@@ -1,7 +1,7 @@
 /*
 Purpose: Run bounded Responses API investigations and validate AI decisions.
-Flow: Investigation contexts enter the Agent Framework loop with scoped local
-tools with a configured shared invocation cap and HTTP budgets; strict JSON,
+Flow: Investigation contexts enter the Agent Framework loop with separate
+inspection and Warning event tools sharing a session invocation cap and HTTP budgets; strict JSON,
 citation and lifecycle checks return a
 decision, including no-action, or safe classified failure details without
 publishing an incident or exposing raw provider errors. Each actual HTTP attempt
@@ -178,8 +178,8 @@ func (a *Analyzer) Investigate(ctx context.Context, in incident.InvestigationCon
 		Scope: config.Config{NamespaceWatch: a.Config.NamespaceWatch, NamespaceIgnore: a.Config.NamespaceIgnore}}
 
 	result, err := agentClient.RunText(ctx, string(payload),
-		agent.WithTool(investigation.Tool{Session: session}),
-		agent.WithTool(investigation.Tool{Session: session, RelatedEvents: true}),
+		agent.WithTool(investigation.InspectResource{Session: session}),
+		agent.WithTool(investigation.RelatedWarningEvents{Session: session}),
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{Store: openai.Bool(false), MaxOutputTokens: openai.Int(int64(a.Config.MaxOutputTokens))}),
 	).Collect()
 	if err == nil && (result.FinishReason != "stop" || result.ContinuationToken != "") {

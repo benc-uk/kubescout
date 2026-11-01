@@ -1,12 +1,14 @@
 /*
-Purpose: Test investigation tool scope, projection and shared invocation limits.
+Purpose: Test separate investigation tool contracts, scope and shared budgets.
 Flow: Offline Kubernetes HTTP fixtures check handles before API access,
-operation-named citations, private-field exclusion, the 64-call boundary and node
-event pagination; typed budget failures must not return accepted tool evidence.
+operation-named citations, version tracking, private-field exclusion, cross-tool
+call and byte limits and node event pagination; typed budget failures must not
+return accepted tool evidence. Tool names, descriptions and schemas stay stable.
 */
 package investigation
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,45 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
+
+type testTool interface {
+	Name() string
+	Description() string
+	Schema() any
+	ReturnSchema() any
+	Call(context.Context, string) (any, error)
+}
+
+// TestToolContracts verifies both concrete tools preserve the model-facing names and schemas.
+func TestToolContracts(t *testing.T) {
+	for _, test := range []struct {
+		tool              testTool
+		name, description string
+	}{
+		{
+			tool: InspectResource{}, name: "inspect_resource",
+			description: "Read approved current state and redacted condition messages for one supplied resource handle; never raw objects.",
+		},
+		{
+			tool: RelatedWarningEvents{}, name: "related_warning_events",
+			description: "Read bounded, redacted Warning events for one authorised resource handle.",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := json.Marshal(test.tool.Schema())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			const schema = `{"additionalProperties":false,"properties":{"resource_ref":{"type":"string"}},"required":["resource_ref"],"type":"object"}`
+
+			if test.tool.Name() != test.name || test.tool.Description() != test.description ||
+				string(data) != schema || test.tool.ReturnSchema() != nil {
+				t.Fatal("model-facing tool contract changed")
+			}
+		})
+	}
+}
 
 // TestToolScopeRedactionAndInvocationBudget checks pre-read argument validation, private-field
 // exclusion, unique inspection citations and the shared 64-call limit against a local Kubernetes fixture.
@@ -47,7 +88,7 @@ func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 
 	s := &Session{Client: client, MaxCalls: config.DefaultMaxToolCalls, Timeout: time.Second, Citations: map[string]bool{}, Investigation: incident.InvestigationContext{Identities: map[string]health.Resource{"allowed": {Kind: "Pod", Namespace: "apps", Name: "test", UID: "private-uid"}}}}
 
-	tool := Tool{Session: s}
+	tool := InspectResource{Session: s}
 	for _, args := range []string{`{"resource_ref":"other"}`, `{"resource_ref":"allowed","namespace":"kube-system"}`, `{"resource_ref":"allowed"}{}`} {
 		if _, err := tool.Call(t.Context(), args); err == nil {
 			t.Fatal("invalid tool call accepted")
@@ -135,13 +176,126 @@ func TestToolByteAndArgumentLimitsRemainIndependent(t *testing.T) {
 					"allowed": {Kind: "Pod", Namespace: "apps", Name: "test", UID: "private-uid"},
 				}},
 			}
-			result, err := (Tool{Session: s}).Call(t.Context(), test.args)
+			result, err := (InspectResource{Session: s}).Call(t.Context(), test.args)
 
 			var limit *LimitError
 
 			if !errors.As(err, &limit) || limit.Kind != test.kind || limit.Limit != test.limit || limit.Observed <= limit.Limit ||
 				result != nil || reads != test.reads || s.Bytes != test.bytes || len(s.Citations) != 0 {
 				t.Fatalf("independent tool budget changed or returned evidence: %v", err)
+			}
+		})
+	}
+}
+
+// TestToolsShareSessionBudgets verifies alternating tools share counters, bytes and citations.
+// Offline reads rejected by either shared limit must return no accepted evidence.
+func TestToolsShareSessionBudgets(t *testing.T) {
+	for _, kind := range []string{"local_tool_call_limit", "local_cumulative_tool_bytes"} {
+		t.Run(kind, func(t *testing.T) {
+			reads := 0
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reads++
+
+				w.Header().Set("Content-Type", "application/json")
+
+				switch r.URL.Path {
+				case "/api/v1/namespaces/apps/pods/test":
+					fmt.Fprint(w, `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"test","namespace":"apps","uid":"private-uid","resourceVersion":"7"},"status":{"phase":"Running"}}`)
+				case "/api/v1/namespaces/apps/events":
+					if r.URL.Query().Get("fieldSelector") != "type=Warning,involvedObject.uid=private-uid" ||
+						r.URL.Query().Get("limit") != "20" {
+						t.Error("event lookup escaped the authorized handle or pagination limit")
+					}
+
+					fmt.Fprint(w, `{"apiVersion":"v1","kind":"EventList","metadata":{"resourceVersion":"1"},"items":[{"metadata":{"name":"warning","namespace":"apps"},"type":"Warning","involvedObject":{"uid":"private-uid"},"reason":"BackOff","message":"password=do-not-send"}]}`)
+				default:
+					t.Errorf("unexpected tool read: %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			client, err := dynamic.NewForConfig(&rest.Config{Host: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			s := &Session{
+				Client: client, MaxCalls: 2, Timeout: time.Second, Citations: map[string]bool{},
+				Investigation: incident.InvestigationContext{
+					Identities: map[string]health.Resource{
+						"allowed": {Kind: "Pod", Namespace: "apps", Name: "test", UID: "private-uid"},
+					},
+					ToolVersions: map[string]string{},
+				},
+			}
+			tools := []testTool{InspectResource{Session: s}, RelatedWarningEvents{Session: s}}
+			totalBytes := 0
+
+			for i, tool := range tools {
+				result, err := tool.Call(t.Context(), `{"resource_ref":"allowed"}`)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				data, err := json.Marshal(result)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				totalBytes += len(data)
+				expected := fmt.Sprintf("%s-%d", strings.ReplaceAll(tool.Name(), "_", "-"), i+1)
+				evidence, ok := result.(map[string]any)
+
+				if !ok || evidence["evidence_id"] != expected || evidence["resource_ref"] != "allowed" ||
+					evidence["complete"] != true || evidence["observed_at"] == nil ||
+					!s.Citations[expected] || len(s.Citations) != i+1 ||
+					s.Calls != i+1 || reads != i+1 || s.Bytes != totalBytes {
+					t.Fatal("tools did not share counters, bytes, citations or the result envelope")
+				}
+
+				if strings.Contains(string(data), "private-uid") || strings.Contains(string(data), "do-not-send") {
+					t.Fatal("tool result leaked private identity or sensitive text")
+				}
+
+				if i == 0 {
+					if evidence["exists"] != true || evidence["state"] == nil || evidence["events"] != nil ||
+						s.Investigation.ToolVersions["allowed"] != "7" {
+						t.Fatal("inspection result shape or version tracking changed")
+					}
+				} else {
+					events, ok := evidence["events"].([]map[string]any)
+					if !ok || len(events) != 1 || events[0]["message"] != "[redacted sensitive text]" ||
+						evidence["exists"] != nil || evidence["state"] != nil {
+						t.Fatal("Warning event result shape or redaction changed")
+					}
+				}
+			}
+
+			if kind == "local_cumulative_tool_bytes" {
+				s.MaxCalls = config.DefaultMaxToolCalls
+				s.Bytes = 32768
+			}
+
+			bytesBefore := s.Bytes
+
+			for i, tool := range tools {
+				result, err := tool.Call(t.Context(), `{"resource_ref":"allowed"}`)
+
+				var limit *LimitError
+
+				wantCalls, wantLimit := 2, 2
+				if kind == "local_cumulative_tool_bytes" {
+					wantCalls, wantLimit = 3+i, 32768
+				}
+
+				if !errors.As(err, &limit) || limit.Kind != kind || limit.Limit != wantLimit ||
+					limit.Observed <= limit.Limit || result != nil || len(s.Citations) != 2 ||
+					s.Bytes != bytesBefore || s.Calls != wantCalls || reads != wantCalls {
+					t.Fatalf("shared budget changed or returned accepted evidence: %v", err)
+				}
 			}
 		})
 	}
@@ -254,7 +408,7 @@ func TestNodeEventsRespectNamespaceSelection(t *testing.T) {
 			s := &Session{Client: client, MaxCalls: config.DefaultMaxToolCalls, Scope: tt.scope, Timeout: time.Second, Citations: map[string]bool{},
 				Investigation: incident.InvestigationContext{Identities: map[string]health.Resource{"node": {Kind: "Node", Name: "node", UID: "node-id"}}}}
 
-			result, err := (Tool{Session: s, RelatedEvents: true}).Call(t.Context(), `{"resource_ref":"node"}`)
+			result, err := (RelatedWarningEvents{Session: s}).Call(t.Context(), `{"resource_ref":"node"}`)
 			if (err != nil) != tt.invalid {
 				t.Fatalf("unexpected result error: %v", err)
 			}
@@ -311,8 +465,8 @@ func TestToolsRejectIgnoredOrUnwatchedHandlesBeforeAPIRead(t *testing.T) {
 
 		s := &Session{Client: client, MaxCalls: config.DefaultMaxToolCalls, Scope: scope, Timeout: time.Second,
 			Investigation: incident.InvestigationContext{Identities: map[string]health.Resource{"pod": {Kind: "Pod", Namespace: "apps", Name: "pod", UID: "uid"}}}}
-		for _, related := range []bool{false, true} {
-			if _, err := (Tool{Session: s, RelatedEvents: related}).Call(t.Context(), `{"resource_ref":"pod"}`); err == nil {
+		for _, tool := range []testTool{InspectResource{Session: s}, RelatedWarningEvents{Session: s}} {
+			if _, err := tool.Call(t.Context(), `{"resource_ref":"pod"}`); err == nil {
 				t.Fatal("out-of-scope handle accepted")
 			}
 		}

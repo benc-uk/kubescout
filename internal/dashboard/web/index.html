@@ -79,16 +79,43 @@
         </nav>
       </section>
     </main>
-    <dialog id="detail" class="drawer" aria-labelledby="detail-title">
-      <header class="drawer-header"><p class="eyebrow">INCIDENT DETAILS</p><button id="close-detail" type="button" class="secondary" aria-label="Close incident details">Close</button></header>
-      <h2 id="detail-title">Incident details</h2>
-      <p id="detail-freshness" class="muted" role="status"></p>
-      <div class="triage-actions">
-        <button id="triage-action" class="secondary" type="button" hidden>Dismiss incident</button>
+    <dialog id="detail" class="detail-modal" aria-labelledby="detail-title">
+      <header class="detail-header">
+        <div class="detail-topline">
+          <p class="eyebrow">Incident details</p>
+          <button id="close-detail" type="button" class="detail-close" aria-label="Close incident details" autofocus>
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+          </button>
+        </div>
+        <div id="detail-tags" class="detail-tags" hidden></div>
+        <h2 id="detail-title">Incident details</h2>
+        <p id="detail-resource" class="resource" hidden></p>
+        <p id="detail-freshness" class="muted" role="status"></p>
+      </header>
+      <div id="detail-tabs" class="detail-tabs" role="tablist" aria-label="Incident detail sections" hidden>
+        <button id="detail-tab-overview" type="button" role="tab" aria-selected="true" aria-controls="detail-overview">Overview</button>
+        <button id="detail-tab-resources" type="button" role="tab" aria-selected="false" aria-controls="detail-resources" tabindex="-1">Resources <span id="detail-resource-count"></span></button>
+        <button id="detail-tab-record" type="button" role="tab" aria-selected="false" aria-controls="detail-record" tabindex="-1">Record</button>
       </div>
-      <div id="triage-error" class="notice error" role="alert" hidden></div>
-      <div id="detail-error" class="notice error" role="alert" hidden></div>
-      <div id="detail-content"></div>
+      <div id="detail-body" class="detail-body" role="region" aria-label="Scrollable incident details" tabindex="0">
+        <p id="detail-loading" class="muted" role="status" hidden>Loading the latest stored incident...</p>
+        <div id="detail-error" class="notice error" role="alert" hidden></div>
+        <div id="detail-content" hidden>
+          <section id="detail-overview" role="tabpanel" aria-labelledby="detail-tab-overview" tabindex="0"></section>
+          <section id="detail-resources" role="tabpanel" aria-labelledby="detail-tab-resources" tabindex="0" hidden></section>
+          <section id="detail-record" role="tabpanel" aria-labelledby="detail-tab-record" tabindex="0" hidden></section>
+        </div>
+      </div>
+      <footer class="detail-footer">
+        <div id="triage-error" class="notice error" role="alert" hidden></div>
+        <div class="detail-footer-main">
+          <p class="muted">Dismiss hides this revision from the default list. The agent continues tracking the incident.</p>
+          <div class="detail-footer-actions">
+            <button id="close-detail-footer" class="secondary" type="button">Close</button>
+            <button id="triage-action" class="primary" type="button" hidden>Dismiss incident</button>
+          </div>
+        </div>
+      </footer>
     </dialog>
   </body>
 </html>

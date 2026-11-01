@@ -218,6 +218,49 @@ try {
   assert(titles().length === 1 && !document.querySelector("#incident-rows img"), "untrusted title rendered as text");
   document.querySelector(".incident-link").click();
   await until(() => $("detail-content").textContent.includes("Recommendations"), "details loaded");
+  const modalBounds = $("detail").getBoundingClientRect();
+  assert(Math.abs(modalBounds.width - Math.min(1000, innerWidth - 64)) <= 2
+    && Math.abs(modalBounds.left - (innerWidth - modalBounds.width) / 2) <= 2
+    && Math.abs(modalBounds.top - (innerHeight - modalBounds.height) / 2) <= 2,
+    "Focused review is a large centered desktop modal, not a side drawer");
+  assert(getComputedStyle($("detail-body")).overflowY === "auto"
+    && getComputedStyle(document.body).overflow === "hidden"
+    && $("detail").scrollHeight === $("detail").clientHeight,
+    "only the modal body scrolls; header, footer and background stay in place");
+  assert($("detail-tab-overview").getAttribute("aria-selected") === "true"
+    && !$("detail-overview").hidden && $("detail-resources").hidden && $("detail-record").hidden,
+    "new incident opens on Overview with one visible panel");
+  assert($("detail-tabs").querySelectorAll('[role="tab"]').length === 3
+    && ["overview", "resources", "record"].every((name) =>
+      $(`detail-tab-${name}`).getAttribute("aria-controls") === `detail-${name}`
+      && $(`detail-${name}`).getAttribute("aria-labelledby") === `detail-tab-${name}`),
+    "tabs and panels have accessible names and paired ARIA relationships");
+  assert(getComputedStyle(document.querySelector(".detail-overview-grid")).gridTemplateColumns.split(" ").length === 2,
+    "Overview keeps explanation and recommendations side by side on desktop");
+  const headerTop = $("detail").querySelector(".detail-header").getBoundingClientRect().top;
+  const footerTop = $("detail").querySelector(".detail-footer").getBoundingClientRect().top;
+  $("detail-body").scrollTop = 500;
+  assert($("detail-body").scrollTop > 0
+    && $("detail").querySelector(".detail-header").getBoundingClientRect().top === headerTop
+    && $("detail").querySelector(".detail-footer").getBoundingClientRect().top === footerTop,
+    "long untrusted conclusions scroll without moving the header or triage footer");
+  $("detail-tab-overview").focus();
+  $("detail-tab-overview").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+  assert(document.activeElement === $("detail-tab-resources") && !$("detail-resources").hidden
+    && $("detail-overview").hidden && $("detail-body").scrollTop === 0
+    && $("detail-resource-count").textContent === String(rawDetail.incident.resources.length),
+    "Right arrow selects Resources, moves focus and resets the body scroll");
+  $("detail-tab-resources").dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }));
+  assert(document.activeElement === $("detail-tab-record") && !$("detail-record").hidden
+    && $("detail-tab-record").tabIndex === 0 && $("detail-tab-resources").tabIndex === -1,
+    "End selects Record with a single tab stop");
+  $("detail-tab-record").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+  assert(document.activeElement === $("detail-tab-overview"), "Right arrow wraps from Record to Overview");
+  $("detail-tab-overview").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }));
+  assert(document.activeElement === $("detail-tab-record"), "Left arrow wraps from Overview to Record");
+  $("detail-tab-record").dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
+  assert(document.activeElement === $("detail-tab-overview"), "Home returns to Overview");
+  $("detail-tab-record").click();
   const problemNamespace = [...$("detail-content").querySelectorAll("dt")].find((node) => node.textContent === "Problem namespace");
   assert(problemNamespace?.nextElementSibling?.textContent === "apps"
     && !$("detail-content").textContent.includes("Incident namespace"), "details show problem namespace instead of incident-storage namespace");
@@ -262,39 +305,80 @@ try {
     document.getSelection().removeAllRanges();
   }
   assert(parseFloat(getComputedStyle(document.querySelector(".detail-section p")).fontSize) >= 16, "larger detail text");
-  assert($("detail").open && !$("detail-content").querySelector("script") && !window.injected, "safe drill-down and untrusted recommendations");
+  assert($("detail").open && !$("detail").querySelector("img, script") && !window.injected, "safe drill-down and untrusted title and recommendations");
   assert($("detail-content").textContent.includes("Evidence IDs") && $("detail-content").textContent.includes("Revision"), "evidence and lifecycle details");
-  $("detail-content").querySelector("details").open = true;
+  const beforeRecord = $("detail-record").firstElementChild;
+  $("detail-tab-record").focus();
+  $("detail-body").scrollTop = 100;
+  const recordScroll = $("detail-body").scrollTop;
   await refresh();
-  await until(() => $("detail-content").querySelector("details")?.open, "detail disclosure retained");
-  assert($("search").value === "onerror" && $("detail").open, "selection and filters preserved on refresh");
+  await until(() => $("detail-record").firstElementChild !== beforeRecord, "record refreshed");
+  assert($("search").value === "onerror" && $("detail").open
+    && $("detail-tab-record").getAttribute("aria-selected") === "true"
+    && !$("detail-record").hidden && document.activeElement === $("detail-tab-record")
+    && Math.abs($("detail-body").scrollTop - recordScroll) <= 2,
+    "refresh preserves selection, filters, active tab, keyboard focus and body scroll");
+  const copyBeforeRefresh = $("detail-record").querySelector(".copy-button");
+  copyBeforeRefresh.focus({ preventScroll: true });
+  await refresh();
+  await until(() => !$("detail-record").contains(copyBeforeRefresh), "copy controls refreshed");
+  assert(document.activeElement?.getAttribute("aria-label") === copyBeforeRefresh.getAttribute("aria-label"),
+    "refresh restores focus to the same copy control in Record");
   await state("error");
   await refresh();
   await until(() => !$("detail-error").hidden, "detail failure");
   assert(!$("error").hidden && $("error").textContent.includes("stale") && titles().length === 1, "failed refresh keeps stale rows");
   assert(!$("counts-stale").hidden && $("freshness").textContent.includes("Stale"),
     "combined overview visibly marks both counts and snapshot status stale");
-  assert($("detail-error").textContent.includes("stale") && $("detail-content").textContent.includes("Recommendations"), "failed detail refresh keeps stale content");
+  assert($("detail-error").textContent.includes("stale") && $("detail-content").textContent.includes("Recommendations")
+    && !$("detail-record").hidden && $("triage-action").disabled, "failed detail refresh keeps the selected tab and stale content but disables triage");
   await state("deleted");
   await refresh();
   await until(() => $("detail-freshness").textContent === "Incident unavailable", "deleted detail");
-  assert($("detail-content").textContent === "", "deleted incident clears detail rather than showing current data");
+  assert($("detail-content").textContent.trim() === "" && $("detail-content").hidden
+    && $("detail-tabs").hidden && $("detail-tags").hidden && $("detail-resource").hidden
+    && $("detail-resource-count").textContent === "" && $("triage-action").hidden,
+    "deleted incident clears all panels, header context and tabs rather than showing current data");
   $("close-detail").click();
   await until(() => document.activeElement?.className === "incident-link", "focus restoration");
   assert(!$("detail").open, "detail closes and restores focus");
   await state("slow");
   $("reset-filters").click();
   document.querySelector(".incident-link").click();
+  assert(!$("detail-loading").hidden && $("detail-tabs").hidden && $("detail-content").hidden
+    && $("triage-action").hidden, "loading a new incident never exposes old panels, tabs or triage");
   $("close-detail").click();
   await until(() => !$("detail").open, "old detail closed");
   set("search", "Workload 01");
   await state("normal");
   document.querySelector(".incident-link").click();
   await until(() => $("detail-content").textContent.includes("worker-1"), "new selection");
+  assert($("detail-tab-overview").getAttribute("aria-selected") === "true" && $("detail-record").hidden,
+    "new selection resets the previous Record tab to Overview");
   const nodeNamespace = [...$("detail-content").querySelectorAll("dt")].find((node) => node.textContent === "Problem namespace");
   assert(nodeNamespace?.nextElementSibling?.textContent === "Cluster-scoped", "node problems display cluster scope rather than incident-storage namespace");
   await sleep(600);
   assert($("detail-content").textContent.includes("worker-1"), "obsolete detail response cannot replace newer selection");
+  $("close-detail-footer").click();
+  await until(() => !$("detail").open, "footer closes modal");
+  await state("error");
+  document.querySelector(".incident-link").click();
+  await until(() => !$("detail-error").hidden, "initial detail error");
+  assert($("detail-freshness").textContent === "No successful detail refresh"
+    && $("detail-tabs").hidden && $("detail-content").hidden && $("detail-loading").hidden && $("triage-action").hidden,
+    "initial detail error is explicit without showing blank tabs or stale data");
+  $("close-detail").click();
+  await state("normal");
+  $("reset-filters").click();
+  set("search", "Workload 04");
+  document.querySelector(".incident-link").click();
+  await until(() => !$("detail-content").hidden, "empty detail lists");
+  assert($("detail-overview").textContent.includes("None recorded") && $("detail-resource-count").textContent === "0",
+    "empty recommendations and zero resource count remain explicit");
+  $("detail-tab-resources").click();
+  assert($("detail-resources").textContent.includes("None recorded"), "Resources handles an empty affected-resource list");
+  $("detail-tab-record").click();
+  assert($("detail-record").textContent.includes("None recorded"), "Record handles empty evidence references");
   $("close-detail").click();
   $("reset-filters").click();
   set("search", "onerror");
@@ -303,8 +387,8 @@ try {
   $("triage-action").click();
   await until(() => $("triage-action").textContent === "Restore incident" && !$("triage-action").disabled
     && titles().length === 0, "dismissal saved and default list refreshed");
-  assert($("detail-content").querySelector(".badge.dismissed")
-    && !$("detail-content").querySelector(".badge.open, .badge.resolved") && $("count-critical").textContent === "14",
+  assert($("detail-tags").querySelector(".badge.dismissed")
+    && !$("detail-tags").querySelector(".badge.open, .badge.resolved") && $("count-critical").textContent === "14",
     "dismissed replaces lifecycle badge and is excluded from open severity counts");
   await refresh();
   await until(() => !$("triage-action").disabled, "dismissal survives refresh");

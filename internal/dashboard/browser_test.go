@@ -1,7 +1,7 @@
 /*
 Purpose: Provide an opt-in, loopback-only dashboard browser-test harness.
-Flow: In-memory incidents and test routes supply browser checks with namespace,
-rendering, error, latency and revision-scoped triage scenarios. The harness
+Flow: In-memory incidents and test routes supply desktop modal checks with namespace,
+empty detail lists, rendering, error, latency and revision-scoped triage scenarios. The harness
 serves until signalled and never contacts a live cluster or model.
 */
 package dashboard
@@ -166,6 +166,10 @@ func TestBrowserFixture(t *testing.T) {
 			item.Family = "service-availability"
 			item.Anchor = Resource{Kind: "Service", Namespace: "apps", Name: "web"}
 			item.Resources = []Resource{item.Anchor}
+		case 4:
+			item.Resources = []Resource{}
+			item.Analysis.Recommendations = []string{}
+			item.Analysis.EvidenceIDs = []string{}
 		}
 
 		source.items = append(source.items, item)
