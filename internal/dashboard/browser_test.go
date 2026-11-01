@@ -1,7 +1,14 @@
+/*
+Purpose: Provide an opt-in, loopback-only dashboard browser-test harness.
+Flow: In-memory issues and test routes supply browser checks with namespace,
+rendering, error, latency and revision-scoped triage scenarios. The harness
+serves until signalled and never contacts a live cluster or model.
+*/
 package dashboard
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,26 +34,34 @@ type browserSource struct {
 	requests int
 }
 
+// List counts browser fixture refreshes and returns summaries, an empty list, or an injected error.
 func (s *browserSource) List(context.Context) (Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.requests++
 	if s.mode == "error" {
 		return Snapshot{}, &APIError{503, "access_denied", "Fixture: check namespace RBAC."}
 	}
+
 	result := Snapshot{Namespace: "issues", FetchedAt: time.Now().UTC(), Items: []Summary{}}
+
 	if s.mode != "empty" {
 		for _, item := range s.items {
 			result.Items = append(result.Items, item.Summary)
 		}
 	}
+
 	return result, nil
 }
 
+// Get returns a named fixture detail with optional cancellable delay, deletion, or access failure.
 func (s *browserSource) Get(ctx context.Context, name string) (DetailResponse, error) {
 	s.mu.Lock()
 	mode := s.mode
+
 	var found *Detail
+
 	for _, item := range s.items {
 		if item.Name == name {
 			found = &item
@@ -54,6 +69,7 @@ func (s *browserSource) Get(ctx context.Context, name string) (DetailResponse, e
 		}
 	}
 	s.mu.Unlock()
+
 	if mode == "slow" {
 		select {
 		case <-time.After(500 * time.Millisecond):
@@ -61,13 +77,44 @@ func (s *browserSource) Get(ctx context.Context, name string) (DetailResponse, e
 			return DetailResponse{}, ctx.Err()
 		}
 	}
+
 	if mode == "error" {
 		return DetailResponse{}, &APIError{503, "access_denied", "Fixture: check namespace RBAC."}
 	}
+
 	if mode == "deleted" || found == nil {
 		return DetailResponse{}, &APIError{404, "not_found", "Issue is no longer available; refresh the list."}
 	}
+
 	return DetailResponse{FetchedAt: time.Now().UTC(), Item: *found}, nil
+}
+
+// SetDismissed updates fixture triage and its version under lock, rejecting stale versions or injected denial.
+func (s *browserSource) SetDismissed(_ context.Context, name, version string, dismissed bool) (DetailResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.mode == "error" {
+		return DetailResponse{}, &APIError{403, "triage_denied", "Fixture: triage access denied."}
+	}
+
+	for i := range s.items {
+		item := &s.items[i]
+		if item.Name != name {
+			continue
+		}
+
+		if item.Version != version {
+			return DetailResponse{}, triageConflict()
+		}
+
+		item.Dismissed = dismissed
+		item.Version = fmt.Sprintf("%x", sha256.Sum256([]byte(version+"triage")))
+
+		return DetailResponse{FetchedAt: time.Now().UTC(), Item: *item}, nil
+	}
+
+	return DetailResponse{}, &APIError{404, "not_found", "Issue no longer available."}
 }
 
 // TestBrowserFixture is an opt-in, loopback-only browser harness, never part of the production server.
@@ -75,26 +122,32 @@ func TestBrowserFixture(t *testing.T) {
 	if os.Getenv("K8S_DASHBOARD_BROWSER") != "yes" {
 		t.Skip("set K8S_DASHBOARD_BROWSER=yes to serve offline browser fixtures on 127.0.0.1:8000")
 	}
+
 	source := &browserSource{}
+
 	for i := range 64 {
 		obj := issueObject(t, fmt.Sprintf("issue-%03d", i))
 		reader := &Reader{namespace: "issues"}
+
 		item, err := reader.decode(&unstructured.Unstructured{Object: obj})
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		item.Severity = []string{"critical", "high", "medium", "low"}[i%4]
 		item.Analysis.Severity = item.Severity
 		item.Title = fmt.Sprintf("Workload %02d needs investigation", i)
 		item.Analysis.Title = item.Title
 		item.Anchor.Name = fmt.Sprintf("workload-%02d", i)
 		item.Resources = []Resource{item.Anchor}
+
 		item.Lifecycle.UpdatedAt = item.Lifecycle.UpdatedAt.Add(time.Duration(i) * time.Minute)
 		if i >= 60 {
-			item.Lifecycle.Phase = "resolved"
+			item.Lifecycle.State = "resolved"
 			resolved := item.Lifecycle.UpdatedAt
 			item.Lifecycle.ResolvedAt = &resolved
 		}
+
 		switch i {
 		case 0:
 			item.Title = `<img src=x onerror="window.injected=true"> is text, not HTML`
@@ -114,8 +167,10 @@ func TestBrowserFixture(t *testing.T) {
 			item.Anchor = Resource{Kind: "Service", Namespace: "apps", Name: "web"}
 			item.Resources = []Resource{item.Anchor}
 		}
+
 		source.items = append(source.items, item)
 	}
+
 	handler := Handler(source, log.New(io.Discard, "", 0))
 	mux := http.NewServeMux()
 	mux.Handle("/", handler)
@@ -124,8 +179,10 @@ func TestBrowserFixture(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 			http.Error(w, "fixture unavailable", 500)
+
 			return
 		}
+
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = io.WriteString(w, strings.Replace(string(data), "</body>",
 			`<pre id="test-results" style="white-space:pre-wrap;overflow-wrap:anywhere">Running browser tests...</pre><script type="module" src="/__test/browser-tests.js"></script></body>`, 1))
@@ -137,15 +194,22 @@ func TestBrowserFixture(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		source.mu.Lock()
 		defer source.mu.Unlock()
+
 		if r.Method == http.MethodPost {
 			var state struct{ Mode string }
 			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&state) != nil {
 				http.Error(w, "invalid state", 400)
 				return
 			}
+
 			switch state.Mode {
 			case "normal", "error", "empty", "deleted", "slow":
 				source.mode = state.Mode
+			case "update":
+				source.mode = "normal"
+				source.items[0].Lifecycle.Revision++
+				source.items[0].Dismissed = false
+				source.items[0].Version = fmt.Sprintf("%x", sha256.Sum256([]byte(source.items[0].Version+"update")))
 			default:
 				http.Error(w, "invalid mode", 400)
 				return
@@ -154,23 +218,30 @@ func TestBrowserFixture(t *testing.T) {
 			http.Error(w, "invalid method", 405)
 			return
 		}
+
 		_ = json.NewEncoder(w).Encode(map[string]any{"mode": source.mode, "requests": source.requests})
 	})
+
 	port := os.Getenv("K8S_DASHBOARD_BROWSER_PORT")
 	if port == "" {
 		port = "8000"
 	}
+
 	number, err := strconv.Atoi(port)
 	if err != nil || number < 0 || number > 65535 {
 		t.Fatal("K8S_DASHBOARD_BROWSER_PORT must be 0 through 65535 (0 selects an available port)")
 	}
+
 	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(number)))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
 	t.Logf("Offline dashboard: http://%s/ ; browser tests: http://%s/__test/browser", listener.Addr(), listener.Addr())
+
 	if err := Serve(ctx, listener, mux, os.Stderr); err != nil {
 		t.Fatal(err)
 	}

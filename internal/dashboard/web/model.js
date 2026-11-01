@@ -9,7 +9,8 @@ export function namespaces(issue) {
 export function selectIssues(items, filters) {
   const search = filters.search.trim().toLowerCase();
   return items.filter((issue) => {
-    if (filters.phase && issue.lifecycle.phase !== filters.phase) return false;
+    const state = issue.dismissed ? "dismissed" : issue.lifecycle.state;
+    if (filters.state && state !== filters.state) return false;
     if (filters.severity && issue.severity !== filters.severity) return false;
     if (filters.family && issue.family !== filters.family) return false;
     if (filters.namespace && !namespaces(issue).includes(filters.namespace)) return false;
@@ -40,7 +41,7 @@ export function paginate(items, requestedPage, size = 50) {
 export function severityCounts(items) {
   const counts = Object.fromEntries(severities.map((s) => [s, 0]));
   for (const issue of items) {
-    if (issue.lifecycle.phase === "open") counts[issue.severity]++;
+    if (issue.lifecycle.state === "open" && !issue.dismissed) counts[issue.severity]++;
   }
   return counts;
 }
@@ -52,7 +53,8 @@ function isResource(resource) {
 
 function isSummary(item) {
   return item && ["name", "namespace", "title", "observer", "family", "impact"].every((key) => typeof item[key] === "string")
-    && severities.includes(item.severity) && ["open", "resolved"].includes(item.lifecycle?.phase)
+    && typeof item.dismissed === "boolean" && /^[a-f0-9]{64}$/.test(item.version)
+    && severities.includes(item.severity) && ["open", "resolved"].includes(item.lifecycle?.state)
     && Number.isFinite(Date.parse(item.lifecycle.raised_at)) && Number.isFinite(Date.parse(item.lifecycle.updated_at))
     && isResource(item.anchor) && Array.isArray(item.resources) && item.resources.every(isResource);
 }

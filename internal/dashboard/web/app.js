@@ -11,6 +11,7 @@ let selected = null;
 let detailRequest;
 let detailData = null;
 let opener;
+let triageRequest;
 const themeKey = "issue-dash-theme";
 const systemTheme = matchMedia("(prefers-color-scheme: dark)");
 let preferredTheme = null;
@@ -74,14 +75,15 @@ function resourceText(resource) {
 
 function filters() {
   return {
-    search: $("search").value, phase: $("phase").value, severity: $("severity").value,
+    search: $("search").value, state: $("state").value, severity: $("severity").value,
     family: $("family").value, namespace: $("workload-namespace").value,
     sort: $("sort").value, direction: $("direction").value,
   };
 }
 
-async function getJSON(path, signal) {
+async function getJSON(path, signal, options = {}) {
   const response = await fetch(path, {
+    ...options,
     signal: AbortSignal.any([signal, AbortSignal.timeout(12000)]),
     cache: "no-store", credentials: "same-origin",
   });
@@ -130,7 +132,7 @@ function render() {
   for (const severity of severities) {
     $(`count-${severity}`).textContent = counts[severity];
     document.querySelector(`[data-severity="${severity}"]`).setAttribute("aria-pressed",
-      String(current.severity === severity && current.phase === "open"));
+      String(current.severity === severity && current.state === "open"));
   }
   $("counts-stale").hidden = !stale;
   const rows = result.items.map((issue) => {
@@ -145,10 +147,10 @@ function render() {
     row.addEventListener("click", () => openDetail(issue, link));
     content.append(link, element("span", resourceText(issue.anchor), "resource"),
       element("span", `${label(issue.family)} · ${issue.observer}`, "issue-meta"));
-    const phase = element("td");
-    phase.append(badge(issue.lifecycle.phase));
+    const state = element("td");
+    state.append(badge(issue.dismissed ? "dismissed" : issue.lifecycle.state));
     const updated = element("td", date(issue.lifecycle.updated_at), "timestamp");
-    row.append(severity, content, phase, element("td", label(issue.impact)), updated);
+    row.append(severity, content, state, element("td", label(issue.impact)), updated);
     return row;
   });
   $("issue-rows").replaceChildren(...rows);
@@ -164,9 +166,10 @@ function render() {
 }
 
 async function refresh() {
-  if (refreshing) return;
+  if (refreshing || triageRequest) return;
   clearTimeout(timer);
   refreshing = true;
+  updateTriageAction();
   $("refresh").disabled = true;
   $("refresh").textContent = "Refreshing...";
   listRequest = new AbortController();
@@ -193,7 +196,8 @@ async function refresh() {
     $("refresh").disabled = false;
     $("refresh").textContent = "Refresh now";
     render();
-    if (selected) loadDetail(selected);
+    if (selected && !triageRequest) loadDetail(selected);
+    updateTriageAction();
     if (!document.hidden) timer = setTimeout(refresh, 15000);
   }
 }
@@ -223,7 +227,8 @@ function renderDetail(data) {
   $("detail-title").textContent = issue.title;
   $("detail-freshness").textContent = `Last success: ${date(data.fetched_at)}`;
   const tags = element("div", undefined, "detail-tags");
-  tags.append(badge(issue.severity), badge(issue.lifecycle.phase), element("span", `${label(issue.impact)} impact`, "muted"));
+  tags.append(badge(issue.severity), badge(issue.dismissed ? "dismissed" : issue.lifecycle.state),
+    element("span", `${label(issue.impact)} impact`, "muted"));
   const facts = element("dl", undefined, "facts");
   const entries = [
     ["Issue", issue.name], ["Problem namespace", issue.anchor.namespace || "Cluster-scoped"], ["Observer", issue.observer],
@@ -246,7 +251,47 @@ function renderDetail(data) {
     section("Uncertainty", issue.analysis.uncertainty),
     listSection("Affected resources", issue.resources.map(resourceText)),
     facts, provenance);
+  updateTriageAction();
 }
+
+function updateTriageAction() {
+  $("refresh").disabled = !!triageRequest || refreshing;
+  const action = $("triage-action");
+  action.hidden = !detailData;
+  action.disabled = !detailData || !!triageRequest || refreshing || stale || !$("detail-error").hidden;
+  action.textContent = triageRequest ? "Saving..." : detailData?.item.dismissed ? "Restore issue" : "Dismiss issue";
+}
+
+$("triage-action").addEventListener("click", async () => {
+  if (!detailData || $("triage-action").disabled) return;
+  const issue = detailData.item;
+  const request = new AbortController();
+  triageRequest = request;
+  detailRequest?.abort();
+  clearTimeout(timer);
+  $("triage-error").hidden = true;
+  updateTriageAction();
+  try {
+    const data = validateDetail(await getJSON(`/api/issues/${encodeURIComponent(issue.name)}/triage`, request.signal, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-KubeScout-Action": "triage" },
+      body: JSON.stringify({ version: issue.version, dismissed: !issue.dismissed }),
+    }));
+    if (selected === issue.name) {
+      detailData = data;
+      renderDetail(data);
+    }
+  } catch (error) {
+    if (selected === issue.name) {
+      $("triage-error").textContent = `${errorText(error)} Refresh and review the current status before retrying.`;
+      $("triage-error").hidden = false;
+    }
+  } finally {
+    triageRequest = null;
+    await refresh();
+    updateTriageAction();
+  }
+});
 
 async function loadDetail(name) {
   detailRequest?.abort();
@@ -270,6 +315,7 @@ async function loadDetail(name) {
     $("detail-freshness").textContent = detailData
       ? `Stale · last success: ${date(detailData.fetched_at)}`
       : missing ? "Issue unavailable" : "No successful detail refresh";
+    updateTriageAction();
   }
 }
 
@@ -280,6 +326,8 @@ function openDetail(issue, trigger) {
   $("detail-title").textContent = issue.title;
   $("detail-freshness").textContent = "Loading latest details...";
   $("detail-error").hidden = true;
+  $("triage-error").hidden = true;
+  updateTriageAction();
   $("detail-content").replaceChildren();
   $("detail").showModal();
   loadDetail(issue.name);
@@ -296,15 +344,17 @@ $("detail").addEventListener("click", (event) => {
   }
 });
 $("detail").addEventListener("close", () => {
+  if ($("detail").open) return;
   const name = selected;
   selected = null;
   detailData = null;
+  updateTriageAction();
   detailRequest?.abort();
   const replacement = [...document.querySelectorAll("[data-issue]")].find((node) => node.dataset.issue === name);
   (opener?.isConnected ? opener : replacement || $("refresh")).focus();
 });
 $("filters").addEventListener("submit", (event) => event.preventDefault());
-for (const id of ["search", "phase", "severity", "family", "workload-namespace"]) {
+for (const id of ["search", "state", "severity", "family", "workload-namespace"]) {
   $(id).addEventListener(id === "search" ? "input" : "change", () => { page = 1; render(); });
 }
 $("sort").addEventListener("change", () => {
@@ -317,7 +367,7 @@ $("reset-filters").addEventListener("click", () => { $("filters").reset(); page 
 for (const card of document.querySelectorAll("[data-severity]")) {
   card.addEventListener("click", () => {
     $("severity").value = $("severity").value === card.dataset.severity ? "" : card.dataset.severity;
-    $("phase").value = "open";
+    $("state").value = "open";
     page = 1;
     render();
   });
@@ -333,5 +383,6 @@ window.addEventListener("pagehide", () => {
   clearTimeout(timer);
   listRequest?.abort();
   detailRequest?.abort();
+  triageRequest?.abort();
 });
 refresh();

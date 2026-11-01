@@ -1,3 +1,9 @@
+/*
+Purpose: Test controller rollout and Service backend evidence rules.
+Flow: Offline object fixtures cover replica shortfalls, OnDelete and partitioned
+updates, ready endpoints, named ports and excluded Service types. These tests
+exercise deterministic evidence only, without traffic probes, cluster or AI calls.
+*/
 package health
 
 import (
@@ -5,9 +11,11 @@ import (
 	"time"
 )
 
+// TestControllerEvidence checks replica shortfalls without misclassifying OnDelete or partitioned updates.
 func TestControllerEvidence(t *testing.T) {
 	base := Object{Resource: Resource{Kind: "StatefulSet"}, Created: time.Now().Add(-time.Hour),
 		Desired: 3, Ready: 3, Available: 3, Current: 3, Updated: 3, UpdateStrategy: "RollingUpdate"}
+
 	for _, tt := range []struct {
 		name string
 		edit func(*Object)
@@ -22,6 +30,7 @@ func TestControllerEvidence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			o := base
 			tt.edit(&o)
+
 			findings := Controllers(Snapshot{At: time.Now(), Objects: []Object{o}}, DefaultPolicy())
 			if (len(findings) != 0) != tt.want {
 				t.Fatalf("unexpected controller evidence: %+v", findings)
@@ -30,11 +39,13 @@ func TestControllerEvidence(t *testing.T) {
 	}
 }
 
+// TestServiceEvidence covers missing ready backends and named ports while excluding unmanaged Service types.
 func TestServiceEvidence(t *testing.T) {
 	service := Object{Resource: Resource{Kind: "Service", Namespace: "apps", Name: "web", UID: "service"}, Created: time.Now().Add(-time.Hour),
 		Selector: map[string]string{"app": "web"}, Ports: []Port{{Name: "http", Protocol: "TCP", Number: 80, Target: "http"}}}
 	base := Object{Resource: Resource{Kind: "EndpointSlice", Namespace: "apps", Name: "web-a", UID: "slice"},
 		ServiceName: "web", Endpoints: []Endpoint{{Ready: true}}, Ports: []Port{{Name: "http", Protocol: "TCP", Number: 8080}}}
+
 	for _, tt := range []struct {
 		name string
 		edit func(*Object, *Object)
@@ -49,6 +60,7 @@ func TestServiceEvidence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s, e := service, base
 			tt.edit(&s, &e)
+
 			findings := Services(Snapshot{At: time.Now(), Objects: []Object{s, e}}, DefaultPolicy())
 			if tt.rule == "" {
 				if len(findings) != 0 {

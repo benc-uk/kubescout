@@ -1,4 +1,4 @@
-module k8s-ops-agent
+module github.com/benc-uk/kubescout
 
 go 1.26.0
 

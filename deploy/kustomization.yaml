@@ -8,5 +8,5 @@ resources:
 
 # Overrides for the image tag in deployment
 images:
-  - name: localhost/k8s-health
+  - name: localhost/kubescout
     newTag: dev

@@ -14,7 +14,7 @@ deterministic alerting service with optional AI commentary.
   an alternate production observer mode.
 - Watch is the default; `--once` is a bounded AI assessment.
 - The agent process has no chat/UI or HTTP server. The optional standalone
-  `issue-dash` dashboard is a separate read-only service, not part of the AI loop.
+  KubeScout dashboard is a separate service with human dismissal/restore, not part of the AI loop.
 - No shell/kubectl agent tool, remediation, external sender, Pod logs,
   Foundry-hosted execution or AKS provisioning without a separate request.
 
@@ -25,9 +25,9 @@ the current contract.
 
 ## Architecture
 
-- [cmd/k8s-health](cmd/k8s-health): CLI, auth/bootstrap, signals, exit codes.
+- [cmd/kubescout](cmd/kubescout): CLI, auth/bootstrap, signals, exit codes.
 - [cmd/issue-dash](cmd/issue-dash): standalone dashboard CLI, explicit Kubernetes
-  authentication and HTTP lifecycle; no AI or incident writes.
+  authentication and HTTP lifecycle; no AI or incident-spec writes.
 - [internal/config](internal/config): validated options, scheduling/budget limits,
   namespace watch/ignore selection and repository-root `.env` loading;
   existing environment wins.
@@ -45,16 +45,16 @@ the current contract.
   lifecycle, restart-aware reconciliation and kubeconfig simulation.
 - [internal/runner](internal/runner): independent collection and bounded AI work,
   cooldowns, no-action suppression, recovery review and stale-result rejection.
-- [internal/report](internal/report): schema 3.0 incident/execution output and
+- [internal/output](internal/output): schema 3.0 incident/execution output and
   separate stderr diagnostics, not a deterministic assessment publisher.
 - [internal/dashboard](internal/dashboard): bounded single-namespace ClusterIssue
-  reads and embedded HTML/CSS/native-ESM UI; no JavaScript build step.
+  reads, revision-scoped human triage and embedded HTML/CSS/native-ESM UI; no JavaScript build step.
 - [build/](build/): separate pinned non-root agent/dashboard images, allow-listed
   contexts and ignored outputs.
 - [deploy/](deploy/): active ClusterIssue schema and agent RBAC/Deployment.
   Legacy HealthReport schemas are no longer shipped; retain any existing records.
 - [deploy/dashboard](deploy/dashboard): independent dashboard Deployment, Service
-  and namespaced read-only RBAC; excluded from the agent bundle.
+  and namespaced get/list plus status-patch RBAC; excluded from the agent bundle.
 
 ## AI and data safety
 
@@ -110,6 +110,9 @@ the current contract.
   in place. Choose a new observer ID when changing cluster/observation scope;
   never resolve out-of-scope stored incidents as if they had recovered.
 - No-op AI conclusions, wording and counters alone must not update an incident.
+- Incident lifecycle uses `state` in Go/JSON and the indexing label. Legacy
+  `phase` records require explicit migration; do not silently fall back.
+  Kubernetes-owned Pod `status.phase` is unchanged.
 - In-cluster writes are restricted to ClusterIssue create/patch in the incident
   namespace. No incident deletion or delivery-status writes.
 - Kubeconfig mode runs AI but only simulates incident operations in memory.
@@ -121,19 +124,73 @@ the current contract.
 ## Dashboard boundary
 
 - Read only ClusterIssues from one `--namespace` (default `k8s-health`), across
-  observers and lifecycle phases. The dashboard must not read workloads, model
-  credentials or tool evidence, call AI, or write/delete incidents.
+  observers and lifecycle states. The dashboard must not read workloads, model
+  credentials or tool evidence, call AI, or create/delete incidents or write their specs.
+- Human dismissal/restore may patch only `status.triage` using the status subresource,
+  with UID/resourceVersion preconditions and a version matching the displayed issue.
+  Dismissal applies to one lifecycle revision; material AI updates and recurrence
+  restore visibility. The agent continues tracking dismissed issues unchanged.
+  Browser writes require same-origin checks, a custom action header and bounded JSON.
+  Status RBAC is broader than a single field; field ownership is enforced by the application.
 - Workload-namespace filtering uses anchor and affected-resource namespaces; it
   must not change the issue-storage API scope. Details show the anchor's
   **Problem namespace**, or `Cluster-scoped` for nodes, not the storage namespace.
 - Kubeconfig mode binds `127.0.0.1:8000`; in-cluster mode binds `:8000`.
   Authentication modes never fall back. There is no application login or TLS;
-  keep deployed access within a trusted cluster/localhost port-forward.
+  keep deployed access within a trusted cluster/localhost port-forward. Anyone with
+  access can dismiss/restore issues using the dashboard's Kubernetes credentials.
 - Preserve bounded complete reads, safe text rendering and explicit stale/error
   states. No stored issues is not proof of cluster health or agent activity.
   Keep the dashboard image, ServiceAccount and deployment independent of the agent.
 
 ## Development and operation
+
+### Go file headers
+
+- Every repository-owned `.go` file, including tests and integration fixtures,
+  must have a concise `/* ... */` header before its `package` declaration.
+  Keep build constraints at the top with their required blank-line separation;
+  preserve existing license notices and compiler directives.
+- Use `Purpose:` and `Flow:` entries in the header. Explain what the file owns,
+  how it participates in the system, and the relevant deterministic, AI or
+  human-action boundary. For test files, describe the behavior covered and
+  whether they use offline fixtures or explicitly opt-in live resources.
+- Read the implementation before writing the header. Keep descriptions specific
+  to the file, concise and factual; do not imply unsupported guarantees or copy
+  generic package descriptions into every file.
+- Add a header when creating a Go file. Whenever responsibilities, data flow,
+  side effects, safety boundaries or test coverage change, update its header in
+  the same change. Review headers on moved or renamed files as well.
+- Treat header accuracy as part of completing a code change, not a one-time
+  documentation exercise. Keep the related architecture documentation in sync
+  when the overall flow changes. Avoid timestamps, author names and change logs
+  in headers.
+
+### Go function comments
+
+- Document every named Go function and method, including unexported helpers and
+  test functions, with a `//` comment immediately above its declaration.
+- Use 1-2 concise lines explaining its purpose and important behavior; use up to
+  3 lines for complex functions. Start with the function or method name and
+  describe the actual contract, side effects or safety boundary rather than
+  merely restating its name. Test comments explain what behavior is verified.
+- Preserve useful existing explanations and compiler directives. Anonymous
+  callbacks do not need routine comments; explain them only when their logic
+  needs clarification.
+- Keep function comments accurate in the same change as the implementation,
+  including renames, changed behavior and updated test coverage.
+
+### Go declaration order
+
+- Group all file-level `type` declarations immediately after the imports and
+  before other declarations. In files without imports, put them after the
+  `package` clause. Keep each type's documentation attached to its declaration.
+- Apply this layout to new Go files and preserve it when editing existing files,
+  including test files. Keep function-local types inside their functions; do not
+  widen their scope merely to follow file-level ordering.
+- Preserve build constraints, file headers and compiler directives. Reordering
+  types must not change the relative order of other declarations, especially
+  variables with initialization side effects.
 
 ```bash
 make help
@@ -142,6 +199,17 @@ make build
 CGO_ENABLED=1 make test
 make check
 ```
+
+`make setup` also installs the pinned golangci-lint into ignored `build/bin`;
+use `make lint-setup` to install it separately and `make lint` for lint-only
+validation. `make check` includes linting. Keep `.golangci.yml`, the Makefile's
+version pin and lint documentation aligned when changing tooling. Keep Go code
+gofmt-formatted and follow `wsl_v5` whitespace checks: separate statement groups
+with blank lines rather than packing unrelated operations together. No
+line-length limit is enforced. Do not bypass
+findings with blanket exclusions or `nolint` comments; keep any necessary
+exception narrow and explained. Lint includes integration-tagged code but must
+not execute live tests, contact the cluster or call the model.
 
 Use `make dash-build` / `make dash-run` for the standalone local dashboard.
 Its image/import/deploy/forward/cleanup targets use the `dash-` prefix; see

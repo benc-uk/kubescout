@@ -1,3 +1,9 @@
+/*
+Purpose: Define and validate runtime options, namespace selection and model settings.
+Flow: Combine CLI flags and environment values into collection, evidence-policy
+and AI scheduling limits; repository-root dotenv loading preserves existing values.
+Configuration requires AI settings and rejects the removed deterministic-only mode.
+*/
 package config
 
 import (
@@ -12,8 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/benc-uk/kubescout/internal/health"
 	"github.com/joho/godotenv"
-	"k8s-ops-agent/internal/health"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -30,7 +36,10 @@ type Config struct {
 
 type namespaces []string
 
+// String renders the namespace list as a comma-separated flag value.
 func (n *namespaces) String() string { return strings.Join(*n, ",") }
+
+// Set validates a comma-separated list before appending trimmed, unique namespace names.
 func (n *namespaces) Set(s string) error {
 	values := strings.Split(s, ",")
 	for i, value := range values {
@@ -39,30 +48,39 @@ func (n *namespaces) Set(s string) error {
 			return errors.New("namespace lists must contain comma-separated valid namespace names")
 		}
 	}
+
 	for _, value := range values {
 		if !slices.Contains(*n, value) {
 			*n = append(*n, value)
 		}
 	}
+
 	return nil
 }
 
+// WatchesNamespace checks namespace admission against the watch and ignore lists, rejecting empty names.
 func (c Config) WatchesNamespace(name string) bool {
 	return name != "" && (len(c.NamespaceWatch) == 0 || slices.Contains(c.NamespaceWatch, name)) && !slices.Contains(c.NamespaceIgnore, name)
 }
 
+// NamespaceScope describes the configured namespace selection for operator diagnostics.
 func (c Config) NamespaceScope() string {
 	if len(c.NamespaceWatch) != 0 {
 		return "watching " + strings.Join(c.NamespaceWatch, ",")
 	}
+
 	if len(c.NamespaceIgnore) != 0 {
 		return "watching all except " + strings.Join(c.NamespaceIgnore, ",")
 	}
+
 	return "watching all namespaces"
 }
 
+// Parse combines flags and environment settings, then validates scope, authentication and AI limits.
+// Explicit namespace flags replace their corresponding environment lists; conflicting lists fail.
 func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config, error) {
 	c := Config{Policy: health.DefaultPolicy()}
+
 	for _, arg := range args {
 		name, _, _ := strings.Cut(arg, "=")
 		switch name {
@@ -74,10 +92,15 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 			return c, errors.New("--report-file was replaced by --output-file using the schema 3.0 AI incident contract")
 		}
 	}
-	f := flag.NewFlagSet("k8s-health", flag.ContinueOnError)
+
+	f := flag.NewFlagSet("kubescout", flag.ContinueOnError)
 	f.SetOutput(stderr)
-	var watch, ignore namespaces
-	var restart int
+
+	var (
+		watch, ignore namespaces
+		restart       int
+	)
+
 	f.BoolVar(&c.Once, "once", false, "Collect and report once instead of watching")
 	f.StringVar(&c.Auth, "auth-mode", "", "Required: kubeconfig or in-cluster")
 	f.StringVar(&c.Context, "context", "", "Kubeconfig context override (defaults to the current context)")
@@ -105,13 +128,17 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	f.DurationVar(&c.Policy.RolloutGrace, "rollout-grace", c.Policy.RolloutGrace, "Deployment rollout grace")
 	f.DurationVar(&c.Policy.EventLookback, "event-lookback", c.Policy.EventLookback, "Warning event lookback")
 	f.IntVar(&restart, "restart-threshold", 3, "Cumulative restart information threshold")
+
 	if err := f.Parse(args); err != nil {
 		return c, err
 	}
+
 	if f.NArg() != 0 {
 		return c, errors.New("unexpected positional arguments")
 	}
+
 	watchSet, ignoreSet := false, false
+
 	f.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "namespace-watch", "namespace":
@@ -120,6 +147,7 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 			ignoreSet = true
 		}
 	})
+
 	for _, setting := range []struct {
 		name string
 		set  bool
@@ -131,21 +159,27 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 			}
 		}
 	}
+
 	if len(watch) != 0 && len(ignore) != 0 {
 		return c, errors.New("namespace-watch and namespace-ignore are mutually exclusive (including environment variables)")
 	}
+
 	c.NamespaceWatch, c.NamespaceIgnore = watch, ignore
 	slices.Sort(c.NamespaceWatch)
 	slices.Sort(c.NamespaceIgnore)
+
 	if len(validation.IsDNS1123Label(c.IncidentNamespace)) != 0 {
 		return c, errors.New("--incident-namespace must be a valid explicit namespace name")
 	}
+
 	if c.ObserverID == "" || len(validation.IsDNS1123Label(c.ObserverID)) != 0 {
 		return c, errors.New("--observer-id must be a stable explicit DNS label unique to this cluster and scope")
 	}
+
 	if c.InvestigationTimeout < c.RequestTimeout || c.Cooldown <= 0 || c.RecoveryWindow <= 0 || c.ReviewInterval <= 0 {
 		return c, errors.New("investigation and scheduling durations must be positive; investigation timeout must cover request timeout")
 	}
+
 	switch c.Auth {
 	case "kubeconfig":
 		if c.Context != "" && strings.TrimSpace(c.Context) == "" {
@@ -158,39 +192,49 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	default:
 		return c, errors.New("--auth-mode must be kubeconfig or in-cluster")
 	}
+
 	if c.RequestTimeout <= 0 || c.RunTimeout < c.RequestTimeout || c.BatchWindow <= 0 || c.CheckInterval <= 0 || c.WatchTimeout < time.Second {
 		return c, errors.New("durations must be positive; run timeout must cover request timeout and watch timeout must be at least 1s")
 	}
+
 	if c.Policy.StartupGrace < 0 || c.Policy.RolloutGrace < 0 || c.Policy.EventLookback <= 0 || restart <= 0 || restart > 1<<31-1 {
 		return c, errors.New("invalid health rule policy")
 	}
+
 	c.Policy.RestartThreshold = int32(restart)
 	if c.MaxObjects <= 0 || c.MaxInputChars <= 0 || c.MaxOutputTokens <= 0 || c.MaxOutputTokens > 1000000 || c.CallsPerHour <= 0 {
 		return c, errors.New("object, input, output and call limits must be positive; max output tokens cannot exceed 1000000")
 	}
+
 	if err := c.LoadModel(getenv); err != nil {
 		return c, err
 	}
+
 	return c, nil
 }
 
+// LoadModel populates required model settings, accepting the legacy model-name fallback.
+// It validates the HTTPS endpoint and nonempty credentials without making a model request.
 func (c *Config) LoadModel(getenv func(string) string) error {
 	c.Endpoint, c.APIKey, c.Model = getenv("AZURE_OPENAI_ENDPOINT"), getenv("AZURE_OPENAI_API_KEY"), getenv("AZURE_AI_MODEL_DEPLOYMENT_NAME")
 	if c.Model == "" {
 		c.Model = getenv("FOUNDRY_MODEL_NAME")
 	}
+
 	u, err := url.Parse(c.Endpoint)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || (u.Port() != "" && u.Port() != "443") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/openai/v1/" {
 		return errors.New("AZURE_OPENAI_ENDPOINT must be an HTTPS /openai/v1/ endpoint on port 443")
 	}
+
 	if strings.TrimSpace(c.APIKey) == "" || strings.TrimSpace(c.Model) == "" {
 		return errors.New("AI configuration is required: set AZURE_OPENAI_API_KEY and AZURE_AI_MODEL_DEPLOYMENT_NAME")
 	}
+
 	return nil
 }
 
-// LoadDotEnv never searches arbitrary parent .env files. A checkout is identified
-// by this module, either at cwd or above the installed build output.
+// LoadDotEnv loads only this module's repository-root .env, preserving existing environment values.
+// It searches upward from cwd and the executable directory, never loading arbitrary parent .env files.
 func LoadDotEnv(cwd, executable string) error {
 	for _, start := range []string{cwd, filepath.Dir(executable)} {
 		for dir := start; ; dir = filepath.Dir(dir) {
@@ -198,14 +242,17 @@ func LoadDotEnv(cwd, executable string) error {
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return errors.New("cannot inspect repository module")
 			}
-			if strings.HasPrefix(string(data), "module k8s-ops-agent\n") {
+
+			if strings.HasPrefix(string(data), "module github.com/benc-uk/kubescout\n") {
 				values, err := godotenv.Read(filepath.Join(dir, ".env"))
 				if errors.Is(err, os.ErrNotExist) {
 					return nil
 				}
+
 				if err != nil {
 					return errors.New("cannot parse repository .env")
 				}
+
 				for key, value := range values {
 					if _, exists := os.LookupEnv(key); !exists {
 						if err := os.Setenv(key, value); err != nil {
@@ -213,12 +260,15 @@ func LoadDotEnv(cwd, executable string) error {
 						}
 					}
 				}
+
 				return nil
 			}
+
 			if filepath.Dir(dir) == dir {
 				break
 			}
 		}
 	}
+
 	return nil
 }

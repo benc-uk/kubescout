@@ -16,9 +16,9 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
-        - name: Phase
+        - name: State
           type: string
-          jsonPath: .spec.lifecycle.phase
+          jsonPath: .spec.lifecycle.state
         - name: Severity
           type: string
           jsonPath: .spec.analysis.severity
@@ -125,9 +125,9 @@ spec:
                       type: string
                 lifecycle:
                   type: object
-                  required: [phase, revision, recurrences, raised_at, updated_at]
+                  required: [state, revision, recurrences, raised_at, updated_at]
                   properties:
-                    phase:
+                    state:
                       type: string
                       enum: [open, resolved]
                     revision:
@@ -149,5 +149,15 @@ spec:
                       format: date-time
             status:
               type: object
-              description: Reserved for a future external delivery controller.
+              description: Human triage status and future external delivery-controller state; never written by the AI agent.
               x-kubernetes-preserve-unknown-fields: true
+              properties:
+                triage:
+                  type: object
+                  required: [dismissedRevision]
+                  properties:
+                    dismissedRevision:
+                      type: integer
+                      format: int64
+                      minimum: 0
+                      description: Dismissed only while this equals spec.lifecycle.revision. Zero restores visibility.

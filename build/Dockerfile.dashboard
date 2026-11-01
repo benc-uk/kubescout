@@ -8,14 +8,14 @@ COPY internal/dashboard/ ./internal/dashboard/
 COPY internal/incident/ ./internal/incident/
 COPY internal/health/ ./internal/health/
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -buildvcs=false \
-    -ldflags="-s -w -buildid=" -o /out/issue-dash ./cmd/issue-dash
+    -ldflags="-s -w -buildid=" -o /out/kubescout-dashboard ./cmd/issue-dash
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
-COPY --from=builder --chown=65532:65532 /out/issue-dash /issue-dash
+COPY --from=builder --chown=65532:65532 /out/kubescout-dashboard /kubescout-dashboard
 USER 65532:65532
 WORKDIR /
 EXPOSE 8000
 STOPSIGNAL SIGTERM
 
-ENTRYPOINT ["/issue-dash"]
+ENTRYPOINT ["/kubescout-dashboard"]

@@ -6,5 +6,5 @@ resources:
   - service.yaml
 
 images:
-  - name: localhost/k8s-dashboard
+  - name: localhost/kubescout-dashboard
     newTag: dev

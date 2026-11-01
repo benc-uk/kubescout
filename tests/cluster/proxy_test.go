@@ -1,5 +1,12 @@
 //go:build integration
 
+/*
+Purpose: Inject scoped API interruptions and silent watches into live collector tests.
+Flow: An integration fixture supplies authenticated upstream access; a local TLS
+proxy accepts an ephemeral token and only allow-listed GET paths for its namespace
+and nodes. Test cleanup closes the server and removes its generated kubeconfig;
+faults affect test requests rather than cluster-wide networking or model traffic.
+*/
 package cluster
 
 import (
@@ -23,12 +30,6 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
-const (
-	proxyPass int32 = iota
-	proxyClosed
-	proxySilent
-)
-
 // The proxy can only read this test's scope. The observer gets an ephemeral
 // loopback token, never a copy of the user's Kubernetes credentials.
 type faultProxy struct {
@@ -39,20 +40,33 @@ type faultProxy struct {
 	path           string
 }
 
+const (
+	proxyPass int32 = iota
+	proxyClosed
+	proxySilent
+)
+
+// proxy starts a fault-injecting TLS proxy restricted to allow-listed live fixture reads and
+// writes a disposable kubeconfig with an ephemeral token, never copying upstream credentials.
 func (f *fixture) proxy(mode int32) *faultProxy {
 	f.t.Helper()
+
 	p := &faultProxy{active: map[*http.Request]context.CancelFunc{}}
 	p.mode.Store(mode)
+
 	target, err := url.Parse(f.config.Host)
 	if err != nil {
 		f.t.Fatal("invalid API address")
 	}
+
 	rc := rest.CopyConfig(f.config)
 	rc.Timeout = 0
+
 	transport, err := rest.TransportFor(rc)
 	if err != nil {
 		f.t.Fatal("cannot construct authenticated API proxy transport")
 	}
+
 	forward := httputil.NewSingleHostReverseProxy(target)
 	forward.Transport = transport
 	forward.FlushInterval = -1
@@ -78,35 +92,45 @@ func (f *fixture) proxy(mode int32) *faultProxy {
 			http.Error(w, "not authorised", http.StatusForbidden)
 			return
 		}
+
 		if p.mode.Load() == proxyClosed {
 			http.Error(w, "test connection interruption", http.StatusServiceUnavailable)
 			return
 		}
+
 		isWatch := r.URL.Query().Get("watch") == "true"
 		if isWatch {
 			p.watches.Add(1)
 		} else {
 			p.lists.Add(1)
 		}
+
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
+
 		requestKey := r
+
 		p.mu.Lock()
 		p.active[requestKey] = cancel
+
 		p.mu.Unlock()
 		defer func() { p.mu.Lock(); delete(p.active, requestKey); p.mu.Unlock() }()
+
 		if isWatch && p.mode.Load() == proxySilent {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.(http.Flusher).Flush()
 			<-ctx.Done()
+
 			return
 		}
+
 		r = r.Clone(ctx)
 		r.Header.Del("Authorization")
 		forward.ServeHTTP(w, r)
 	}))
 	f.t.Cleanup(server.Close)
+
 	cfg := clientcmdapi.NewConfig()
 	cfg.Clusters["proxy"] = &clientcmdapi.Cluster{
 		Server:                   server.URL,
@@ -115,21 +139,26 @@ func (f *fixture) proxy(mode int32) *faultProxy {
 	cfg.AuthInfos["proxy"] = &clientcmdapi.AuthInfo{Token: token}
 	cfg.Contexts["stage2-proxy"] = &clientcmdapi.Context{Cluster: "proxy", AuthInfo: "proxy"}
 	cfg.CurrentContext = "stage2-proxy"
+
 	data, err := clientcmd.Write(*cfg)
 	if err != nil {
 		f.t.Fatal("cannot encode test proxy configuration")
 	}
+
 	p.path = filepath.Join(f.t.TempDir(), "proxy-kubeconfig")
 	if err := os.WriteFile(p.path, data, 0600); err != nil {
 		f.t.Fatal(err)
 	}
+
 	return p
 }
 
+// disconnect rejects future proxy requests and cancels active ones without altering cluster networking.
 func (p *faultProxy) disconnect() {
 	p.mode.Store(proxyClosed)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	for _, cancel := range p.active {
 		cancel()
 	}

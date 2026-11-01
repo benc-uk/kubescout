@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: localhost/k8s-health:dev
+          image: localhost/kubescout:dev
           imagePullPolicy: Never
           args:
             - --auth-mode=in-cluster

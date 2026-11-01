@@ -2,6 +2,8 @@
 
 # Make overrides are not loaded from .env; see README.md for defaults and scope.
 GO ?= go
+GOLANGCI_LINT_VERSION := v2.15.0
+GOLANGCI_LINT := $(CURDIR)/build/bin/golangci-lint/$(GOLANGCI_LINT_VERSION)/golangci-lint
 # Local run/once options; deployment scope and identity come from the manifests.
 NAMESPACE_WATCH ?=
 NAMESPACE_IGNORE ?=
@@ -10,35 +12,43 @@ OBSERVER_ID ?= local-dev-$(shell whoami)
 # Confirmation for model-calling Make targets, not a Go runtime setting.
 ALLOW_MODEL ?=
 CONTAINER_ENGINE ?= podman
-IMAGE ?= localhost/k8s-health:dev
-DASHBOARD_IMAGE ?= localhost/k8s-dashboard:dev
+IMAGE ?= localhost/kubescout:dev
+DASHBOARD_IMAGE ?= localhost/kubescout-dashboard:dev
 KIND ?= kind
 # kind's cluster name is separate from the current kubeconfig context.
 KIND_CLUSTER ?= kind
 KIND_PROVIDER ?= podman
 KUBECTL ?= kubectl
 
-.PHONY: help setup build run once test check integration integration-model integration-deploy image kind-load model-secret deploy undeploy
-.PHONY: dashboard-build dashboard-run dashboard-image dashboard-kind-load dashboard-deploy dashboard-forward dashboard-undeploy
+.PHONY: help setup lint-setup lint build run once test check integration integration-model integration-deploy image kind-load model-secret deploy undeploy
+.PHONY: dash-build dash-run dash-image dash-kind-load dash-deploy dash-forward dash-undeploy
 
 help: ## 📖 Show available targets
-	@awk 'BEGIN {FS = ":.*## "; print "\n☸ Kubernetes AI incident agent\n"} \
+	@awk 'BEGIN {FS = ":.*## "; print "\n☸ KubeScout · Your AI Kubernetes investigator.\n"} \
 		/^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2} \
 		END {print "\nExample (real AI calls, simulated issue writes):\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps ALLOW_MODEL=yes\n\nLocal defaults: current kubeconfig context, all namespaces, OBSERVER_ID=local-dev-<username>\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nALLOW_MODEL=yes is a Make confirmation gate; model credentials are still required.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md: Make targets and variables, prerequisites and deployment steps.\n"}' $(MAKEFILE_LIST)
 
-setup: ## 📦 Download pinned Go dependencies
+setup: ## 📦 Download pinned Go dependencies and install the linter
 	$(GO) mod download
 	$(GO) mod verify
+	$(MAKE) lint-setup
+
+lint-setup: ## 🔧 Install the pinned Go linter into ignored build/bin
+	GOBIN="$(dir $(GOLANGCI_LINT))" $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+lint: ## 🧹 Lint all Go code and integration fixtures without running them
+	@test -x "$(GOLANGCI_LINT)" || { printf '❌ Linter missing; run make lint-setup (or make setup)\n' >&2; exit 1; }
+	"$(GOLANGCI_LINT)" run --config .golangci.yml ./...
 
 build: ## 🔨 Build the Go binary
-	@$(GO) build -trimpath -o build/bin/k8s-health ./cmd/k8s-health
+	@$(GO) build -trimpath -o build/bin/kubescout ./cmd/kubescout
 
 run: ## 👀 Watch with AI in kubeconfig mode (ALLOW_MODEL=yes)
 once: ## 🚀 Run one AI assessment in kubeconfig mode (ALLOW_MODEL=yes)
 
 run once: build
 	@test -n "$(OBSERVER_ID)" && test "$(ALLOW_MODEL)" = yes || { printf '❌ Set OBSERVER_ID and ALLOW_MODEL=yes\n' >&2; exit 2; }
-	@./build/bin/k8s-health --auth-mode kubeconfig \
+	@./build/bin/kubescout --auth-mode kubeconfig \
 		$(if $(strip $(NAMESPACE_WATCH)),--namespace-watch "$(NAMESPACE_WATCH)",) \
 		$(if $(strip $(NAMESPACE_IGNORE)),--namespace-ignore "$(NAMESPACE_IGNORE)",) \
 		--observer-id "$(OBSERVER_ID)" $(if $(filter once,$@),--once,) $(ARGS)
@@ -65,11 +75,11 @@ integration-deploy: build ## 🧪 Live in-cluster AI test (imported IMAGE, CRD, 
 		$(GO) test -tags=integration -count=1 -v \
 		-timeout 10m -run '^TestLiveDeployment$$' ./tests/cluster
 
-check: ## 🔍 Check formatting, modules and static diagnostics
+check: ## 🔍 Check formatting, modules and Go lint diagnostics
 	@test -z "$$(gofmt -l cmd internal tests)" || { printf '❌ Run gofmt -w cmd internal tests\n' >&2; exit 1; }
 	$(GO) mod tidy -diff
 	$(GO) mod verify
-	$(GO) vet -tags=integration ./...
+	$(MAKE) lint
 
 image: ## 📦 Build the non-root container image
 	$(CONTAINER_ENGINE) build $(if $(filter podman,$(notdir $(CONTAINER_ENGINE))),--ignorefile build/Dockerfile.dockerignore,) \
@@ -78,10 +88,10 @@ image: ## 📦 Build the non-root container image
 kind-load: ## ☸ Import IMAGE into kind's KIND_CLUSTER (does not deploy)
 	@test -n "$(KIND_CLUSTER)" || { printf '❌ Set KIND_CLUSTER explicitly\n' >&2; exit 2; }
 	@mkdir -p build/out
-	@trap 'rm -f build/out/k8s-health.tar.tmp' EXIT; \
-		$(CONTAINER_ENGINE) save "$(IMAGE)" > build/out/k8s-health.tar.tmp && \
-		mv build/out/k8s-health.tar.tmp build/out/k8s-health.tar
-	KIND_EXPERIMENTAL_PROVIDER="$(KIND_PROVIDER)" $(KIND) load image-archive build/out/k8s-health.tar --name "$(KIND_CLUSTER)"
+	@trap 'rm -f build/out/kubescout.tar.tmp' EXIT; \
+		$(CONTAINER_ENGINE) save "$(IMAGE)" > build/out/kubescout.tar.tmp && \
+		mv build/out/kubescout.tar.tmp build/out/kubescout.tar
+	KIND_EXPERIMENTAL_PROVIDER="$(KIND_PROVIDER)" $(KIND) load image-archive build/out/kubescout.tar --name "$(KIND_CLUSTER)"
 
 model-secret: ## 🔐 Ensure namespace and create model Secret from .env (current context)
 	$(KUBECTL) apply -f deploy/namespace.yaml
@@ -98,10 +108,10 @@ undeploy: ## 🧹 Remove Deployment/RBAC; retain issues, Secret, namespace and C
 	$(KUBECTL) delete -f deploy/deployment.yaml -f deploy/rbac.yaml
 
 dash-build: ## 🔨 Build the standalone dashboard (no JavaScript build step)
-	$(GO) build -trimpath -o build/bin/issue-dash ./cmd/issue-dash
+	$(GO) build -trimpath -o build/bin/kubescout-dashboard ./cmd/issue-dash
 
-dash-run: dash-build ## 🌐 Run issue-dash locally on 127.0.0.1:8000 (current context)
-	./build/bin/issue-dash --auth-mode=kubeconfig --namespace=k8s-health
+dash-run: dash-build ## 🌐 Run the KubeScout dashboard locally on 127.0.0.1:8000 (current context)
+	./build/bin/kubescout-dashboard --auth-mode=kubeconfig --namespace=k8s-health
 
 dash-image: ## 📦 Build the separate non-root DASHBOARD_IMAGE
 	$(CONTAINER_ENGINE) build $(if $(filter podman,$(notdir $(CONTAINER_ENGINE))),--ignorefile build/Dockerfile.dashboard.dockerignore,) \
@@ -110,16 +120,16 @@ dash-image: ## 📦 Build the separate non-root DASHBOARD_IMAGE
 dash-kind-load: ## ☸ Import DASHBOARD_IMAGE into KIND_CLUSTER (does not deploy)
 	@test -n "$(KIND_CLUSTER)" || { printf '❌ Set KIND_CLUSTER explicitly\n' >&2; exit 2; }
 	@mkdir -p build/out
-	@trap 'rm -f build/out/k8s-dashboard.tar.tmp' EXIT; \
-		$(CONTAINER_ENGINE) save "$(DASHBOARD_IMAGE)" > build/out/k8s-dashboard.tar.tmp && \
-		mv build/out/k8s-dashboard.tar.tmp build/out/k8s-dashboard.tar
-	KIND_EXPERIMENTAL_PROVIDER="$(KIND_PROVIDER)" $(KIND) load image-archive build/out/k8s-dashboard.tar --name "$(KIND_CLUSTER)"
+	@trap 'rm -f build/out/kubescout-dashboard.tar.tmp' EXIT; \
+		$(CONTAINER_ENGINE) save "$(DASHBOARD_IMAGE)" > build/out/kubescout-dashboard.tar.tmp && \
+		mv build/out/kubescout-dashboard.tar.tmp build/out/kubescout-dashboard.tar
+	KIND_EXPERIMENTAL_PROVIDER="$(KIND_PROVIDER)" $(KIND) load image-archive build/out/kubescout-dashboard.tar --name "$(KIND_CLUSTER)"
 
 dash-deploy: ## 🚀 Deploy only the dashboard (current context; imported image, namespace and CRD)
 	$(KUBECTL) apply -k deploy/dashboard
 
 dash-forward: ## 🌐 Open localhost:8000 access (current context)
-	$(KUBECTL) -n k8s-health port-forward --address=127.0.0.1 service/k8s-dashboard 8000:8000
+	$(KUBECTL) -n k8s-health port-forward --address=127.0.0.1 service/kubescout-dashboard 8000:8000
 
 dash-undeploy: ## 🧹 Remove only dashboard resources; retain agent and issues (current context)
 	$(KUBECTL) delete -f deploy/dashboard/deployment.yaml \

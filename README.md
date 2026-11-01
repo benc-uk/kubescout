@@ -1,11 +1,25 @@
-# Kubernetes AI Ops Agent 
+# KubeScout
 
-An AI-driven Kubernetes operations agent that investigates cluster issues and provides actionable insights.
+**Your AI Kubernetes investigator.**
+
+<img src="internal/dashboard/web/logo.png" alt="KubeScout logo" width="180">
+
+KubeScout is an AI agent for Kubernetes incident investigation. It investigates
+cluster issues and provides actionable insights.
+
+The existing `k8s-health` namespace and `health.k8s-ops-agent.io` ClusterIssue
+API group are retained for compatibility; this rebrand does not migrate stored
+incidents or the agent's Kubernetes resource identities. Dashboard resources now
+use `kubescout-dashboard`; see the deployment note below.
 
 Deterministic rules are internal evidence producers. They neither decide what
 deserves user attention nor create Kubernetes incidents. The AI can investigate,
 correlate observations, conclude **no action**, raise a problem, update a known
 problem or confirm recovery.
+
+For a step-by-step table linking each stage to its code and separating
+deterministic logic from AI decisions, see
+[From Kubernetes changes to incidents](ARCHITECTURE.md).
 
 ```text
 Scoped Kubernetes informers and pure evidence rules
@@ -25,8 +39,9 @@ There is no chat server, remediation, arbitrary kubectl/shell tool, Pod-log acce
 Foundry-hosted process or external sender. Watch is the default; `--once` performs
 a bounded manual AI assessment. **Deterministic-only mode has been removed.**
 
-An optional [ClusterIssue dashboard](#clusterissue-dashboard) runs as a separate,
-read-only Go service. It does not add an HTTP server to the agent or call AI.
+An optional [ClusterIssue dashboard](#clusterissue-dashboard) runs as a separate
+Go service with human dismissal/restore. It does not add an HTTP server to the agent
+or call AI, and cannot change AI conclusions or lifecycle states.
 
 ## Development and validation
 
@@ -45,6 +60,27 @@ actual SDK, function-tool round trips, final decisions and incident API writes.
 They also verify no-action on critical evidence, redaction/scope limits, model
 budgets, restart reconciliation, meaningful updates and recovery scheduling.
 Race tests require a C compiler.
+
+### Go linting
+
+Run `make lint-setup` once (also included in `make setup`), then `make lint`.
+`make check` includes linting alongside formatting and module checks.
+
+The Makefile pins **golangci-lint v2.15.0**, built with the selected Go toolchain
+into ignored `build/bin/golangci-lint/v2.15.0/`; no global installation or runtime
+module dependency is added. Installation requires module download access.
+Once dependencies and the linter are cached, linting needs no cluster or model
+connection and does not run tests or apply fixes.
+
+[.golangci.yml](.golangci.yml) enables `govet`, `ineffassign`, Staticcheck's
+`SA*` correctness checks, `wsl_v5` whitespace checks and `gofmt` formatting checks
+across production code, tests and integration-tagged fixtures. The maintained
+`wsl_v5` linter separates statement groups with blank lines for readability.
+No line-length limit is enforced.
+Broad unchecked-error enforcement is not enabled.
+All findings from the enabled checks are reported, without a new-issues-only
+baseline. Keep the version pin and configuration in sync when upgrading; rerun
+`make lint-setup` after changing Go toolchains.
 
 The collector observes nodes and watched-namespace Pods, Deployments,
 ReplicaSets, StatefulSets, DaemonSets, Services, EndpointSlices, Jobs and Warning
@@ -87,18 +123,20 @@ are healthy. These repository changes do not activate or restart the agent.
 
 ## ClusterIssue dashboard
 
-The [issue-dash host](cmd/issue-dash/main.go) embeds a small
+The [KubeScout dashboard host](cmd/issue-dash/main.go) embeds a small
 [HTML/CSS/native-ESM interface](internal/dashboard/web/) and listens on **port
 8000**, designed for desktop browsers. There is no Node, JavaScript package manager,
 framework, CDN or frontend build step. It uses the existing pinned Go dependencies.
 Rebuild the binary/image after editing the embedded assets.
 
-- Shows open issues first, highest severity then most recently updated.
-- Uses larger desktop text with a dark-mode toggle. The initial theme follows the
+- Shows undismissed open issues by default, highest severity then most recently updated.
+- Uses the Signal design: a graphite incident desk with orange accents, a compact
+  severity strip and a flat, readable table. A light theme is also available.
+  The initial theme follows the
   system preference; an explicit choice is remembered in the browser.
 - Severity badges use both color and text: critical/red, high/orange,
-  medium/amber and low/blue. Resolved is a separate phase, not a severity.
-- Search by title, issue name, observer or affected resource. Combine phase,
+  medium/amber and low/blue. Resolved is a separate state, not a severity.
+- Search by title, issue name, observer or affected resource. Combine state,
   severity, problem-family and workload-namespace filters; sort by severity,
   title, raised time or updated time. Results display 50 per page.
 - Click anywhere in an issue row (or activate its title button with the keyboard)
@@ -107,7 +145,16 @@ Rebuild the binary/image after editing the embedded assets.
   Problem namespace comes from the incident's anchor resource, not its storage
   namespace; node problems display `Cluster-scoped`. Evidence IDs are references
   only: the dashboard cannot fetch raw evidence, logs or revision history.
-  Click outside the details sidebar or use its Close button to dismiss it.
+  Click outside the details sidebar or use its Close button to close it.
+- **Dismiss issue** in the details panel hides the current revision from the default
+  list and open severity counts. Select **State: Dismissed** to view dismissed
+  issues (whether open or resolved) and use **Restore issue** to show them again.
+  **Open** and **Resolved** exclude dismissed issues; **All states** includes
+  everything. This combined UI filter does not change the stored AI lifecycle.
+  Dismissal is shared across browsers/users and persists across dashboard restarts.
+  A material AI update, resolution or recurrence advances the lifecycle revision,
+  automatically clearing the effective dismissal; unchanged refreshes do not.
+  Dismissal is not resolution or agent suppression: the agent continues investigating.
 - Refreshes every 15 seconds while visible, with a manual refresh button.
   Refresh failures retain any last successful list/details with a **stale**
   warning. Missing/deleted issues and initial-load errors are explicit.
@@ -131,11 +178,11 @@ currently observing.** This is a view of durable conclusions, not a health probe
 
 ### Run locally, outside the cluster
 
-Build and run **`issue-dash`** using your kubeconfig:
+Build and run **`kubescout-dashboard`** using your kubeconfig:
 
 ```bash
 make dash-build
-./build/bin/issue-dash --auth-mode=kubeconfig --namespace=k8s-health
+./build/bin/kubescout-dashboard --auth-mode=kubeconfig --namespace=k8s-health
 # Open http://127.0.0.1:8000
 ```
 
@@ -151,7 +198,9 @@ Add `--kubeconfig=/path/to/config` for a specific file, or
 use the standard `KUBECONFIG` environment variable/default kubeconfig location.
 The issue namespace comes from `--namespace`, not the context's namespace.
 Your selected credentials need `get`/`list` access to ClusterIssues there.
-The dashboard still performs no writes, even when those credentials allow them.
+Dismiss/restore additionally needs `patch` on `clusterissues/status` there.
+These are real Kubernetes writes in kubeconfig mode, not the agent's simulated writes.
+Read-only credentials still allow browsing; dismissal failures are shown explicitly.
 
 Local mode binds only **`127.0.0.1:8000`** because there is no app login.
 No dashboard Deployment, image or port-forward is needed for local operation.
@@ -162,17 +211,23 @@ running the dashboard does not start the agent.
 
 The [dashboard manifests](deploy/dashboard/) are deliberately excluded from the
 [agent bundle](deploy/kustomization.yaml). They create a separate Deployment,
-ClusterIP Service and ServiceAccount with a namespaced Role allowing **only
-`get` and `list` on ClusterIssues**. The image is non-root; the container uses a
+ClusterIP Service and ServiceAccount with a namespaced Role allowing **`get` and
+`list` on ClusterIssues, plus `patch` on `clusterissues/status`**. The image is non-root; the container uses a
 read-only root filesystem and drops all capabilities. No Secret is mounted.
-The container executable is `/issue-dash`; image and Kubernetes resource names
-remain `k8s-dashboard`. The Deployment explicitly selects `--auth-mode=in-cluster`
+The container executable is `/kubescout-dashboard`; its image is
+`localhost/kubescout-dashboard:dev`. The Deployment, Service, ServiceAccount,
+Role and RoleBinding use `kubescout-dashboard`. Applying these manifests creates
+new dashboard resources; it does not rename or remove an existing `k8s-dashboard`
+installation. After explicitly deploying and verifying the new dashboard, retire
+the old dashboard resources separately. `make dash-forward` and
+`make dash-undeploy` target only the new resources.
+The Deployment explicitly selects `--auth-mode=in-cluster`
 (also the executable default), which listens on `:8000` and uses its ServiceAccount.
 Kubeconfig flags are rejected in in-cluster mode.
 
 Prerequisites: the existing `k8s-health` namespace and ClusterIssue CRD must
 already be installed. The default local-kind manifests use
-`localhost/k8s-dashboard:dev` with `imagePullPolicy: Never`, so import the image
+`localhost/kubescout-dashboard:dev` with `imagePullPolicy: Never`, so import the image
 before applying them. These commands do not start or scale the agent:
 
 ```bash
@@ -183,6 +238,20 @@ make dash-deploy
 make dash-forward
 # Open http://127.0.0.1:8000
 ```
+
+For an existing installation, apply the updated `deploy/clusterissues-crd.yaml`
+and dashboard RBAC, and rebuild/import the dashboard image before rolling it out.
+No incident migration or agent change is needed for dismissal.
+
+The only write route is `POST /api/issues/{name}/triage`, with a bounded JSON
+body containing the displayed issue's opaque `version` and a `dismissed` boolean.
+It requires `X-KubeScout-Action: triage` and same-origin browser requests.
+Writes use UID/resourceVersion preconditions and patch only `status.triage`;
+stale requests fail rather than dismissing a newer revision or recreated issue.
+Other status fields, labels, spec and lifecycle are preserved. Uncertain writes
+are not retried automatically; refresh before retrying.
+RBAC restricts writes to the status subresource, not to an individual status field;
+the application enforces the narrower triage-only contract.
 
 Dashboard run/deploy/forward/undeploy targets use the current kubeconfig context.
 `DASHBOARD_IMAGE` controls image build/import only, not manifest
@@ -198,7 +267,8 @@ Create any new namespace separately.
 **Trust boundary:** there is no application login or TLS termination. For a deployed
 dashboard, use the ClusterIP Service with localhost port-forward, not ingress/public exposure.
 ClusterIP is not authentication: other network-reachable in-cluster clients can
-read the same issue data. Add appropriate access controls before using it outside
+read the same issue data **and dismiss/restore issues**. Same-origin protection
+prevents cross-site browser writes but is not authentication. Add appropriate access controls before using it outside
 a trusted cluster. Browser clients never receive the service account token.
 
 Remove only the dashboard with:
@@ -236,7 +306,7 @@ Use a desktop browser for visual and keyboard checks. Fixture routes and data ex
 only in tests: they are neither embedded nor available in the production image.
 Routine Go tests skip this interactive host and stay offline.
 Offline kubeconfig fixtures also verify current context and explicit context/file selection, local
-HTTP serving, read-only namespace scope, credential projection and no auth fallback.
+HTTP serving, namespace scope, status-only triage writes, credential projection and no auth fallback.
 
 ## Make targets and variables
 
@@ -249,22 +319,24 @@ displays `make help`; it does not start the agent.
 | Target | What it does / prerequisites |
 |---|---|
 | `help` | Lists targets, a local-run example and configuration reminders. |
-| `setup` | Downloads and verifies pinned Go modules; requires module download access. |
-| `build` | Builds `build/bin/k8s-health`; does not run it or build an image. |
+| `setup` | Downloads and verifies pinned Go modules and installs the pinned linter; requires module download access. |
+| `lint-setup` | Builds golangci-lint at the pinned version into ignored `build/bin`; does not modify runtime modules or install globally. |
+| `lint` | Runs configured correctness linters over all Go code, including tests and integration fixtures, without executing them. Requires `make lint-setup` first. |
+| `build` | Builds `build/bin/kubescout`; does not run it or build an image. |
 | `test` | Runs all routine tests offline with the race detector; requires a C compiler and CGO enabled. |
-| `check` | Checks Go formatting, module tidiness/integrity and static diagnostics, including integration-tagged code; does not run live tests. |
+| `check` | Checks Go formatting, module tidiness/integrity and runs `lint`, including integration-tagged code; does not run live tests. |
 | `run` | Rebuilds the binary, then watches in kubeconfig mode. Requires model configuration, `ALLOW_MODEL=yes` and a valid context/scope/identity. Calls AI; simulates issue writes. |
 | `once` | Same prerequisites as `run`, but performs one bounded assessment and exits. |
 | `integration` | Rebuilds the binary and runs live collector/connectivity tests. Creates/deletes owned workload fixtures; no model calls. |
 | `integration-model` | Rebuilds the binary and runs a live CLI AI test in an owned namespace. Requires model configuration and `ALLOW_MODEL=yes`; at most six model requests. |
 | `integration-deploy` | Rebuilds the local binary and tests an in-cluster AI Pod with owned namespace/Secret/RBAC. Requires an already imported `IMAGE`, separately installed ClusterIssue CRD, model configuration and `ALLOW_MODEL=yes`; at most six model requests. Does not build/import an image. |
 | `image` | Builds `IMAGE` using `CONTAINER_ENGINE` and the allow-listed Docker context. Does not import or deploy it. |
-| `kind-load` | Saves `IMAGE` to `build/out/k8s-health.tar` and imports it into `KIND_CLUSTER`. Requires an existing image and kind cluster; does not deploy. |
+| `kind-load` | Saves `IMAGE` to `build/out/kubescout.tar` and imports it into `KIND_CLUSTER`. Requires an existing image and kind cluster; does not deploy. |
 | `model-secret` | Ensures the `k8s-health` namespace exists, then runs `kubectl create secret` directly from the repository-root `.env`. Requires namespace-apply and Secret-create permissions; does not overwrite the Secret, deploy or call AI. |
 | `deploy` | Checks the model Secret, applies the manifests and scales the Deployment to one replica. Requires the imported manifest image and `ALLOW_MODEL=yes`; starts ongoing AI calls. Does not build/import an image or create model credentials. |
 | `undeploy` | Deletes the checked-in Deployment and RBAC resources. Preserves issues, model Secret, namespace and CRDs. |
-| `dash-build` | Builds the separate `build/bin/issue-dash` with embedded HTML/CSS/ESM. |
-| `dash-run` | Builds and runs `issue-dash` locally at `127.0.0.1:8000` using the current kubeconfig context and the agent's `k8s-health` issue-storage namespace, with no model calls or writes. |
+| `dash-build` | Builds the separate `build/bin/kubescout-dashboard` with embedded HTML/CSS/ESM. |
+| `dash-run` | Builds and runs the KubeScout dashboard locally at `127.0.0.1:8000` using the current kubeconfig context and the agent's `k8s-health` issue-storage namespace. No model calls; explicit human dismissal/restore writes triage status. |
 | `dash-image` | Builds `DASHBOARD_IMAGE` using its own credential-free build-context allow-list. |
 | `dash-kind-load` | Saves/imports the existing `DASHBOARD_IMAGE` into `KIND_CLUSTER`; does not deploy. |
 | `dash-deploy` | Applies only `deploy/dashboard` in the current context; requires imported image, namespace and CRD. No AI calls. |
@@ -288,7 +360,7 @@ not load `.env` into its variables. The agent loads it for local runs;
 
 | Variable | Make default | Used for |
 |---|---|---|
-| `GO` | `go` | Go executable for setup/build/test/check and live-test runners. |
+| `GO` | `go` | Go executable for setup/build/test/check, linter installation and live-test runners. |
 | `CONTEXT` | Empty (required for live tests) | Explicit kubeconfig context for live integration tests only. Not used by local run/deploy targets or kind image imports. |
 | `NAMESPACE_WATCH` | Empty (all namespaces) | Comma-separated allow-list for `run`/`once`; also an agent environment variable. Mutually exclusive with `NAMESPACE_IGNORE`. |
 | `NAMESPACE_IGNORE` | Empty | Comma-separated deny-list for `run`/`once`; all other namespaces are watched. Also an agent environment variable. |
@@ -296,8 +368,8 @@ not load `.env` into its variables. The agent loads it for local runs;
 | `ALLOW_MODEL` | Empty | Must be exactly `yes` for `run`, `once`, `integration-model`, `integration-deploy` and `deploy`. Make-only confirmation of potentially billable AI calls. |
 | `ARGS` | Empty | Extra CLI flags appended by `run`/`once` only. Quote multiple flags together; never put credentials here. |
 | `CONTAINER_ENGINE` | `podman` | Container executable used to build and save images (`image`/`kind-load`). |
-| `IMAGE` | `localhost/k8s-health:dev` | Image tag for `image`, `kind-load` and `integration-deploy`. Does not change the Deployment manifest. |
-| `DASHBOARD_IMAGE` | `localhost/k8s-dashboard:dev` | Separate dashboard image build/import tag; does not change manifests. |
+| `IMAGE` | `localhost/kubescout:dev` | Image tag for `image`, `kind-load` and `integration-deploy`. Does not change the Deployment manifest. |
+| `DASHBOARD_IMAGE` | `localhost/kubescout-dashboard:dev` | Separate dashboard image build/import tag; does not change manifests. |
 | `KIND` | `kind` | kind executable used by `kind-load`. |
 | `KIND_CLUSTER` | `kind` | kind cluster name used by image imports. Independent of the current kubeconfig context; ensure it matches the deployment cluster. |
 | `KIND_PROVIDER` | `podman` | Sets `KIND_EXPERIMENTAL_PROVIDER` for `kind-load`; must match the provider that created the cluster. |
@@ -320,13 +392,13 @@ make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps \
 
 Create the output directory first if using `--output-file`. The identity in this
 example covers both `default` and `apps`.
-Runtime flags are listed by `./build/bin/k8s-health --help`; avoid overriding
+Runtime flags are listed by `./build/bin/kubescout --help`; avoid overriding
 Make's auth/context/identity flags through `ARGS`.
 
 **Deployment variables are not manifest substitutions.** `NAMESPACE_WATCH`,
 `NAMESPACE_IGNORE`, `OBSERVER_ID` and `ARGS` affect local `run`/`once`, not `deploy`. The checked-in
 [Deployment](deploy/deployment.yaml) watches all namespaces, stores issues in
-`k8s-health`, uses observer `kind-all` and image `localhost/k8s-health:dev`.
+`k8s-health`, uses observer `kind-all` and image `localhost/kubescout:dev`.
 Review the manifest and matching [RBAC](deploy/rbac.yaml) to change that scope;
 setting `IMAGE=...` alone does not update the Deployment. See the
 [deployment sequence](#container-deployment-and-migration) before activating it.
@@ -365,7 +437,7 @@ Make requires explicit model authorisation. Running the executable directly is
 also an explicit request to run AI:
 
 ```bash
-./build/bin/k8s-health --auth-mode=kubeconfig \
+./build/bin/kubescout --auth-mode=kubeconfig \
   --namespace-watch=default,apps --observer-id=local-default-apps
 ```
 
@@ -427,7 +499,7 @@ than falling back to another context or in-cluster credentials.
 
 The full AI investigation still runs, but incident persistence is simulated in
 memory. Accepted changes log would-create/update operations and their lifecycle
-phase to stderr and emit versioned incident changes on stdout. **No cluster
+state to stderr and emit versioned incident changes on stdout. **No cluster
 writes occur.** Simulated incident state is lost on process exit.
 
 ### In-cluster mode
@@ -440,6 +512,23 @@ the delivery-status subresource.
 Despite its name, `ClusterIssue` is namespaced, not cluster-scoped.
 
 ## Incident lifecycle and identity
+
+**Breaking field rename:** incident lifecycle JSON now uses
+`spec.lifecycle.state` (`open` or `resolved`), and the agent's indexing label is
+`health.k8s-ops-agent.io/state`. The dashboard API, model input and incident
+output likewise use `lifecycle.state`; there is no legacy `phase` fallback.
+Dismissed remains human triage status, not an AI lifecycle state.
+
+Existing records require an explicit, coordinated migration before the new agent
+or dashboard is used: back up the records, stop writers, use a temporary CRD
+schema accepting both fields, copy each `spec.lifecycle.phase` value to
+`spec.lifecycle.state`, replace the corresponding `phase` label with `state`,
+and remove the old field/label before applying the final CRD. Preserve names,
+identity, revision, timestamps and `status.triage` so dismissal and recurrence
+history remain intact. Update external consumers of incident JSON as well.
+Do not apply the final schema first: it no longer defines the old field.
+This repository change does not migrate or delete cluster records.
+Kubernetes-owned Pod `status.phase` is unchanged.
 
 [ClusterIssue](deploy/clusterissues-crd.yaml) replaces HealthReport:
 
@@ -472,13 +561,13 @@ Each CR contains:
 | `spec.resources` | Affected resource identities |
 | `spec.analysis` | AI title, severity, impact, diagnosis, explanation, citations, recommendations, uncertainty and provenance |
 | `spec.lifecycle` | Open/resolved state, material revision, timestamps and recurrence count |
-| `status` | Reserved for a future delivery controller; not written by this agent |
+| `status` | Human triage (`triage.dismissedRevision`) and future delivery-controller state; not written by the AI agent |
 
 AI severity is independent of rule hints. A critical deterministic signal can
 legitimately lead to AI no-action.
 
 Prose rewording, event/restart counts and timestamps alone do not update a CR.
-Same-phase updates require AI's material-change decision and a change in severity,
+Same-state updates require AI's material-change decision and a change in severity,
 impact, stable diagnosis key or affected-resource set. The prior wording remains
 when the conclusion is unchanged.
 
@@ -608,8 +697,8 @@ billable model calls when applied over the old deterministic installation.
 5. Explicitly authorise deployment/model traffic.
 
 ```bash
-make image IMAGE=localhost/k8s-health:dev
-make kind-load KIND_CLUSTER=kind IMAGE=localhost/k8s-health:dev
+make image IMAGE=localhost/kubescout:dev
+make kind-load KIND_CLUSTER=kind IMAGE=localhost/kubescout:dev
 make model-secret
 make deploy ALLOW_MODEL=yes
 kubectl -n k8s-health get clusterissues
@@ -690,7 +779,7 @@ running the offline suite.
 
 | Package | Responsibility |
 |---|---|
-| [cmd/k8s-health](cmd/k8s-health) | AI runtime, explicit auth/configuration and exit codes |
+| [cmd/kubescout](cmd/kubescout) | AI runtime, explicit auth/configuration and exit codes |
 | [cmd/issue-dash](cmd/issue-dash) | Standalone dashboard CLI, auth selection and HTTP lifecycle |
 | [internal/config](internal/config) | Validation, limits and root dotenv handling |
 | [internal/kube](internal/kube) | Scoped collection, projection, ownership and freshness |
@@ -699,11 +788,11 @@ running the offline suite.
 | [internal/analysis](internal/analysis) | Agent Framework tool loop, budgets and AI decision validation |
 | [internal/incident](internal/incident) | Correlation, AI incident domain, lifecycle and reconciliation |
 | [internal/runner](internal/runner) | Bounded candidate scheduling, recovery review and freshness checks |
-| [internal/report](internal/report) | Versioned accepted-change output and separate diagnostics |
+| [internal/output](internal/output) | Versioned accepted-change output and separate diagnostics |
 | [internal/dashboard](internal/dashboard) | Bounded single-namespace ClusterIssue reads and embedded browser UI |
 | [build/](build/) | Separate pinned non-root images and allow-listed build contexts |
 | [deploy/](deploy/) | ClusterIssue schema, agent Deployment and workload/incident RBAC |
-| [deploy/dashboard/](deploy/dashboard/) | Independent read-only dashboard Deployment, Service and RBAC |
+| [deploy/dashboard/](deploy/dashboard/) | Independent dashboard Deployment, Service and status-only triage RBAC |
 
 AI can still misdiagnose or correlate incorrectly. Bounded references and stable
 identity are safeguards, not a guarantee of semantic correctness. A future sender
