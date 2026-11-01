@@ -14,6 +14,8 @@ ALLOW_MODEL ?=
 CONTAINER_ENGINE ?= podman
 IMAGE ?= localhost/kubescout:dev
 DASHBOARD_IMAGE ?= localhost/kubescout-dashboard:dev
+TARGETOS ?= linux
+TARGETARCH ?= $(shell $(GO) env GOARCH)
 KIND ?= kind
 # kind's cluster name is separate from the current kubeconfig context.
 KIND_CLUSTER ?= kind
@@ -83,6 +85,8 @@ check: ## 🔍 Check formatting, modules and Go lint diagnostics
 
 image: ## 📦 Build the non-root container image
 	$(CONTAINER_ENGINE) build $(if $(filter podman,$(notdir $(CONTAINER_ENGINE))),--ignorefile build/Dockerfile.dockerignore,) \
+		--platform "$(TARGETOS)/$(TARGETARCH)" \
+		--build-arg TARGETOS="$(TARGETOS)" --build-arg TARGETARCH="$(TARGETARCH)" \
 		-f build/Dockerfile -t "$(IMAGE)" .
 
 kind-load: ## ☸ Import IMAGE into kind's KIND_CLUSTER (does not deploy)
@@ -120,6 +124,8 @@ dash-run: dash-build ## 🌐 Run the KubeScout dashboard locally on 127.0.0.1:80
 
 dash-image: ## 📦 Build the separate non-root DASHBOARD_IMAGE
 	$(CONTAINER_ENGINE) build $(if $(filter podman,$(notdir $(CONTAINER_ENGINE))),--ignorefile build/Dockerfile.dashboard.dockerignore,) \
+		--platform "$(TARGETOS)/$(TARGETARCH)" \
+		--build-arg TARGETOS="$(TARGETOS)" --build-arg TARGETARCH="$(TARGETARCH)" \
 		-f build/Dockerfile.dashboard -t "$(DASHBOARD_IMAGE)" .
 
 dash-kind-load: ## ☸ Import DASHBOARD_IMAGE into KIND_CLUSTER (does not deploy)

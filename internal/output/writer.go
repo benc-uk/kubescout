@@ -1,108 +1,184 @@
 /*
-Purpose: Encode schema 3.0 execution and incident-change output separately from diagnostics.
-Flow: Serialize supplied results to stdout and optionally an atomically replaced
-file, marking output failures incomplete while sending diagnostics to stderr.
-This output layer neither evaluates evidence nor decides incident lifecycle changes.
+Purpose: Render operator-facing text with explicit Go/model provenance and phases.
+Flow: Concurrent callers emit bounded single-line events to stdout or stderr,
+optionally colouring trusted labels after escaping external text. Console
+failures are retained for the runner. Logs describe work, never store
+incidents or turn deterministic observations into AI conclusions.
 */
 package output
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
+	"fmt"
 	"io"
-	"os"
-	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
 	"time"
-
-	"github.com/benc-uk/kubescout/internal/incident"
+	"unicode"
 )
-
-type Result struct {
-	SchemaVersion string            `json:"schema_version"`
-	Type          string            `json:"type"`
-	Status        string            `json:"execution_status"`
-	Changes       []incident.Change `json:"changes"`
-	Errors        []string          `json:"errors"`
-}
 
 type Writer struct {
 	Out, Err io.Writer
-	File     string
+	Level    string
+	Run      string
+	Secrets  []string
+	Color    bool
+	mu       sync.Mutex
+	failure  error
 }
 
-// Diagnostic writes a timestamped diagnostic to stderr without touching incident output.
-func (w Writer) Diagnostic(code, message string) error {
-	if err := json.NewEncoder(w.Err).Encode(struct {
-		Type    string    `json:"type"`
-		Code    string    `json:"code"`
-		Message string    `json:"message"`
-		At      time.Time `json:"at"`
-	}{"diagnostic", code, message, time.Now().UTC()}); err != nil {
-		return errors.New("diagnostic output failed")
-	}
+type investigationKey struct{}
 
-	return nil
-}
+var credentialText = regexp.MustCompile(`(?i)(bearer\s+\S+|(?:password|passwd|api[_-]?key|access[_-]?token|secret)\s*[:=]\s*["']?[^\s"',;]+|https?://[^/\s]+:[^@\s]+@)`)
 
-// WriteChange wraps a supplied accepted incident change in a completed schema 3.0 envelope.
-func (w Writer) WriteChange(c incident.Change) error {
-	return w.WriteResult(Result{"3.0", "incident_change", "completed", []incident.Change{c}, []string{}})
-}
-
-// WriteResult emits the envelope to stdout and optionally replaces the output file.
-// Failed destinations are reported as incomplete in the remaining writable destination.
-func (w Writer) WriteResult(r Result) error {
-	var fileErr error
-	if w.File != "" {
-		fileErr = atomicWrite(w.File, r)
-		if fileErr != nil {
-			r.Status = "incomplete"
-			r.Errors = append(r.Errors, "output file write failed")
+// Redact removes configured credentials and recognizable credential assignments, not operational prose.
+func Redact(text string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, "[redacted credential]")
 		}
 	}
 
-	if err := json.NewEncoder(w.Out).Encode(r); err != nil {
-		if w.File != "" && fileErr == nil {
-			r.Status = "incomplete"
-
-			r.Errors = append(r.Errors, "stdout output failed")
-			if err := atomicWrite(w.File, r); err != nil {
-				return errors.New("stdout and output file write failed")
-			}
-		}
-
-		return errors.New("stdout output failed")
-	}
-
-	if fileErr != nil {
-		return errors.New("output file write failed")
-	}
-
-	return nil
+	return credentialText.ReplaceAllString(text, "[redacted credential]")
 }
 
-// atomicWrite encodes and syncs private JSON beside the destination, then replaces it by rename.
-// Failed writes leave the destination unchanged and remove the staging file.
-func atomicWrite(path string, value any) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".kubescout-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
+// WithInvestigation attaches diagnostic correlation without changing model input or incident identity.
+func WithInvestigation(ctx context.Context, id, resource string) context.Context {
+	return context.WithValue(ctx, investigationKey{}, "inv="+id+" "+resource)
+}
 
-	if err := json.NewEncoder(f).Encode(value); err != nil {
-		_ = f.Close()
-		return err
+// Scope returns the investigation label carried by this context, if any.
+func Scope(ctx context.Context) string {
+	label, _ := ctx.Value(investigationKey{}).(string)
+	return label
+}
+
+// Text escapes controls and limits console text so untrusted prose cannot forge log lines.
+func Text(value string) string {
+	var out strings.Builder
+
+	for _, r := range value {
+		if out.Len() >= 1600 {
+			out.WriteString(" [console excerpt; see AI transcript]")
+			break
+		}
+
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			fmt.Fprintf(&out, "\\u%04x", r)
+		} else {
+			out.WriteRune(r)
+		}
 	}
 
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
+	return out.String()
+}
+
+// Log writes one optionally coloured event atomically; warnings/errors use stderr, other levels stdout.
+// A nil writer disables optional instrumentation; configured destination failures remain observable.
+func (w *Writer) Log(level, origin, phase, message string) error {
+	if w == nil {
+		return nil
 	}
 
-	if err := f.Close(); err != nil {
-		return err
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.failure != nil {
+		return w.failure
 	}
 
-	return os.Rename(f.Name(), path)
+	if rank(level) < rank(w.Level) {
+		return nil
+	}
+
+	dest := w.Out
+	if level == "warn" || level == "error" {
+		dest = w.Err
+	}
+
+	if dest == nil {
+		w.failure = errors.New("console destination unavailable")
+		return w.failure
+	}
+
+	run := ""
+	if w.Run != "" {
+		run = " run=" + Text(w.Run)
+	}
+
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	severity := fmt.Sprintf("%-5s", strings.ToUpper(level))
+	label := "[" + Text(origin) + "][" + Text(phase) + "]"
+
+	if w.Color {
+		timestamp = colorize(timestamp, "2")
+		if run != "" {
+			run = colorize(run, "2")
+		}
+
+		switch level {
+		case "debug":
+			severity = colorize(severity, "2")
+		case "info":
+			severity = colorize(severity, "32")
+		case "warn":
+			severity = colorize(severity, "33")
+		case "error":
+			severity = colorize(severity, "31")
+		}
+
+		switch origin {
+		case "GO":
+			label = colorize(label, "36")
+		case "AI":
+			label = colorize(label, "35")
+		}
+	}
+
+	line := fmt.Sprintf("%s %s %s%s %s\n", timestamp, severity, label, run, Text(Redact(message, w.Secrets...)))
+
+	n, err := io.WriteString(dest, line)
+	if err != nil || n != len(line) {
+		w.failure = errors.New("console output failed")
+	}
+
+	return w.failure
+}
+
+// colorize wraps an escaped formatter field in a trusted ANSI style and resets before subsequent text.
+func colorize(text, code string) string {
+	return "\x1b[" + code + "m" + text + "\x1b[0m"
+}
+
+// Error returns a latched console failure, including failures from concurrent instrumentation.
+func (w *Writer) Error() error {
+	if w == nil {
+		return nil
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.failure
+}
+
+// Diagnostic emits a Go operational warning, never an AI conclusion or incident record.
+func (w *Writer) Diagnostic(code, message string) error {
+	return w.Log("warn", "GO", code, message)
+}
+
+// rank maps validated log levels to filtering priorities; the zero value selects info.
+func rank(level string) int {
+	switch level {
+	case "debug":
+		return 0
+	case "warn":
+		return 2
+	case "error":
+		return 3
+	default:
+		return 1
+	}
 }

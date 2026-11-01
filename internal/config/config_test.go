@@ -1,7 +1,7 @@
 /*
 Purpose: Exercise configuration validation and repository-root dotenv precedence.
 Flow: Offline argument tables, synthetic environment values and filesystem fixtures
-check namespace filters, authentication, budgets, endpoint and model requirements.
+check namespace filters, authentication, logging/colour controls, configurable tool budgets, endpoint and model requirements.
 Removed runtime modes are rejected without contacting Kubernetes or a model.
 */
 package config
@@ -17,6 +17,27 @@ import (
 // testEnv supplies synthetic model settings so parser tests require no real credentials.
 func testEnv(key string) string {
 	return map[string]string{"AZURE_OPENAI_ENDPOINT": "https://fixture/openai/v1/", "AZURE_OPENAI_API_KEY": "fixture", "AZURE_AI_MODEL_DEPLOYMENT_NAME": "fixture"}[key]
+}
+
+// TestLoggingConfiguration checks capture/colour defaults, explicit disable and rejected logging options.
+func TestLoggingConfiguration(t *testing.T) {
+	base := []string{"--auth-mode=kubeconfig", "--observer-id=test"}
+
+	c, err := Parse(base, testEnv, io.Discard)
+	if err != nil || !c.AILog || c.AILogDir != "logs" || c.LogLevel != "info" || c.LogColor != "always" {
+		t.Fatal("incorrect logging defaults")
+	}
+
+	c, err = Parse(append(slices.Clone(base), "--ai-log=false", "--ai-log-dir=", "--log-level=debug", "--log-color=never"), testEnv, io.Discard)
+	if err != nil || c.AILog || c.LogLevel != "debug" || c.LogColor != "never" {
+		t.Fatal("explicit capture/colour disable rejected")
+	}
+
+	for _, flag := range []string{"--ai-log-dir=", "--log-level=json", "--log-color=auto", "--log-color=", "--output-file=old.json", "--report-file=old.json"} {
+		if _, err := Parse(append(slices.Clone(base), flag), testEnv, io.Discard); err == nil {
+			t.Fatalf("invalid/obsolete flag accepted: %s", flag)
+		}
+	}
 }
 
 // TestNamespaceSelection checks namespace normalization, flag precedence and conflicting-list
@@ -123,6 +144,10 @@ func TestConfiguration(t *testing.T) {
 		{"extra args", []string{"unexpected"}, true},
 		{"removed deterministic mode", []string{"--deterministic-only"}, true},
 		{"zero model cap", []string{"--model-calls-per-hour=0"}, true},
+		{"zero tool cap", []string{"--max-tool-calls=0"}, true},
+		{"negative tool cap", []string{"--max-tool-calls=-1"}, true},
+		{"invalid tool cap", []string{"--max-tool-calls=abc"}, true},
+		{"tool cap override", []string{"--max-tool-calls=16"}, false},
 		{"removed probe flag", []string{"--probe-file=/tmp/progress.json"}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -133,6 +158,10 @@ func TestConfiguration(t *testing.T) {
 
 			if test.name == "default watch" && c.Once {
 				t.Fatal("watch must be default")
+			}
+
+			if test.name == "default watch" && c.MaxToolCalls != 64 || test.name == "tool cap override" && c.MaxToolCalls != 16 {
+				t.Fatal("tool-call limit default or override ignored")
 			}
 
 			if test.name == "default watch" && c.IncidentNamespace != "kubescout" {
@@ -183,6 +212,7 @@ func TestModelEndpoint(t *testing.T) {
 			"AZURE_OPENAI_API_KEY":  "test-key",
 			"FOUNDRY_MODEL_NAME":    "test-model",
 		}
+
 		_, err := Parse([]string{"--auth-mode=in-cluster", "--observer-id=test"}, func(key string) string {
 			return env[key]
 		}, io.Discard)

@@ -9,9 +9,9 @@ package runner
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -96,7 +96,7 @@ func (a *fakeAI) Investigate(ctx context.Context, in incident.InvestigationConte
 
 // options supplies bounded runner settings with short polling intervals for offline tests.
 func options() config.Config {
-	return config.Config{ObserverID: "fixture", Model: "fixture", NamespaceWatch: []string{"apps"}, MaxObjects: 100, RunTimeout: time.Second,
+	return config.Config{ObserverID: "fixture", Model: "fixture", NamespaceWatch: []string{"apps"}, MaxObjects: 100, MaxToolCalls: config.DefaultMaxToolCalls, RunTimeout: time.Second,
 		BatchWindow: 5 * time.Millisecond, CheckInterval: 10 * time.Millisecond, Cooldown: 2 * time.Minute, RecoveryWindow: 2 * time.Minute, ReviewInterval: 15 * time.Minute, Policy: health.DefaultPolicy()}
 }
 
@@ -146,7 +146,7 @@ func TestStoredIncidentNamespaceScope(t *testing.T) {
 	}
 }
 
-// TestOnceNoActionAndFailuresNeverCreateIncidents checks empty execution output and exit codes for non-decisions.
+// TestOnceNoActionAndFailuresNeverCreateIncidents checks readable outcomes and zero stored incidents for non-decisions.
 func TestOnceNoActionAndFailuresNeverCreateIncidents(t *testing.T) {
 	for _, test := range []struct {
 		name              string
@@ -166,14 +166,17 @@ func TestOnceNoActionAndFailuresNeverCreateIncidents(t *testing.T) {
 			repo := &incident.Memory{}
 			ai := &fakeAI{fail: test.model}
 
-			r := Runner{Config: options(), Source: source, Analyzer: ai, Incidents: incident.Reconciler{Repository: repo, Observer: "fixture"}, Output: output.Writer{Out: &out, Err: &diag}}
+			r := Runner{Config: options(), Source: source, Analyzer: ai, Incidents: incident.Reconciler{Repository: repo, Observer: "fixture"}, Output: &output.Writer{Out: &out, Err: &diag}}
 			if code := r.Once(t.Context()); code != test.want {
 				t.Fatalf("code=%d", code)
 			}
 
-			var result output.Result
-			if bytes.Count(out.Bytes(), []byte("\n")) != 1 || json.Unmarshal(out.Bytes(), &result) != nil || len(result.Changes) != 0 || len(repo.Records) != 0 {
-				t.Fatal("no-action/failure created incident output")
+			if !strings.Contains(out.String()+diag.String(), "[GO][EXECUTION]") || strings.Contains(out.String(), "schema_version") || len(repo.Records) != 0 {
+				t.Fatal("missing summary or no-action/failure created an incident")
+			}
+
+			if test.want == 0 && !strings.Contains(out.String(), "[AI][DECISION] inv=1 Pod apps/bad no_action") {
+				t.Fatal("AI no-action provenance missing")
 			}
 		})
 	}
@@ -188,7 +191,7 @@ func TestModelDoesNotBlockFreshnessOrCauseRenewalReports(t *testing.T) {
 
 	var out bytes.Buffer
 
-	r := Runner{Config: options(), Source: source, Analyzer: ai, Incidents: incident.Reconciler{Repository: repo, Observer: "fixture"}, Output: output.Writer{Out: &out, Err: io.Discard}}
+	r := Runner{Config: options(), Source: source, Analyzer: ai, Incidents: incident.Reconciler{Repository: repo, Observer: "fixture"}, Output: &output.Writer{Out: &out, Err: io.Discard}}
 	ctx, cancel := context.WithCancel(t.Context())
 
 	done := make(chan int, 1)
@@ -210,8 +213,35 @@ func TestModelDoesNotBlockFreshnessOrCauseRenewalReports(t *testing.T) {
 		t.Fatalf("shutdown=%d", code)
 	}
 
-	if out.Len() != 0 || len(repo.Records) != 0 {
+	if strings.Contains(out.String(), "[GO][INCIDENT]") || len(repo.Records) != 0 {
 		t.Fatal("model/collection transitions created incidents")
+	}
+}
+
+// TestWatchActivityCoalesces verifies unchanged collection ticks emit one summary and never invent AI no-action.
+func TestWatchActivityCoalesces(t *testing.T) {
+	source := &fakeSource{objects: []health.Object{{Resource: health.Resource{Kind: "Node", Name: "ready", UID: "node"},
+		Conditions: []health.Condition{{Type: "Ready", Status: "True"}}}}}
+	ai := &fakeAI{}
+	cfg := options()
+	cfg.CheckInterval, cfg.BatchWindow = time.Millisecond, time.Millisecond
+
+	var out, diag bytes.Buffer
+
+	r := Runner{Config: cfg, Source: source, Analyzer: ai,
+		Incidents: incident.Reconciler{Repository: &incident.Memory{}, Observer: "fixture"},
+		Output:    &output.Writer{Out: &out, Err: &diag}}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+	defer cancel()
+
+	if r.Watch(ctx) != 0 || ai.calls.Load() != 0 {
+		t.Fatal("unchanged healthy evidence triggered AI or failed shutdown")
+	}
+
+	if strings.Count(out.String(), "[GO][CHECK]") != 1 || strings.Count(out.String(), "Watching:") != 1 ||
+		strings.Contains(out.String(), "[AI]") || diag.Len() != 0 {
+		t.Fatalf("unchanged ticks flooded logs or invented a model opinion: %s %s", &out, &diag)
 	}
 }
 

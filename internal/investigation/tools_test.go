@@ -1,13 +1,14 @@
 /*
-Purpose: Test investigation tool scope, projection and invocation limits.
+Purpose: Test investigation tool scope, projection and shared invocation limits.
 Flow: Offline Kubernetes HTTP fixtures check handles before API access,
-operation-named citations, private-field exclusion and node event pagination; malformed,
-out-of-scope or over-budget reads must not return accepted tool evidence.
+operation-named citations, private-field exclusion, the 64-call boundary and node
+event pagination; typed budget failures must not return accepted tool evidence.
 */
 package investigation
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,7 @@ import (
 )
 
 // TestToolScopeRedactionAndInvocationBudget checks pre-read argument validation, private-field
-// exclusion, unique inspection citations and the eight-call limit against a local Kubernetes fixture.
+// exclusion, unique inspection citations and the shared 64-call limit against a local Kubernetes fixture.
 func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 	calls := 0
 
@@ -39,12 +40,12 @@ func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := dynamic.NewForConfig(&rest.Config{Host: server.URL})
+	client, err := dynamic.NewForConfig(&rest.Config{Host: server.URL, QPS: 1000, Burst: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s := &Session{Client: client, Timeout: time.Second, Citations: map[string]bool{}, Investigation: incident.InvestigationContext{Identities: map[string]health.Resource{"allowed": {Kind: "Pod", Namespace: "apps", Name: "test", UID: "private-uid"}}}}
+	s := &Session{Client: client, MaxCalls: config.DefaultMaxToolCalls, Timeout: time.Second, Citations: map[string]bool{}, Investigation: incident.InvestigationContext{Identities: map[string]health.Resource{"allowed": {Kind: "Pod", Namespace: "apps", Name: "test", UID: "private-uid"}}}}
 
 	tool := Tool{Session: s}
 	for _, args := range []string{`{"resource_ref":"other"}`, `{"resource_ref":"allowed","namespace":"kube-system"}`, `{"resource_ref":"allowed"}{}`} {
@@ -57,13 +58,14 @@ func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 		t.Fatal("invalid arguments reached the API or registered evidence")
 	}
 
-	for i := 0; i < 8; i++ {
+	for i := 0; i < s.MaxCalls; i++ {
 		result, err := tool.Call(t.Context(), `{"resource_ref":"allowed"}`)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		expected := fmt.Sprintf("inspect-resource-%d", i+1)
+
 		evidence, ok := result.(map[string]any)
 		if !ok || evidence["evidence_id"] != expected || !s.Citations[expected] || len(s.Citations) != i+1 {
 			t.Fatal("inspection citation is not descriptive, unique and registered")
@@ -75,8 +77,73 @@ func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 		}
 	}
 
-	if _, err := tool.Call(t.Context(), `{"resource_ref":"allowed"}`); err == nil || calls != 8 {
-		t.Fatal("ninth tool invocation allowed")
+	_, err = tool.Call(t.Context(), `{"resource_ref":"allowed"}`)
+
+	var limit *LimitError
+
+	if !errors.As(err, &limit) || limit.Kind != "local_tool_call_limit" ||
+		limit.Observed != 65 || limit.Limit != 64 || calls != 64 || s.Calls != 64 {
+		t.Fatalf("65th tool invocation allowed or incorrectly diagnosed: %v", err)
+	}
+}
+
+// TestToolByteAndArgumentLimitsRemainIndependent checks unchanged budgets below the 64-call cap.
+// Rejected offline reads register no citations and expose only numeric limit details.
+func TestToolByteAndArgumentLimitsRemainIndependent(t *testing.T) {
+	for _, test := range []struct {
+		name, kind string
+		large      bool
+		bytes      int
+		args       string
+		limit      int
+		reads      int
+	}{
+		{name: "arguments", kind: "local_tool_arguments_limit", args: strings.Repeat("x", 1025), limit: 1024},
+		{name: "result", kind: "local_tool_result_bytes", large: true, args: `{"resource_ref":"allowed"}`, limit: 8192, reads: 1},
+		{name: "cumulative output", kind: "local_cumulative_tool_bytes", bytes: 32768, args: `{"resource_ref":"allowed"}`, limit: 32768, reads: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reads := 0
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reads++
+				conditions := []any{}
+
+				if test.large {
+					for i := 0; i < 100; i++ {
+						conditions = append(conditions, map[string]any{"type": "Ready", "status": "False", "message": strings.Repeat("x", 100)})
+					}
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{
+					"apiVersion": "v1", "kind": "Pod",
+					"metadata": map[string]any{"name": "test", "namespace": "apps", "uid": "private-uid"},
+					"status":   map[string]any{"phase": "Running", "conditions": conditions},
+				})
+			}))
+			defer server.Close()
+
+			client, err := dynamic.NewForConfig(&rest.Config{Host: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			s := &Session{
+				Client: client, MaxCalls: config.DefaultMaxToolCalls, Timeout: time.Second, Bytes: test.bytes, Citations: map[string]bool{},
+				Investigation: incident.InvestigationContext{Identities: map[string]health.Resource{
+					"allowed": {Kind: "Pod", Namespace: "apps", Name: "test", UID: "private-uid"},
+				}},
+			}
+			result, err := (Tool{Session: s}).Call(t.Context(), test.args)
+
+			var limit *LimitError
+
+			if !errors.As(err, &limit) || limit.Kind != test.kind || limit.Limit != test.limit || limit.Observed <= limit.Limit ||
+				result != nil || reads != test.reads || s.Bytes != test.bytes || len(s.Citations) != 0 {
+				t.Fatalf("independent tool budget changed or returned evidence: %v", err)
+			}
+		})
 	}
 }
 
@@ -85,6 +152,7 @@ func TestToolScopeRedactionAndInvocationBudget(t *testing.T) {
 func TestNodeEventsRespectNamespaceSelection(t *testing.T) {
 	for _, tt := range []struct {
 		name           string
+		limitKind      string
 		scope          config.Config
 		mode           string
 		want, requests int
@@ -96,8 +164,8 @@ func TestNodeEventsRespectNamespaceSelection(t *testing.T) {
 		{name: "wrong response namespace", scope: config.Config{NamespaceWatch: []string{"apps"}}, mode: "wrong namespace", invalid: true},
 		{name: "wrong target", mode: "wrong target", invalid: true},
 		{name: "wrong event type", mode: "wrong type", invalid: true},
-		{name: "too many events", mode: "event limit", invalid: true},
-		{name: "bounded ignored pages", scope: config.Config{NamespaceIgnore: []string{"system"}}, mode: "page limit", invalid: true},
+		{name: "too many events", mode: "event limit", invalid: true, limitKind: "local_tool_event_result_limit"},
+		{name: "bounded ignored pages", scope: config.Config{NamespaceIgnore: []string{"system"}}, mode: "page limit", invalid: true, limitKind: "local_tool_event_request_limit"},
 		{name: "repeated token", scope: config.Config{NamespaceIgnore: []string{"system"}}, mode: "repeated token", invalid: true},
 		{name: "changing version", mode: "changing version", invalid: true},
 	} {
@@ -183,7 +251,7 @@ func TestNodeEventsRespectNamespaceSelection(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			s := &Session{Client: client, Scope: tt.scope, Timeout: time.Second, Citations: map[string]bool{},
+			s := &Session{Client: client, MaxCalls: config.DefaultMaxToolCalls, Scope: tt.scope, Timeout: time.Second, Citations: map[string]bool{},
 				Investigation: incident.InvestigationContext{Identities: map[string]health.Resource{"node": {Kind: "Node", Name: "node", UID: "node-id"}}}}
 
 			result, err := (Tool{Session: s, RelatedEvents: true}).Call(t.Context(), `{"resource_ref":"node"}`)
@@ -194,6 +262,12 @@ func TestNodeEventsRespectNamespaceSelection(t *testing.T) {
 			if tt.invalid {
 				if calls > 20 || result != nil || len(s.Citations) != 0 {
 					t.Fatal("tool exceeded HTTP budget or returned accepted partial evidence")
+				}
+
+				var limit *LimitError
+
+				if tt.limitKind != "" && (!errors.As(err, &limit) || limit.Kind != tt.limitKind || limit.Observed != 21 || limit.Limit != 20) {
+					t.Fatalf("event limit incorrectly diagnosed: %v", err)
 				}
 
 				return
@@ -235,7 +309,7 @@ func TestToolsRejectIgnoredOrUnwatchedHandlesBeforeAPIRead(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		s := &Session{Client: client, Scope: scope, Timeout: time.Second,
+		s := &Session{Client: client, MaxCalls: config.DefaultMaxToolCalls, Scope: scope, Timeout: time.Second,
 			Investigation: incident.InvestigationContext{Identities: map[string]health.Resource{"pod": {Kind: "Pod", Namespace: "apps", Name: "pod", UID: "uid"}}}}
 		for _, related := range []bool{false, true} {
 			if _, err := (Tool{Session: s, RelatedEvents: related}).Call(t.Context(), `{"resource_ref":"pod"}`); err == nil {

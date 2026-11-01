@@ -1,7 +1,7 @@
 /*
 Purpose: Check agent CLI output, configuration failures and local Make contracts.
 Flow: Offline HTTP fixtures, injected clients, command stubs and dry runs verify
-no-action and incomplete execution envelopes, namespace scope, current-context
+readable execution summaries, colour controls, namespace scope, current-context
 selection, deployment preflights and lint command failures without live services.
 Incident setup installs only the namespace and CRD, without deploying or calling AI.
 */
@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/benc-uk/kubescout/internal/config"
-	"github.com/benc-uk/kubescout/internal/output"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -39,7 +38,7 @@ func cliEnvironment(t *testing.T) {
 }
 
 // TestCLIHealthyScopeMakesNoModelOrIncidentWrites uses a local API fixture to check scoped reads
-// and one completed no-action envelope without model calls or incident writes.
+// and readable completion without model calls or incident writes.
 func TestCLIHealthyScopeMakesNoModelOrIncidentWrites(t *testing.T) {
 	cliEnvironment(t)
 
@@ -73,15 +72,45 @@ func TestCLIHealthyScopeMakesNoModelOrIncidentWrites(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 
-	code := run(t.Context(), []string{"--once", "--auth-mode=kubeconfig", "--kubeconfig=" + path, "--namespace-watch=apps", "--observer-id=fixture"}, &out, &errOut)
+	code := run(t.Context(), []string{"--once", "--ai-log-dir=" + t.TempDir(), "--auth-mode=kubeconfig", "--kubeconfig=" + path, "--namespace-watch=apps", "--observer-id=fixture"}, &out, &errOut)
 
-	var result output.Result
-	if code != 0 || bytes.Count(out.Bytes(), []byte("\n")) != 1 || json.Unmarshal(out.Bytes(), &result) != nil || len(result.Changes) != 0 || result.Status != "completed" {
+	if code != 0 || !strings.Contains(out.String(), "Assessment completed: 0 investigations, 0 persisted incident changes") ||
+		strings.Contains(out.String(), "[AI]") || strings.Contains(out.String(), "schema_version") {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, &out, &errOut)
 	}
 
 	if strings.Contains(errOut.String(), "would create") {
 		t.Fatal("healthy baseline published an incident")
+	}
+}
+
+// TestCLIConsoleColour checks default/explicit ANSI and plain mode on redirected streams without live clients.
+func TestCLIConsoleColour(t *testing.T) {
+	cliEnvironment(t)
+
+	for _, mode := range []string{"default", "always", "never"} {
+		t.Run(mode, func(t *testing.T) {
+			args := []string{"--auth-mode=in-cluster", "--observer-id=test", "--ai-log=false"}
+			if mode != "default" {
+				args = append(args, "--log-color="+mode)
+			}
+
+			var out, diag bytes.Buffer
+
+			code := runWithClient(t.Context(), args, &out, &diag,
+				func(config.Config) (dynamic.Interface, string, error) {
+					return nil, "fixture", errors.New("fixture bootstrap failure")
+				})
+			if code != 1 || !strings.Contains(diag.String(), "[GO][BOOT]") {
+				t.Fatal("unexpected fixture execution")
+			}
+
+			wantColor := mode != "never"
+			if strings.Contains(out.String(), "\x1b[") != wantColor ||
+				strings.Contains(diag.String(), "\x1b[") != wantColor {
+				t.Fatalf("mode %s did not control both console streams", mode)
+			}
+		})
 	}
 }
 
@@ -120,14 +149,13 @@ func TestCLIConfigurationAndBootstrapFailures(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 
-	code := runWithClient(t.Context(), []string{"--once", "--auth-mode=in-cluster", "--namespace-watch=apps", "--observer-id=fixture"}, &out, &errOut,
+	code := runWithClient(t.Context(), []string{"--once", "--ai-log=false", "--auth-mode=in-cluster", "--namespace-watch=apps", "--observer-id=fixture"}, &out, &errOut,
 		func(config.Config) (dynamic.Interface, string, error) {
 			return nil, "fixture", errors.New("credentials unavailable")
 		})
 
-	var result output.Result
-	if code != 1 || json.Unmarshal(out.Bytes(), &result) != nil || result.Status != "incomplete" || len(result.Changes) != 0 {
-		t.Fatal("bootstrap failure violated once envelope")
+	if code != 1 || !strings.Contains(errOut.String(), "[GO][BOOT]") || !strings.Contains(errOut.String(), "execution incomplete") {
+		t.Fatal("bootstrap failure missing readable diagnosis")
 	}
 
 	t.Setenv("AZURE_OPENAI_API_KEY", "")

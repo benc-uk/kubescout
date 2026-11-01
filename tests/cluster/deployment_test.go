@@ -1,7 +1,7 @@
 //go:build integration
 
 /*
-Purpose: Validate bounded in-cluster AI execution and its stored incident output.
+Purpose: Validate bounded in-cluster AI execution and its authoritative stored Incidents.
 Flow: Integration tests require container and model authorization, explicit context,
 an image and a preinstalled CRD; they accept AI no-action as successful completion.
 Fixtures create a model Secret, workloads and RBAC in an owned namespace, with
@@ -12,16 +12,15 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/benc-uk/kubescout/internal/config"
 	"github.com/benc-uk/kubescout/internal/incident"
-	"github.com/benc-uk/kubescout/internal/output"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,8 +28,8 @@ import (
 )
 
 // TestLiveDeployment requires container and model authorization to run a bounded in-cluster agent.
-// It creates an owned model Secret, RBAC and workloads, then compares accepted output to stored
-// Incidents; successful AI no-action is valid and fixture cleanup removes owned resources.
+// It creates an owned model Secret, RBAC and workloads, then checks readable completion and stored
+// AI provenance; successful AI no-action is valid and fixture cleanup removes owned resources.
 func TestLiveDeployment(t *testing.T) {
 	if os.Getenv("KUBESCOUT_LIVE_CONTAINER") != "yes" {
 		t.Skip("requires explicit container validation approval")
@@ -79,7 +78,8 @@ func TestLiveDeployment(t *testing.T) {
 	spec.RestartPolicy = corev1.RestartPolicyNever
 	spec.Containers[0].Image = image
 	spec.Containers[0].Args = []string{"--once", "--auth-mode=in-cluster", "--namespace-watch=" + f.namespace, "--incident-namespace=" + f.namespace,
-		"--observer-id=" + f.namespace, "--startup-grace=0s", "--model-calls-per-hour=6", "--request-timeout=30s", "--run-timeout=120s"}
+		"--observer-id=" + f.namespace, "--startup-grace=0s", "--model-calls-per-hour=6", "--request-timeout=30s", "--run-timeout=120s",
+		"--ai-log-dir=/var/log/kubescout/ai"}
 
 	pod, err := f.client.CoreV1().Pods(f.namespace).Create(t.Context(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "agent-validation"}, Spec: spec}, metav1.CreateOptions{})
 	if err != nil {
@@ -104,44 +104,25 @@ func TestLiveDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var result output.Result
-
-	found := false
-
-	for _, line := range bytes.Split(logs, []byte("\n")) {
-		var value output.Result
-		if json.Unmarshal(line, &value) == nil && value.Type == "execution" {
-			result = value
-			found = true
-		}
-	}
-
-	if !found || result.Status != "completed" {
+	if !strings.Contains(string(logs), "Assessment completed") {
 		t.Fatal("container did not produce a completed AI execution")
 	}
 
-	for _, change := range result.Changes {
-		obj, err := store.Get(t.Context(), change.Name, metav1.GetOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
+	repository := incident.Kubernetes{Client: client, Namespace: f.namespace, Observer: f.namespace, Limit: c.MaxObjects, Timeout: c.RequestTimeout}
 
-		actual, _ := json.Marshal(obj.Object["spec"])
-		expected, _ := json.Marshal(change.Incident)
+	records, err := repository.ListOpen(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 
-		var a, b any
-		json.Unmarshal(actual, &a)
-		json.Unmarshal(expected, &b)
-
-		aa, _ := json.Marshal(a)
-
-		bb, _ := json.Marshal(b)
-		if !bytes.Equal(aa, bb) {
-			t.Fatal("stored AI conclusion differs from output")
+	for _, record := range records {
+		if record.Value.Identity.Observer != f.namespace || record.Value.Analysis.Model != c.Model ||
+			record.Value.Analysis.PromptVersion != incident.PromptVersion || record.Value.Analysis.Title == "" {
+			t.Fatal("stored incident lacks validated AI provenance")
 		}
 	}
 
-	t.Logf("bounded container AI validation: %d accepted incident changes; no-action is valid", len(result.Changes))
+	t.Logf("bounded container AI validation: %d stored AI incidents; no-action is valid", len(records))
 }
 
 // installRBAC creates live fixture identities and permissions, narrowing workload access to

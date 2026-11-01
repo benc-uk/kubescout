@@ -1,13 +1,15 @@
 /*
 Purpose: Bootstrap the KubeScout CLI and coordinate process shutdown and exit codes.
 Flow: Load validated configuration, select Kubernetes access and wire collection,
-AI investigation, incident reconciliation and output into once or watch execution.
+AI investigation, CRD reconciliation, colour-configurable logs and optional rotating AI
+transcripts into once or watch execution.
 Both authentication modes persist Incidents; there is no runtime simulation path.
 */
 package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,18 +45,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer, newClient func(config.Config) (dynamic.Interface, string, error)) int {
 	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintln(stderr, "ERROR: cannot determine working directory")
+		fmt.Fprintln(stderr, "ERROR [GO][BOOT] cannot determine working directory")
 		return 2
 	}
 
 	exe, err := os.Executable()
 	if err != nil {
-		fmt.Fprintln(stderr, "ERROR: cannot determine executable location")
+		fmt.Fprintln(stderr, "ERROR [GO][BOOT] cannot determine executable location")
 		return 2
 	}
 
 	if err := config.LoadDotEnv(cwd, exe); err != nil {
-		fmt.Fprintln(stderr, "ERROR:", err)
+		fmt.Fprintln(stderr, "ERROR [GO][CONFIG]", err)
 		return 2
 	}
 
@@ -64,31 +66,38 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 
 	if err != nil {
-		fmt.Fprintln(stderr, "ERROR:", err)
+		fmt.Fprintln(stderr, "ERROR [GO][CONFIG]", err)
 		return 2
 	}
 
-	sink := output.Writer{Out: stdout, Err: stderr, File: c.OutputFile}
+	sink := &output.Writer{Out: stdout, Err: stderr, Level: c.LogLevel, Color: c.LogColor == "always", Run: rand.Text()[:8], Secrets: []string{c.APIKey}}
+
+	var transcript *output.Transcript
+
+	if c.AILog {
+		transcript = output.NewTranscript(c.AILogDir, sink)
+		_ = sink.Log("info", "GO", "TRANSCRIPT", "AI capture enabled: "+transcript.Path()+" (10 x 10 MiB, ephemeral unless mounted persistently)")
+
+		transcript.Record("", "GO", "RUN.START", "New process; any preceding unfinished investigation may have incomplete capture.")
+		defer transcript.Record("", "GO", "RUN.END", "Process execution ended.")
+	} else {
+		_ = sink.Log("info", "GO", "TRANSCRIPT", "AI file capture explicitly disabled")
+	}
 
 	client, cluster, err := newClient(c)
 	if err != nil {
-		out := output.Result{SchemaVersion: "3.0", Type: "execution", Status: "incomplete", Changes: []incident.Change{}, Errors: []string{err.Error()}}
-		if c.Once {
-			if err := sink.WriteResult(out); err != nil {
-				fmt.Fprintln(stderr, "ERROR:", err)
-			}
-		}
-
-		fmt.Fprintln(stderr, "ERROR: Kubernetes client initialisation failed")
+		_ = sink.Log("error", "GO", "BOOT", "Kubernetes client initialisation failed; execution incomplete")
 
 		return 1
 	}
 
-	r := runner.Runner{Config: c, Source: kube.NewSource(client, c), Analyzer: &analysis.Analyzer{Config: c, Kubernetes: client}, Output: sink,
-		Incidents: newIncidentReconciler(c, client)}
-	fmt.Fprintf(stderr, "INFO: AI investigation for %s, %s (once=%t)\n", cluster, c.NamespaceScope(), c.Once)
+	source := kube.NewSource(client, c)
+	source.Log = sink
+	r := runner.Runner{Config: c, Source: source, Analyzer: &analysis.Analyzer{Config: c, Kubernetes: client, Log: sink, Transcript: transcript}, Output: sink,
+		Transcript: transcript, Incidents: newIncidentReconciler(c, client)}
+	_ = sink.Log("info", "GO", "BOOT", fmt.Sprintf("AI investigation for %s, %s (once=%t)", cluster, c.NamespaceScope(), c.Once))
 
-	fmt.Fprintf(stderr, "INFO: persisting Incidents in namespace %s\n", c.IncidentNamespace)
+	_ = sink.Log("info", "GO", "BOOT", "Accepted AI decisions persist to Incident CRDs in namespace "+c.IncidentNamespace)
 
 	code := 0
 	if c.Once {
@@ -97,8 +106,13 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 		code = r.Watch(ctx)
 	}
 
+	if sink.Error() != nil {
+		fmt.Fprintln(stderr, "ERROR [GO][CONSOLE] console output failed")
+		return 1
+	}
+
 	if code != 0 {
-		fmt.Fprintln(stderr, "ERROR: execution or report output incomplete")
+		_ = sink.Log("error", "GO", "SHUTDOWN", "Execution incomplete")
 	}
 
 	return code

@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 || -z "$1" || -z "$2" ]]; then
-  printf 'Usage: %s CONTEXT NAMESPACE\nUse a development cluster and a namespace watched by the observer.\n' "$0" >&2
+if [[ $# -ne 1 || -z "$1" ]]; then
+  printf 'Usage: %s NAMESPACE\nUses the current kubeconfig context. Use a development cluster and a namespace watched by the observer.\n' "$0" >&2
   exit 2
 fi
 
-CTX=$1
-NS=$2
+NS=$1
 TEST="health-demo-$(date +%s)-$RANDOM"
 LABEL=kubescout-demo=true
 if [[ ${#NS} -gt 63 || ! "$NS" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
@@ -40,18 +39,18 @@ for choice in "${choices[@]}"; do
   esac
 done
 selection=" ${choices[*]} "
-printf 'Context: %s\nNamespace: %s\n' "$CTX" "$NS"
+printf 'Namespace: %s\n' "$NS"
 if [[ "$selection" == *" 6 "* ]]; then
   if ((${#choices[@]} != 1)); then
     printf 'Error: choose removal on its own, without injection options.\n' >&2
     exit 2
   fi
-  if ! read -r -p "Remove all health-demo failure fixtures in $CTX/$NS, including older unlabelled fixtures? [y/N] " confirm ||
+  if ! read -r -p "Remove all health-demo failure fixtures in $NS, including older unlabelled fixtures? [y/N] " confirm ||
     [[ "$confirm" != y && "$confirm" != Y ]]; then
     printf 'Cancelled.\n'
     exit 0
   fi
-  fixtures=$(kubectl --context "$CTX" -n "$NS" get pods,jobs \
+  fixtures=$(kubectl -n "$NS" get pods,jobs \
     -o 'jsonpath={range .items[*]}{.kind}{"|"}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.metadata.labels.kubescout-demo}{"\n"}{end}')
   removed=0
   while IFS='|' read -r kind name uid owner; do
@@ -72,10 +71,10 @@ if [[ "$selection" == *" 6 "* ]]; then
       printf 'Error: missing or invalid UID for %s/%s; refusing deletion.\n' "$resource" "$name" >&2
       exit 1
     fi
-    kubectl --context "$CTX" -n "$NS" delete --raw="$path" -f - >/dev/null <<EOF
+    kubectl -n "$NS" delete --raw="$path" -f - >/dev/null <<EOF
 {"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"$uid"},"propagationPolicy":"Foreground"}
 EOF
-    kubectl --context "$CTX" -n "$NS" wait --for=delete "$resource/$name" --timeout=60s
+    kubectl -n "$NS" wait --for=delete "$resource/$name" --timeout=60s
     removed=$((removed + 1))
   done <<< "$fixtures"
   printf 'Removed %s injected failure fixture(s).\n' "$removed"
@@ -89,8 +88,8 @@ printf 'Fixture prefix: %s\n' "$TEST"
 
 # Image pull failure.
 if [[ "$selection" == *" 1 "* ]]; then
-  printf 'Cleanup when finished: kubectl --context %q -n %q delete pod %q\n' "$CTX" "$NS" "$TEST-image"
-  kubectl --context "$CTX" -n "$NS" run "$TEST-image" \
+  printf 'Cleanup when finished: kubectl -n %q delete pod %q\n' "$NS" "$TEST-image"
+  kubectl -n "$NS" run "$TEST-image" \
     --labels="$LABEL" \
     --image=busybox:deliberately-nonexistent-health-demo \
     --restart=Never
@@ -98,8 +97,8 @@ fi
 
 # Crash loop.
 if [[ "$selection" == *" 2 "* ]]; then
-  printf 'Cleanup when finished: kubectl --context %q -n %q delete pod %q\n' "$CTX" "$NS" "$TEST-crash"
-  kubectl --context "$CTX" -n "$NS" run "$TEST-crash" \
+  printf 'Cleanup when finished: kubectl -n %q delete pod %q\n' "$NS" "$TEST-crash"
+  kubectl -n "$NS" run "$TEST-crash" \
     --labels="$LABEL" \
     --image=busybox:1.37.0 \
     --restart=Always \
@@ -108,8 +107,8 @@ fi
 
 # Unschedulable pod.
 if [[ "$selection" == *" 3 "* ]]; then
-  printf 'Cleanup when finished: kubectl --context %q -n %q delete pod %q\n' "$CTX" "$NS" "$TEST-pending"
-  kubectl --context "$CTX" -n "$NS" run "$TEST-pending" \
+  printf 'Cleanup when finished: kubectl -n %q delete pod %q\n' "$NS" "$TEST-pending"
+  kubectl -n "$NS" run "$TEST-pending" \
     --labels="$LABEL" \
     --image=busybox:1.37.0 \
     --restart=Never \
@@ -120,8 +119,8 @@ fi
 
 # Failed Job.
 if [[ "$selection" == *" 4 "* ]]; then
-  printf 'Cleanup when finished: kubectl --context %q -n %q delete job %q\n' "$CTX" "$NS" "$TEST-job"
-  kubectl --context "$CTX" -n "$NS" create -f - <<EOF
+  printf 'Cleanup when finished: kubectl -n %q delete job %q\n' "$NS" "$TEST-job"
+  kubectl -n "$NS" create -f - <<EOF
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -143,8 +142,8 @@ fi
 
 # OOM kill retained in the terminated state rather than hidden by a quick restart.
 if [[ "$selection" == *" 7 "* ]]; then
-  printf 'Cleanup when finished: kubectl --context %q -n %q delete pod %q\n' "$CTX" "$NS" "$TEST-oom"
-  kubectl --context "$CTX" -n "$NS" create -f - <<EOF
+  printf 'Cleanup when finished: kubectl -n %q delete pod %q\n' "$NS" "$TEST-oom"
+  kubectl -n "$NS" create -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -178,7 +177,7 @@ spec:
           drop: ["ALL"]
 EOF
   printf 'Allocates 128 MiB against a 64 MiB container limit; expected termination reason: OOMKilled.\n'
-  printf 'Inspect termination: kubectl --context %q -n %q get pod %q -o yaml\n' "$CTX" "$NS" "$TEST-oom"
+  printf 'Inspect termination: kubectl -n %q get pod %q -o yaml\n' "$NS" "$TEST-oom"
 fi
 
 printf '\nSelected failures created.\n'

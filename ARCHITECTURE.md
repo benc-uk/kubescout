@@ -9,7 +9,7 @@ Kubernetes change
     -> deterministic evidence
     -> scheduled AI investigation
     -> validated decision
-    -> Incident
+    -> persisted Kubernetes Incident CRD
     -> dashboard
 ```
 
@@ -18,6 +18,9 @@ to apply. AI decides whether there is an incident and what it means.**
 
 Here, deterministic means ordinary Go logic, not a model call. There is no
 deterministic-only incident publisher.
+**Kubernetes Incident CRDs are the incident record.** Stdout is readable agent
+activity, not an incident capture API. AI transcript files are diagnostic
+exchanges, not incident storage; the dashboard reads CRDs only.
 
 ## 1. Getting Kubernetes changes into the agent
 
@@ -97,7 +100,7 @@ the mapping to Kubernetes identity private and validates tool requests against i
 | **12. Validate the response** | Parses strict JSON and checks the proposed actions. | [`analysis.Validate`](internal/analysis/analysis.go), [`incident.Validate`](internal/incident/types.go) | Rejects malformed output, unknown citations/handles, duplicate incidents, invalid values and resolution without recovery eligibility. This validates the contract, not the truth of the diagnosis. | **Deterministic** |
 | **13. Reject stale decisions** | Compares current observations with the investigation's evidence fingerprint and inspected resource versions. | [`Runner.current` and `toolsCurrent`](internal/runner/runner.go) | If relevant evidence changed or collection became incomplete while AI was working, discards the result rather than publishing stale conclusions. | **Deterministic** |
 | **14. Reconcile and save** | Converts accepted actions into incident changes, using stable identity and concurrency preconditions. | [`Reconciler.Apply`, `next` and `Kubernetes.Save`](internal/incident/store.go) | Suppresses wording-only/nonmaterial updates; advances revision for accepted changes; preserves identity across recurrence. Both authentication modes create/patch Incidents; there is no runtime simulation mode. | **Deterministic execution of an AI decision** |
-| **15. Publish and display** | Agent emits accepted material changes on stdout. Separately, the dashboard reads stored Incidents through its own server. | [`Writer.WriteChange`](internal/output/writer.go), [`Reader.List`](internal/dashboard/incidents.go), [browser `refresh`](internal/dashboard/web/app.js) | Diagnostics/no-action go to stderr. Dashboard polls approximately every 15 seconds while visible; it does not receive the agent's stream or call AI. | **Deterministic** |
+| **15. Explain and display persisted results** | Agent logs readable activity, identifying AI conclusions separately from Go validation and confirmed CRD writes. The dashboard reads stored Incidents. | [`Writer.Log`](internal/output/writer.go), [`Runner.persisted`](internal/runner/runner.go), [`Reader.List`](internal/dashboard/incidents.go), [browser `refresh`](internal/dashboard/web/app.js) | Normal activity goes to stdout; warnings/errors go to stderr. Neither records incidents. Dashboard polls approximately every 15 seconds while visible; it reads CRDs, not logs, and does not call AI. | **Deterministic rendering with explicitly labelled AI-authored content** |
 
 Incident identity combines the observer, anchor resource identity and problem
 family. The reconciler rereads ambiguous writes and uses UID/resourceVersion
@@ -140,8 +143,9 @@ or prevent a lifecycle change.
 - **Once mode:** [`Runner.Once`](internal/runner/runner.go) performs a bounded
   collection and assessment instead of running the informer loop. One snapshot
   cannot establish continuous recovery, so it does not automatically resolve an
-  existing incident. It emits one execution envelope, including an empty changes
-  array when no changes are accepted.
+  existing incident. It logs progress and a readable completed/incomplete
+  summary. Accepted changes are stored in CRDs; zero changes is a valid result,
+  not a synthetic healthy incident.
 - **Human dismissal:** [`Reader.SetDismissed`](internal/dashboard/incidents.go)
   writes revision-scoped triage status, not the AI lifecycle. The agent continues
   tracking the incident. A material AI change or recurrence advances the lifecycle
@@ -150,5 +154,31 @@ or prevent a lifecycle change.
   Incidents, including those persisted by local agent runs. Test-only
   fixture repositories are not visible in the dashboard.
 
+## 7. Observing the agent and model exchanges
+
+[Console events](internal/output/writer.go) label origin (`GO` or `AI`), phase,
+level and run/investigation correlation. Collection, deterministic checks,
+scheduling, HTTP dispatch/errors, local tool execution, validation and persistence
+are Go activity. Tool selection and incident/no-action conclusions come from AI.
+An AI conclusion is not a stored incident until reconciliation succeeds.
+
+The analyzer captures [each bounded HTTP exchange](internal/analysis/analysis.go),
+not just each investigation. [Transcript projection](internal/analysis/transcript.go)
+retains model-visible input, instructions, tool-round history and returned model
+content without authentication metadata or raw provider error bodies.
+[Local tools](internal/investigation/tools.go) record normalized authorized
+arguments and approved redacted results. Runner dispositions distinguish
+accepted, stale, failed and nonmaterial outcomes.
+
+[File rotation](internal/output/transcript.go) retains at most ten 10 MiB files.
+Capture defaults on; `--ai-log=false` disables it. Local files default to
+the gitignored `logs/` directory; the Deployment mounts ephemeral storage at `/var/log/kubescout`
+and selects its `ai` subdirectory. Capture failure warns and retries without
+changing model budgets, request counts, scheduling or incident decisions.
+Files are diagnostic history, never replayed model memory, and are lost on Pod
+replacement unless an operator supplies persistent storage later.
+See [operator logging and capture](README.md#operator-logs-and-ai-transcripts)
+for flags, examples, retention and retrieval.
+
 **Bottom line: rules detect evidence; AI interprets it; deterministic safeguards
-control publication.**
+control CRD persistence. Logs explain those steps but do not record incidents.**

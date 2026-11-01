@@ -5,19 +5,18 @@ Purpose: Exercise live collector failures, recovery, freshness, load and object 
 Flow: Opt-in integration tests use an explicit context and owned workload fixtures
 with ownership-checked namespace cleanup; collector checks make no model calls.
 A separately authorized model test runs bounded collection and AI with a fixture
-incident repository; it accepts no-action and never writes live Incidents.
+incident repository; readable completion and stored fixtures, not stdout JSON,
+verify the result. It accepts no-action and never writes live Incidents.
 */
 package cluster
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -395,22 +394,21 @@ func TestLiveModel(t *testing.T) {
 	repo := &incident.Memory{}
 
 	r := runner.Runner{Config: c, Source: kube.NewSource(client, c), Analyzer: &analysis.Analyzer{Config: c, Kubernetes: client},
-		Incidents: incident.Reconciler{Repository: repo, Observer: c.ObserverID, Model: c.Model}, Output: output.Writer{Out: &out, Err: &diag}}
+		Incidents: incident.Reconciler{Repository: repo, Observer: c.ObserverID, Model: c.Model}, Output: &output.Writer{Out: &out, Err: &diag}}
 	if r.Once(ctx) != 0 {
 		t.Fatalf("bounded live AI run failed: %s", &diag)
 	}
 
-	var result output.Result
-	if json.Unmarshal(out.Bytes(), &result) != nil || result.Status != "completed" {
-		t.Fatal("invalid AI execution envelope")
+	if !strings.Contains(out.String(), "Assessment completed") {
+		t.Fatal("missing readable completion")
 	}
 
-	for _, change := range result.Changes {
-		record, err := repo.Get(ctx, change.Name)
-		if err != nil || record == nil || !reflect.DeepEqual(record.Value, change.Incident) {
-			t.Fatal("accepted AI change differs from the fixture incident")
+	for _, record := range repo.Records {
+		if record.Value.Identity.Observer != c.ObserverID || record.Value.Analysis.Model != c.Model ||
+			record.Value.Analysis.PromptVersion != incident.PromptVersion || record.Value.Analysis.Title == "" {
+			t.Fatal("fixture incident lacks validated AI provenance")
 		}
 	}
 
-	t.Logf("validated AI result with %d fixture incident changes; no-action is valid; at most six real model HTTP requests; no live Incident writes", len(result.Changes))
+	t.Logf("validated AI result with %d stored fixture incidents; no-action is valid; at most six real model HTTP requests; no live Incident writes", len(repo.Records))
 }

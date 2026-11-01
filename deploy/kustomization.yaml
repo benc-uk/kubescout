@@ -8,5 +8,11 @@ resources:
 
 # Overrides for the image tag in deployment
 images:
-  - name: localhost/kubescout
-    newTag: dev
+  - name: kubescoutImage
+    newTag: arm64
+    
+    # When using the GitHub Container Registry
+    newName: ghcr.io/benc-uk/kubescout
+    
+    # When using local Kind cluster
+    #newName: localhost/kubescout

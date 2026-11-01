@@ -2,7 +2,8 @@
 Purpose: Collect scoped Kubernetes evidence through bounded lists and watches.
 Flow: Namespace filters, projection and shared admission limits feed one-shot
 snapshots or informer caches with change notifications. Broken or expired
-watches invalidate and rebuild caches; collection errors remain unknown
+watches invalidate and rebuild caches; labelled progress describes collection only.
+Collection errors remain unknown
 observations for the runner, never healthy evidence or synthetic incidents.
 */
 package kube
@@ -16,6 +17,7 @@ import (
 
 	"github.com/benc-uk/kubescout/internal/config"
 	"github.com/benc-uk/kubescout/internal/health"
+	"github.com/benc-uk/kubescout/internal/output"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,6 +40,7 @@ type budget struct {
 }
 
 type Source struct {
+	Log     *output.Writer
 	client  dynamic.Interface
 	config  config.Config
 	mu      sync.RWMutex
@@ -226,6 +229,7 @@ func (s *Source) Run(ctx context.Context) {
 // runEpoch installs and runs all scoped informers with one shared budget until failure or cancellation.
 // It notifies readiness or failure, waits for owned workers to stop and reports whether initial sync succeeded.
 func (s *Source) runEpoch(parent context.Context) bool {
+	_ = s.Log.Log("info", "GO", "COLLECT", "Synchronising scoped resource caches")
 	ctx, cancel := context.WithCancel(parent)
 	e := &epoch{failed: make(chan struct{}), budget: &budget{keys: map[string]struct{}{}, max: s.config.MaxObjects}}
 	fail := func(err error) {
@@ -302,6 +306,7 @@ func (s *Source) runEpoch(parent context.Context) bool {
 	e.ready = true
 	e.mu.Unlock()
 	s.notify()
+	_ = s.Log.Log("info", "GO", "COLLECT", "Scoped caches synchronised; continuing watch freshness checks")
 
 	select {
 	case <-ctx.Done():
@@ -317,6 +322,7 @@ func (boundedListWatch) IsWatchListSemanticsUnSupported() bool { return true }
 // list performs deadline-bound pagination, projects in-scope objects and charges the shared budget.
 // It rejects inconsistent versions, duplicate identities or tokens and returns sanitized API errors.
 func (s *Source) list(ctx context.Context, r resource, b *budget) (*cachedList, error) {
+	_ = s.Log.Log("debug", "GO", "COLLECT.LIST", fmt.Sprintf("Listing %s scope=%q", r.kind, r.namespace))
 	list := &cachedList{}
 	seen := map[string]bool{}
 	identities := map[string]bool{}
@@ -374,6 +380,7 @@ func (s *Source) list(ctx context.Context, r resource, b *budget) (*cachedList, 
 
 		token := page.GetContinue()
 		if token == "" {
+			_ = s.Log.Log("debug", "GO", "COLLECT.LIST", fmt.Sprintf("%s scope=%q: %d admitted objects", r.kind, r.namespace, len(list.Items)))
 			return list, nil
 		}
 
@@ -435,6 +442,7 @@ func (s *Source) watch(ctx context.Context, r resource, opts metav1.ListOptions,
 		return nil, err
 	}
 
+	_ = s.Log.Log("debug", "GO", "COLLECT.WATCH", fmt.Sprintf("Watching %s scope=%q", r.kind, r.namespace))
 	result := &projectedWatch{cancel: cancel, events: make(chan watch.Event)}
 
 	e.wg.Go(func() {

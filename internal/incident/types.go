@@ -119,8 +119,6 @@ type Change struct {
 	Operation string   `json:"operation"`
 	Name      string   `json:"name"`
 	Incident  Incident `json:"incident"`
-	// Simulated remains false in runtime output for schema 3.0 compatibility.
-	Simulated bool `json:"simulated"`
 }
 
 const APIVersion = "kubescout.benc-uk.github.com/v1alpha1"

@@ -45,8 +45,8 @@ the current contract.
   lifecycle and restart-aware Kubernetes reconciliation.
 - [internal/runner](internal/runner): independent collection and bounded AI work,
   cooldowns, no-action suppression, recovery review and stale-result rejection.
-- [internal/output](internal/output): schema 3.0 incident/execution output and
-  separate stderr diagnostics, not a deterministic assessment publisher.
+- [internal/output](internal/output): readable GO/AI activity logs and rotating
+  diagnostic AI transcripts. Incident CRDs, never stdout or files, store incidents.
 - [internal/dashboard](internal/dashboard): bounded single-namespace Incident
   reads, revision-scoped human triage and embedded HTML/CSS/native-ESM UI; no JavaScript build step.
 - [build/](build/): separate pinned non-root agent/dashboard images, allow-listed
@@ -74,7 +74,9 @@ the current contract.
 - No raw objects, UIDs, credentials, annotations or environment variables may
   reach the model. Names, images, scheduling facts and bounded redacted messages
   are allowed. Redaction reduces risk; it cannot prove arbitrary text is secret-free.
-- Do not log raw tool arguments/results, model error bodies or credentials.
+- Capture approved model-visible context, instructions, normalized authorized
+  tool arguments, redacted results and model responses in the bounded AI transcript.
+  Do not log raw tool arguments/results, provider error bodies or credentials.
   Never read/print credentials when investigating code.
 
 ## Kubernetes and incident correctness
@@ -243,20 +245,39 @@ Tests create only owned resources and verify namespace/RBAC UID before cleanup.
 Do not interrupt cluster-wide networking to test recovery.
 
 Keep non-root, read-only filesystem, dropped capabilities, pinned bases and
-credential-free image context. No probes/progress volumes without a request.
+credential-free image context. The approved bounded `emptyDir` at
+`/var/log/kubescout` is only for diagnostic AI transcripts; no PVC is provisioned.
+No probes/progress volumes without a request.
 Do not delete the incident namespace or CRD merely to stop the agent.
 
-## Output contract
+## Incident storage and logging
 
-- Watch stdout contains only accepted material incident changes.
-- Diagnostics, no-action reasons, collection/tool/model failures and quotas belong
-  on stderr, never as synthetic incident records.
-- `--once`: exactly one schema 3.0 execution envelope while stdout is writable;
-  an empty changes array is a valid no-action result.
+- Kubernetes Incident CRDs are the authoritative incident record. Stdout/stderr
+  explain activity; AI transcript files capture diagnostic exchanges. Neither
+  stores incidents or supplies the dashboard's incident data.
+- Console output is human-readable text with explicit GO/AI origin, phase, level
+  and correlation. GO covers deterministic evidence, dispatch, tool execution,
+  validation and persistence; AI identifies model-selected tools and conclusions.
+  Never label local failures or a no-candidate result as a model response.
+- Normal progress and AI no-action go to stdout; warnings/errors go to stderr.
+  Separate model proposals, Go validation and confirmed CRD writes. Coalesce
+  unchanged watch activity; debug adds collection/check detail.
+- `--once` logs progress and a readable completion summary, not a JSON envelope.
+  Zero incident changes is valid, not a synthetic health conclusion.
+- Schema 3.0 console envelopes and `--output-file` are removed. Do not revive a
+  stdout incident API or file-export contract.
+- AI capture defaults on, independently of console verbosity; `--ai-log-dir`
+  selects the directory and `--ai-log=false` disables it. Retain at most ten
+  10 MiB files. Capture actual HTTP attempts/tool rounds, validation and final
+  disposition without changing requests, budgets or decisions. Capture failures
+  warn explicitly, retry with bounded frequency and do not stop investigations.
+  Protect credential exclusion and do not claim a complete audit archive.
 - Once exit 0: completed execution regardless of incident severity; 1: incomplete;
   2: invalid configuration. Never silently fall back when model config is missing.
-- Watch exit 0: graceful signal; 1: bootstrap/unrecoverable output failure;
-  2: invalid config. Failed investigations publish nothing.
+- Watch exit 0: graceful signal; 1: bootstrap/unrecoverable console failure;
+  2: invalid config. Failed investigations create no incidents.
+- See [README logging guidance](README.md#operator-logs-and-ai-transcripts)
+  for defaults, file access and ephemeral-storage limits.
 
 When changing Foundry integration in VS Code, consult the
 vscode-microsoft-foundry skill when available. This process is not a hosted agent.

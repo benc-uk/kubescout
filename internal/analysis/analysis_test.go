@@ -132,7 +132,7 @@ func TestResponsesToolRoundTripAndNoAction(t *testing.T) {
 	defer model.Close()
 
 	a := Analyzer{Config: config.Config{Endpoint: model.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture", MaxInputChars: 20000,
-		MaxOutputTokens: 2000, RequestTimeout: time.Second, InvestigationTimeout: 5 * time.Second, CallsPerHour: 60}, Kubernetes: kube}
+		MaxOutputTokens: 2000, MaxToolCalls: config.DefaultMaxToolCalls, RequestTimeout: time.Second, InvestigationTimeout: 5 * time.Second, CallsPerHour: 60}, Kubernetes: kube}
 
 	d, err := a.Investigate(t.Context(), in)
 	if err != nil {
@@ -170,7 +170,7 @@ func TestModelFailuresHaveNoIncidentDecision(t *testing.T) {
 			defer server.Close()
 
 			a := Analyzer{Config: config.Config{Endpoint: server.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture", MaxInputChars: 20000, MaxOutputTokens: 1000,
-				RequestTimeout: time.Second, InvestigationTimeout: time.Second, CallsPerHour: 60}}
+				MaxToolCalls: config.DefaultMaxToolCalls, RequestTimeout: time.Second, InvestigationTimeout: time.Second, CallsPerHour: 60}}
 
 			d, err := a.Investigate(t.Context(), inputFixture())
 			if err == nil || len(d.Actions) != 0 || calls.Load() != 1 {
@@ -191,7 +191,7 @@ func TestTransportHardLimits(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); fmt.Fprint(w, "{}") }))
 	defer server.Close()
 
-	b := &boundedClient{client: server.Client(), admit: func(time.Time) bool { return true }, limit: 100, inputLimit: 100}
+	b := &boundedClient{client: server.Client(), admit: func(time.Time) error { return nil }, limit: 100, inputLimit: 100}
 	for i := 0; i < 7; i++ {
 		req, _ := http.NewRequestWithContext(context.Background(), "POST", server.URL, strings.NewReader("{}"))
 
@@ -217,16 +217,16 @@ func TestTransportHardLimits(t *testing.T) {
 
 	now := time.Now()
 	for i := 0; i < 60; i++ {
-		if !a.admit(now) {
+		if a.admit(now) != nil {
 			t.Fatal("quota prematurely exhausted")
 		}
 	}
 
-	if a.admit(now) {
+	if a.admit(now) == nil {
 		t.Fatal("hourly quota exceeded")
 	}
 
-	if !a.admit(now.Add(time.Hour)) {
+	if a.admit(now.Add(time.Hour)) != nil {
 		t.Fatal("rolling boundary did not expire")
 	}
 }

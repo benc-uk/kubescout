@@ -19,7 +19,6 @@ import (
 	"github.com/benc-uk/kubescout/internal/config"
 	"github.com/benc-uk/kubescout/internal/health"
 	"github.com/benc-uk/kubescout/internal/incident"
-	"github.com/benc-uk/kubescout/internal/output"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -145,7 +144,7 @@ func TestKubeconfigIncidentPersistence(t *testing.T) {
 	}
 
 	changes, err := reconciler.Apply(t.Context(), in, decision, func() bool { return true })
-	if err != nil || len(changes) != 1 || changes[0].Simulated {
+	if err != nil || len(changes) != 1 {
 		t.Fatalf("local raise: changes=%+v error=%v", changes, err)
 	}
 
@@ -174,7 +173,7 @@ func TestKubeconfigIncidentPersistence(t *testing.T) {
 	}
 
 	changes, err = reconciler.Apply(t.Context(), in, decision, func() bool { return true })
-	if err != nil || len(changes) != 1 || changes[0].Name != incidentName || changes[0].Simulated ||
+	if err != nil || len(changes) != 1 || changes[0].Name != incidentName ||
 		creates.Load() != 1 || patches.Load() != 1 {
 		t.Fatalf("local update did not persist under the same identity: changes=%+v error=%v", changes, err)
 	}
@@ -212,7 +211,7 @@ func TestCLIIncidentIndexFailureStopsExecution(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				args := []string{"--auth-mode=kubeconfig", "--observer-id=fixture", "--namespace-watch=apps"}
+				args := []string{"--ai-log=false", "--auth-mode=kubeconfig", "--observer-id=fixture", "--namespace-watch=apps"}
 				if mode != "watch" {
 					args = append(args, "--once")
 				}
@@ -232,17 +231,15 @@ func TestCLIIncidentIndexFailureStopsExecution(t *testing.T) {
 				}
 
 				if mode == "watch" {
-					if out.Len() != 0 {
+					if strings.Contains(out.String(), "[GO][INCIDENT]") {
 						t.Fatal("watch storage failure emitted an incident")
 					}
 
 					return
 				}
 
-				var result output.Result
-				if bytes.Count(out.Bytes(), []byte("\n")) != 1 || json.Unmarshal(out.Bytes(), &result) != nil || len(result.Changes) != 0 ||
-					result.Status != "incomplete" {
-					t.Fatalf("storage mode violated the once envelope: %s", &out)
+				if !strings.Contains(diag.String(), "Assessment incomplete: 0 investigations, 0 persisted incident changes") {
+					t.Fatalf("storage failure missing once summary: %s", &diag)
 				}
 			})
 		}

@@ -2,7 +2,7 @@
 Purpose: Check agent deployment, RBAC and Incident schema contracts offline.
 Flow: Decode checked-in manifests and validate synthetic configuration and incidents
 to check inactive deployment defaults, workload read permissions, incident writes
-and lifecycle.state migration without activating a cluster or contacting a model.
+and lifecycle.state migration plus the bounded transcript mount without activating a cluster or contacting a model.
 Shared decoding helpers also supply manifests to opt-in integration fixtures.
 */
 package cluster
@@ -135,8 +135,20 @@ func TestDeploymentContract(t *testing.T) {
 	if c.ImagePullPolicy != corev1.PullNever || c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation || !slices.Contains(c.SecurityContext.Capabilities.Drop, corev1.Capability("ALL")) {
 		t.Fatal("unsafe container")
 	}
+}
 
-	if len(p.Volumes) != 0 || c.StartupProbe != nil || c.ReadinessProbe != nil || c.LivenessProbe != nil {
+// TestTranscriptDeploymentStorage checks the only writable mount without enabling the agent or loosening its root filesystem.
+func TestTranscriptDeploymentStorage(t *testing.T) {
+	p := deploymentManifest(t).Spec.Template.Spec
+
+	c := p.Containers[0]
+	if len(p.Volumes) != 1 || p.Volumes[0].Name != "ai-transcripts" || p.Volumes[0].EmptyDir == nil ||
+		p.Volumes[0].EmptyDir.SizeLimit == nil || p.Volumes[0].EmptyDir.SizeLimit.Value() != 128*1024*1024 ||
+		len(c.VolumeMounts) != 1 || c.VolumeMounts[0].Name != "ai-transcripts" || c.VolumeMounts[0].MountPath != "/var/log/kubescout" ||
+		p.SecurityContext.FSGroup == nil || *p.SecurityContext.FSGroup != 65532 ||
+		!slices.Contains(c.Args, "--ai-log-dir=/var/log/kubescout/ai") ||
+		c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem ||
+		c.StartupProbe != nil || c.ReadinessProbe != nil || c.LivenessProbe != nil {
 		t.Fatal("unexpected storage or probes")
 	}
 }

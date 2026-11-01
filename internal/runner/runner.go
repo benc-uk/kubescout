@@ -2,8 +2,9 @@
 Purpose: Coordinate bounded once assessments and continuous incident review.
 Flow: Collections and stored incidents become investigation contexts; private
 deterministic signals schedule serial AI work. Freshness and recovery checks
-gate reconciliation. Once emits an execution envelope; watch emits material
-incident changes and keeps operational diagnostics separate on stderr.
+gate reconciliation. Provenance-labelled text explains once/watch activity;
+CRDs alone store incidents. Transcript dispositions and safe failure details
+describe outcomes without changing the existing per-candidate retry schedule.
 */
 package runner
 
@@ -11,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -34,11 +36,13 @@ type Source interface {
 }
 
 type Runner struct {
-	Config    config.Config
-	Source    Source
-	Analyzer  Analyzer
-	Incidents incident.Reconciler
-	Output    output.Writer
+	Config     config.Config
+	Source     Source
+	Analyzer   Analyzer
+	Incidents  incident.Reconciler
+	Output     *output.Writer
+	Transcript *output.Transcript
+	sequence   uint64
 }
 
 type candidate struct {
@@ -48,81 +52,93 @@ type candidate struct {
 	recoveryToken                   string
 	failures                        int
 	open                            bool
+	scope                           string
 }
 
 type completion struct {
+	ctx           context.Context
 	investigation incident.InvestigationContext
 	decision      incident.Decision
 	err           error
 }
 
-// Once runs a bounded AI assessment and emits one execution envelope, including on failure.
+// Once runs a bounded AI assessment with readable progress and a completion summary.
 // Accepted decisions are reconciled only while their evidence remains current.
-func (r *Runner) Once(ctx context.Context) int {
+func (r *Runner) Once(ctx context.Context) (code int) {
 	ctx, cancel := context.WithTimeout(ctx, r.Config.RunTimeout)
 	defer cancel()
 
-	out := output.Result{SchemaVersion: "3.0", Type: "execution", Status: "completed", Changes: []incident.Change{}, Errors: []string{}}
-	fail := func(err error) {
-		out.Status = "incomplete"
-		out.Errors = append(out.Errors, err.Error())
-	}
+	reviews, writes := 0, 0
+
+	defer func() {
+		status, level := "completed", "info"
+		if code != 0 {
+			status, level = "incomplete", "error"
+		}
+
+		_ = r.Output.Log(level, "GO", "EXECUTION", fmt.Sprintf("Assessment %s: %d investigations, %d persisted incident changes", status, reviews, writes))
+		if r.Output.Error() != nil {
+			code = 1
+		}
+	}()
+
+	_ = r.Output.Log("info", "GO", "COLLECT", "Loading incident index and collecting scoped Kubernetes evidence")
 
 	open, err := r.loadOpen(ctx)
 	if err != nil {
-		fail(err)
-	} else {
-		snapshot, err := r.Source.Collect(ctx, time.Now())
+		return r.fail("INCIDENT", err)
+	}
+
+	snapshot, err := r.Source.Collect(ctx, time.Now())
+	if err != nil {
+		return r.fail("COLLECT", err)
+	}
+
+	_ = r.Output.Log("info", "GO", "COLLECT", fmt.Sprintf("Collection ready: %d scoped objects", len(snapshot.Objects)))
+
+	investigations, err := incident.BuildInvestigationContexts(snapshot, r.Config.Policy, open, r.Config.MaxObjects)
+	if err != nil {
+		return r.fail("CHECK", err)
+	}
+
+	r.checkSummary(investigations)
+
+	for _, key := range sortedKeys(investigations) {
+		in := investigations[key]
+		in.Reason = "manual assessment"
+
+		in.Incidents, err = r.Incidents.Existing(ctx, in.Identities[in.Anchor])
 		if err != nil {
-			fail(err)
-		} else {
-			investigations, err := incident.BuildInvestigationContexts(snapshot, r.Config.Policy, open, r.Config.MaxObjects)
-			if err != nil {
-				fail(err)
-			} else {
-				for _, key := range sortedKeys(investigations) {
-					in := investigations[key]
-					in.Reason = "manual assessment"
-					// A single snapshot cannot establish continuous stable recovery.
-					in.Incidents, err = r.Incidents.Existing(ctx, in.Identities[in.Anchor])
-					if err != nil {
-						fail(err)
-						break
-					}
-
-					decision, err := r.Analyzer.Investigate(ctx, in)
-					if err != nil {
-						fail(err)
-						break
-					}
-
-					changes, err := r.Incidents.Apply(ctx, in, decision, func() bool {
-						fresh, err := r.Source.Collect(ctx, time.Now())
-						if err != nil {
-							return false
-						}
-
-						current, err := incident.BuildInvestigationContexts(fresh, r.Config.Policy, open, r.Config.MaxObjects)
-
-						return err == nil && current[in.Anchor].Revision == in.Revision && toolsCurrent(in, fresh)
-					})
-					out.Changes = append(out.Changes, changes...)
-
-					if err != nil {
-						fail(err)
-						break
-					}
-				}
-			}
+			return r.fail("INCIDENT", err)
 		}
-	}
 
-	if err := r.Output.WriteResult(out); err != nil {
-		return 1
-	}
+		work := r.startInvestigation(ctx, in)
+		reviews++
 
-	if out.Status != "completed" {
-		return 1
+		decision, err := r.Analyzer.Investigate(work, in)
+		if err != nil {
+			r.disposition(work, "Investigation failed: "+err.Error())
+			return r.fail("MODEL", err)
+		}
+
+		r.decision(work, decision)
+		changes, err := r.Incidents.Apply(ctx, in, decision, func() bool {
+			fresh, err := r.Source.Collect(ctx, time.Now())
+			if err != nil {
+				return false
+			}
+
+			current, err := incident.BuildInvestigationContexts(fresh, r.Config.Policy, open, r.Config.MaxObjects)
+
+			return err == nil && current[in.Anchor].Revision == in.Revision && toolsCurrent(in, fresh)
+		})
+		writes += len(changes)
+		r.persisted(work, changes)
+
+		if err != nil {
+			r.disposition(work, "Not fully applied: "+err.Error())
+			return r.fail("INCIDENT", err)
+		}
 	}
 
 	return 0
@@ -136,18 +152,18 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 	var workers sync.WaitGroup
 
 	defer func() {
-		if ctx.Err() != nil {
-			code = 0
-		}
-
 		cancel()
 		workers.Wait()
+
+		_ = r.Output.Log("info", "GO", "SHUTDOWN", "Watch stopped")
+		if r.Output.Error() != nil {
+			code = 1
+		}
 	}()
 
 	open, err := r.loadOpen(ctx)
 	if err != nil {
-		_ = r.Output.Diagnostic("incident_index_failed", err.Error())
-		return 1
+		return r.fail("INCIDENT", err)
 	}
 
 	workers.Go(func() { r.Source.Run(ctx) })
@@ -160,11 +176,17 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 	busy := false
 	lastError := ""
+	lastSummary := time.Time{}
+	revisions := map[string]string{}
 
 	wake := make(chan struct{}, 1)
 	wake <- struct{}{}
 
 	for {
+		if r.Output.Error() != nil {
+			return 1
+		}
+
 		select {
 		case <-ctx.Done():
 			return 0
@@ -176,7 +198,9 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 			c := states[result.investigation.Anchor]
 			if c == nil {
-				if err := r.Output.Diagnostic("investigation_superseded", "candidate disappeared during investigation"); err != nil {
+				r.disposition(result.ctx, "Superseded: candidate disappeared")
+
+				if err := r.Output.Diagnostic("VALIDATE", "investigation_superseded: candidate disappeared during investigation"); err != nil {
 					return 1
 				}
 
@@ -194,29 +218,23 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			}
 
 			if result.err != nil {
-				c.failures++
+				r.disposition(result.ctx, "Deferred: "+result.err.Error())
 
-				c.next = now.Add(min(time.Duration(1<<min(c.failures, 6))*time.Second, r.Config.ReviewInterval))
-				if c.failures >= 3 {
-					c.next = now.Add(r.Config.ReviewInterval)
-				}
-
-				if err := r.Output.Diagnostic("investigation_deferred", result.err.Error()); err != nil {
+				if err := r.deferInvestigation(c, result.err, now); err != nil {
 					return 1
 				}
 
 				continue
 			}
 
+			r.decision(result.ctx, result.decision)
 			changes, err := r.Incidents.Apply(ctx, result.investigation, result.decision, current)
-			for _, change := range changes {
-				if e := r.Output.WriteChange(change); e != nil {
-					return 1
-				}
-			}
+			r.persisted(result.ctx, changes)
 
 			if err != nil {
-				if e := r.Output.Diagnostic("incident_persistence_failed", err.Error()); e != nil {
+				r.disposition(result.ctx, "Persistence failed: "+err.Error())
+
+				if e := r.Output.Log("error", "GO", "INCIDENT", "incident_persistence_failed: "+err.Error()); e != nil {
 					return 1
 				}
 				// The reconciler has already retried the same decision, without
@@ -227,16 +245,10 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			c.lastReview, c.lastRevision, c.failures = now, result.investigation.Revision, 0
 
 			c.next = now.Add(r.Config.ReviewInterval)
-			if result.decision.Outcome == "no_action" {
-				if err := r.Output.Diagnostic("no_action", result.decision.Reason); err != nil {
-					return 1
-				}
-			}
 
 			open, err = r.loadOpen(ctx)
 			if err != nil {
-				_ = r.Output.Diagnostic("incident_index_failed", err.Error())
-				return 1
+				return r.fail("INCIDENT", err)
 			}
 		}
 
@@ -250,7 +262,7 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			}
 
 			if lastError != err.Error() {
-				if e := r.Output.Diagnostic("collection_unknown", err.Error()); e != nil {
+				if e := r.Output.Diagnostic("COLLECT", "collection_unknown: "+err.Error()); e != nil {
 					return 1
 				}
 
@@ -261,7 +273,7 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 		}
 
 		if lastError != "" {
-			if err := r.Output.Diagnostic("collection_recovered", "fresh complete collection resumed"); err != nil {
+			if err := r.Output.Log("info", "GO", "COLLECT", "collection_recovered: fresh complete collection resumed"); err != nil {
 				return 1
 			}
 
@@ -270,11 +282,29 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 		investigations, err := incident.BuildInvestigationContexts(snapshot, r.Config.Policy, open, r.Config.MaxObjects)
 		if err != nil {
-			_ = r.Output.Diagnostic("candidate_limit", err.Error())
-			return 1
+			return r.fail("CHECK", err)
 		}
 
 		updateCandidates(states, investigations, open, now, r.Config)
+
+		changed := len(revisions) != len(investigations)
+		for key, in := range investigations {
+			changed = changed || revisions[key] != in.Revision
+		}
+
+		if changed || lastSummary.IsZero() {
+			r.checkSummary(investigations)
+
+			revisions = map[string]string{}
+			for key, in := range investigations {
+				revisions[key] = in.Revision
+			}
+		}
+
+		if lastSummary.IsZero() || now.Sub(lastSummary) >= time.Minute {
+			_ = r.Output.Log("info", "GO", "COLLECT", fmt.Sprintf("Watching: %d scoped objects, %d candidates, AI busy=%t", len(snapshot.Objects), len(states), busy))
+			lastSummary = now
+		}
 
 		if busy {
 			continue
@@ -305,16 +335,17 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 			in.Incidents, err = r.Incidents.Existing(ctx, in.Identities[in.Anchor])
 			if err != nil {
-				_ = r.Output.Diagnostic("incident_lookup_failed", err.Error())
-				return 1
+				return r.fail("INCIDENT", err)
 			}
 
 			busy = true
+			work := r.startInvestigation(ctx, in)
+			c.scope = output.Scope(work)
 
 			workers.Go(func() {
-				decision, err := r.Analyzer.Investigate(ctx, in)
+				decision, err := r.Analyzer.Investigate(work, in)
 				select {
-				case results <- completion{in, decision, err}:
+				case results <- completion{work, in, decision, err}:
 				case <-ctx.Done():
 				}
 			})
@@ -322,6 +353,97 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			break
 		}
 	}
+}
+
+// deferInvestigation preserves failure backoff and logs safe details and next retry eligibility.
+// Retry hints describe local/provider limits; they do not override the scheduler.
+func (r *Runner) deferInvestigation(c *candidate, failure error, now time.Time) error {
+	c.failures++
+
+	c.next = now.Add(min(time.Duration(1<<min(c.failures, 6))*time.Second, r.Config.ReviewInterval))
+	if c.failures >= 3 {
+		c.next = now.Add(r.Config.ReviewInterval)
+	}
+
+	return r.Output.Diagnostic("SCHEDULE", fmt.Sprintf("%s investigation_deferred: %s; consecutive_failures=%d retry_after_seconds=%.0f next_retry_at=%s (eligibility, not a guaranteed request)",
+		c.scope, failure.Error(), c.failures, c.next.Sub(now).Seconds(), c.next.UTC().Format(time.RFC3339)))
+}
+
+// fail reports a Go execution failure without manufacturing an incident.
+func (r *Runner) fail(phase string, err error) int {
+	_ = r.Output.Log("error", "GO", phase, err.Error())
+	return 1
+}
+
+// startInvestigation gives each review local correlation and explains the deterministic trigger.
+func (r *Runner) startInvestigation(ctx context.Context, in incident.InvestigationContext) context.Context {
+	r.sequence++
+	anchor := in.Identities[in.Anchor]
+
+	resource := anchor.Kind + " " + anchor.Name
+	if anchor.Namespace != "" {
+		resource = anchor.Kind + " " + anchor.Namespace + "/" + anchor.Name
+	}
+
+	ctx = output.WithInvestigation(ctx, fmt.Sprint(r.sequence), resource)
+	_ = r.Output.Log("info", "GO", "SCHEDULE", output.Scope(ctx)+": "+in.Reason)
+
+	return ctx
+}
+
+// checkSummary describes private deterministic signals without implying an incident or AI assessment.
+func (r *Runner) checkSummary(investigations map[string]incident.InvestigationContext) {
+	for _, check := range health.Checks {
+		_ = r.Output.Log("debug", "GO", "CHECK", "Evaluated "+check.Name+" deterministic checks")
+	}
+
+	signals := 0
+	for _, in := range investigations {
+		signals += len(in.Signals)
+	}
+
+	_ = r.Output.Log("info", "GO", "CHECK", fmt.Sprintf("%d deterministic signals in %d candidates; not AI conclusions", signals, len(investigations)))
+	if len(investigations) == 0 {
+		_ = r.Output.Log("info", "GO", "SCHEDULE", "No investigation candidates; no AI request needed (not a model no-action decision)")
+	}
+
+	for _, key := range sortedKeys(investigations) {
+		in := investigations[key]
+		for _, signal := range in.Signals {
+			resource := in.Identities[signal.Resource]
+			_ = r.Output.Log("debug", "GO", "CHECK", fmt.Sprintf("%s %s/%s rule=%s hint=%s: %s",
+				resource.Kind, resource.Namespace, resource.Name, signal.Rule, signal.Hint, signal.Summary))
+		}
+	}
+}
+
+// decision identifies model-authored conclusions separately from deterministic validation and writes.
+func (r *Runner) decision(ctx context.Context, decision incident.Decision) {
+	_ = r.Output.Log("info", "AI", "DECISION", output.Scope(ctx)+" "+decision.Outcome+": "+decision.Reason)
+	for _, action := range decision.Actions {
+		_ = r.Output.Log("info", "AI", "DECISION", fmt.Sprintf("%s proposed %s [%s]: %s", output.Scope(ctx), action.Operation, action.Severity, action.Title))
+	}
+
+	_ = r.Output.Log("info", "GO", "VALIDATE", output.Scope(ctx)+" decision contract accepted; freshness and persistence checks still apply")
+}
+
+// persisted reports only changes returned by reconciliation, never speculative model actions.
+func (r *Runner) persisted(ctx context.Context, changes []incident.Change) {
+	for _, change := range changes {
+		message := fmt.Sprintf("%s persisted %s %s [%s]: %s", output.Scope(ctx), change.Operation, change.Name,
+			change.Incident.Analysis.Severity, change.Incident.Analysis.Title)
+		_ = r.Output.Log("info", "GO", "INCIDENT", message)
+		r.disposition(ctx, message)
+	}
+
+	if len(changes) == 0 {
+		r.disposition(ctx, "No incident mutations returned by reconciliation")
+	}
+}
+
+// disposition records the host's actual application outcome separately from the model response.
+func (r *Runner) disposition(ctx context.Context, message string) {
+	r.Transcript.Record(output.Scope(ctx), "GO", "DISPOSITION", message)
 }
 
 // current rechecks evidence revisions, inspected resources, and recovery against a fresh snapshot.

@@ -2,7 +2,10 @@
 Purpose: Provide handle-scoped resource inspection and Warning event tools.
 Flow: AI tool arguments resolve through host-side identities to bounded,
 read-only Kubernetes requests; approved fields and redacted text return with
-operation-named citations, not incident decisions or workload mutations.
+operation-named citations under the configured shared call cap and fixed byte
+budgets. Labelled tool execution and approved transcript content distinguish
+AI tool selection from Go reads. Typed local-limit failures support safe diagnostics,
+not incident decisions or workload mutations.
 */
 package investigation
 
@@ -20,6 +23,7 @@ import (
 	"github.com/benc-uk/kubescout/internal/health"
 	"github.com/benc-uk/kubescout/internal/incident"
 	"github.com/benc-uk/kubescout/internal/kube"
+	"github.com/benc-uk/kubescout/internal/output"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -33,13 +37,27 @@ type Session struct {
 	Investigation incident.InvestigationContext
 	Timeout       time.Duration
 	Calls, Bytes  int
+	MaxCalls      int
 	Citations     map[string]bool
 	Scope         config.Config
+	Log           *output.Writer
+	Transcript    *output.Transcript
 }
 
 type Tool struct {
 	Session       *Session
 	RelatedEvents bool
+}
+
+// LimitError describes a local tool budget rejection without arguments or evidence.
+type LimitError struct {
+	Kind            string
+	Observed, Limit int
+}
+
+// Error reports only a fixed budget category and numeric usage.
+func (e *LimitError) Error() string {
+	return fmt.Sprintf("investigation limit exceeded: %s (observed=%d, limit=%d)", e.Kind, e.Observed, e.Limit)
 }
 
 // Name selects the registered local function name for inspection or related Warning events.
@@ -81,15 +99,44 @@ var resources = map[string]schema.GroupVersionResource{
 }
 
 // Call validates a scoped handle before bounded Kubernetes reads and returns projected, redacted evidence.
-// It tracks budgets, operation-named citations unique within the session and inspected resource versions.
-func (t Tool) Call(ctx context.Context, args string) (any, error) {
+// It enforces shared budgets with typed failures and tracks citations and inspected resource versions.
+func (t Tool) Call(ctx context.Context, args string) (value any, callErr error) {
 	s := t.Session
+	scope := output.Scope(ctx)
+
+	start := time.Now()
+	defer func() {
+		message := fmt.Sprintf("%s %s duration=%s", scope, t.Name(), time.Since(start).Round(time.Millisecond))
+		if callErr != nil {
+			message += " rejected/failed: " + callErr.Error()
+			_ = s.Log.Log("warn", "GO", "TOOL.EXECUTE", message)
+			s.Transcript.Record(scope, "GO", "TOOL.FAILED", message)
+		} else {
+			_ = s.Log.Log("info", "GO", "TOOL.EXECUTE", message+" completed; approved evidence returned")
+
+			data, err := json.MarshalIndent(value, "", "  ")
+			if err != nil {
+				s.Transcript.Record(scope, "GO", "TOOL.RESULT", "[approved result serialization failed]")
+			} else {
+				s.Transcript.Record(scope, "GO", "TOOL.RESULT", string(data))
+			}
+		}
+	}()
+
 	if s.Client == nil {
 		return nil, errors.New("investigation Kubernetes client unavailable")
 	}
 
-	if len(args) > 1024 || s.Calls >= 8 {
-		return nil, errors.New("investigation tool budget exceeded")
+	if len(args) > 1024 {
+		return nil, &LimitError{Kind: "local_tool_arguments_limit", Observed: len(args), Limit: 1024}
+	}
+
+	if s.MaxCalls <= 0 {
+		return nil, errors.New("investigation tool-call limit must be positive")
+	}
+
+	if s.Calls >= s.MaxCalls {
+		return nil, &LimitError{Kind: "local_tool_call_limit", Observed: s.Calls + 1, Limit: s.MaxCalls}
 	}
 
 	d := json.NewDecoder(strings.NewReader(args))
@@ -134,6 +181,9 @@ func (t Tool) Call(ctx context.Context, args string) (any, error) {
 	}
 
 	s.Calls++
+	_ = s.Log.Log("info", "AI", "TOOL.REQUEST", fmt.Sprintf("%s tool=%d %s for %s %s/%s", scope, s.Calls, t.Name(), r.Kind, r.Namespace, r.Name))
+	s.Transcript.Record(scope, "AI", "TOOL.REQUEST", fmt.Sprintf("tool=%d name=%s\nValidated resource_ref: %s\nResource: %s %s/%s",
+		s.Calls, t.Name(), ref, r.Kind, r.Namespace, r.Name))
 
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
 	defer cancel()
@@ -153,8 +203,12 @@ func (t Tool) Call(ctx context.Context, args string) (any, error) {
 			selector = "type=Warning,involvedObject.kind=Node,involvedObject.name=" + r.Name
 		}
 
-		if len(namespaces) == 0 || len(namespaces) > 20 {
-			return nil, errors.New("event namespace scope unavailable or exceeds tool budget")
+		if len(namespaces) == 0 {
+			return nil, errors.New("event namespace scope unavailable")
+		}
+
+		if len(namespaces) > 20 {
+			return nil, &LimitError{Kind: "local_tool_event_namespace_limit", Observed: len(namespaces), Limit: 20}
 		}
 
 		events := []map[string]any{}
@@ -168,7 +222,7 @@ func (t Tool) Call(ctx context.Context, args string) (any, error) {
 			for {
 				pages++
 				if pages > 20 {
-					return nil, errors.New("related event reads exceed the tool request limit")
+					return nil, &LimitError{Kind: "local_tool_event_request_limit", Observed: pages, Limit: 20}
 				}
 
 				page, err := s.Client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "events"}).Namespace(namespace).List(ctx, opts)
@@ -204,7 +258,7 @@ func (t Tool) Call(ctx context.Context, args string) (any, error) {
 					}
 
 					if len(events) >= 20 {
-						return nil, errors.New("related events exceed the tool result limit")
+						return nil, &LimitError{Kind: "local_tool_event_result_limit", Observed: len(events) + 1, Limit: 20}
 					}
 
 					entry := map[string]any{"namespace": obj.GetNamespace()}
@@ -420,8 +474,16 @@ func (t Tool) Call(ctx context.Context, args string) (any, error) {
 	result["evidence_id"] = id
 
 	data, err := json.Marshal(result)
-	if err != nil || len(data) > 8192 || s.Bytes+len(data) > 32768 {
-		return nil, errors.New("investigation evidence byte limit exceeded")
+	if err != nil {
+		return nil, errors.New("investigation evidence serialization failed")
+	}
+
+	if len(data) > 8192 {
+		return nil, &LimitError{Kind: "local_tool_result_bytes", Observed: len(data), Limit: 8192}
+	}
+
+	if s.Bytes+len(data) > 32768 {
+		return nil, &LimitError{Kind: "local_cumulative_tool_bytes", Observed: s.Bytes + len(data), Limit: 32768}
 	}
 
 	s.Bytes += len(data)

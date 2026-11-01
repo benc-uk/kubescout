@@ -9,6 +9,9 @@ cluster incidents and provides actionable insights.
 
 Incidents are stored as namespaced `Incident` resources in the
 `kubescout.benc-uk.github.com/v1alpha1` API group.
+**CRDs are the incident record.** Console logs explain agent activity; rotating
+AI transcript files capture diagnostic exchanges. Neither is an incident API or
+an alternative incident store.
 
 Deterministic rules are internal evidence producers. They neither decide what
 deserves user attention nor create Kubernetes incidents. The AI can investigate,
@@ -28,7 +31,7 @@ AI investigation <-> allow-listed read-only Kubernetes tools
                  |
 Validated no-action / raise / update / resolve decision
                  |
-Incident reconciliation
+Incident reconciliation -> persisted Kubernetes Incident CRDs -> dashboard
                  |
 Future external notification component -- not implemented
 ```
@@ -340,7 +343,7 @@ displays `make help`; it does not start the agent.
 | `integration` | Rebuilds the binary and runs live collector/connectivity tests. Creates/deletes owned workload fixtures; no model calls. |
 | `integration-model` | Rebuilds the binary and tests live collection/AI against an owned namespace with a test-only fixture incident repository (no live Incident writes). Requires model configuration and `ALLOW_MODEL=yes`; at most six model requests. |
 | `integration-deploy` | Rebuilds the local binary and tests an in-cluster AI Pod with owned namespace/Secret/RBAC. Requires an already imported `IMAGE`, separately installed Incident CRD, model configuration and `ALLOW_MODEL=yes`; at most six model requests. Does not build/import an image. |
-| `image` | Builds `IMAGE` using `CONTAINER_ENGINE` and the allow-listed Docker context. Does not import or deploy it. |
+| `image` | Builds `IMAGE` for `TARGETOS/TARGETARCH` using `CONTAINER_ENGINE` and the allow-listed Docker context. The Go builder runs on the host platform and cross-compiles the binary. Does not import or deploy it. |
 | `kind-load` | Saves `IMAGE` to `build/out/kubescout.tar` and imports it into `KIND_CLUSTER`. Requires an existing image and kind cluster; does not deploy. |
 | `incidents-setup` | Applies only the `kubescout` namespace and Incident CRD, then waits for the CRD to be established. Requires namespace/CRD apply permissions; no Deployment, RBAC, model Secret or AI calls. |
 | `model-secret` | Ensures the `kubescout` namespace exists, then runs `kubectl create secret` directly from the repository-root `.env`. Requires namespace-apply and Secret-create permissions; does not overwrite the Secret, deploy or call AI. |
@@ -348,7 +351,7 @@ displays `make help`; it does not start the agent.
 | `undeploy` | Deletes the checked-in Deployment and RBAC resources. Preserves Incidents, model Secret, namespace and CRDs. |
 | `dash-build` | Builds the separate `build/bin/kubescout-dashboard` with embedded HTML/CSS/ESM. |
 | `dash-run` | Builds and runs the KubeScout dashboard locally at `127.0.0.1:8000` using the current kubeconfig context and the agent's `kubescout` incident-storage namespace. No model calls; explicit human dismissal/restore writes triage status. |
-| `dash-image` | Builds `DASHBOARD_IMAGE` using its own credential-free build-context allow-list. |
+| `dash-image` | Builds `DASHBOARD_IMAGE` for `TARGETOS/TARGETARCH` using its own credential-free build-context allow-list. |
 | `dash-kind-load` | Saves/imports the existing `DASHBOARD_IMAGE` into `KIND_CLUSTER`; does not deploy. |
 | `dash-deploy` | Applies only `deploy/dashboard` in the current context; requires imported image, namespace and CRD. No AI calls. |
 | `dash-forward` | Forwards `127.0.0.1:8000` to the dashboard Service in `kubescout` using the current context. |
@@ -380,11 +383,26 @@ not load `.env` into its variables. The agent loads it for local runs;
 | `ARGS` | Empty | Extra CLI flags appended by `run`/`once` only. Quote multiple flags together; never put credentials here. |
 | `CONTAINER_ENGINE` | `podman` | Container executable used to build and save images (`image`/`kind-load`). |
 | `IMAGE` | `localhost/kubescout:dev` | Image tag for `image`, `kind-load` and `integration-deploy`. Does not change the Deployment manifest. |
+| `TARGETOS` | `linux` | Target operating system for `make image`. |
+| `TARGETARCH` | Host Go architecture | Target architecture for `make image` and `make dash-image`; override with `TARGETARCH=arm64` for ARM64. |
 | `DASHBOARD_IMAGE` | `localhost/kubescout-dashboard:dev` | Separate dashboard image build/import tag; does not change manifests. |
 | `KIND` | `kind` | kind executable used by `kind-load`. |
 | `KIND_CLUSTER` | `kind` | kind cluster name used by image imports. Independent of the current kubeconfig context; ensure it matches the deployment cluster. |
 | `KIND_PROVIDER` | `podman` | Sets `KIND_EXPERIMENTAL_PROVIDER` for `kind-load`; must match the provider that created the cluster. |
 | `KUBECTL` | `kubectl` | Executable for agent and dashboard Kubernetes setup/deploy/forward/undeploy targets. |
+
+Build an ARM64 agent image locally (the dashboard target accepts the same
+`TARGETOS` and `TARGETARCH` overrides):
+
+```bash
+make image TARGETARCH=arm64 IMAGE=ghcr.io/benc-uk/kubescout:arm64
+podman push ghcr.io/benc-uk/kubescout:arm64
+```
+
+The Go builder runs on the local host architecture and cross-compiles the
+binary for the requested target. The runtime base image is selected for that
+target platform. This builds one image; it does not create or push a
+multi-platform manifest.
 
 `ALLOW_MODEL` does not enable/configure AI in the binary or impose its request
 budget. It is a Make confirmation gate; the Go runtime never reads it. For model
@@ -396,13 +414,12 @@ bounded. See [scheduling limits](#scheduling-and-failure-behavior) for quotas.
 For additional watched namespaces or runtime limits:
 
 ```bash
-mkdir -p build/out
 make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps \
-  ALLOW_MODEL=yes ARGS='--model-calls-per-hour=6 --output-file=build/out/latest.json'
+  ALLOW_MODEL=yes ARGS='--model-calls-per-hour=6 --log-level=debug'
 ```
 
-Create the output directory first if using `--output-file`. The identity in this
-example covers both `default` and `apps`.
+The identity in this example covers both `default` and `apps`. AI transcripts
+default to the gitignored `logs/` directory; the agent creates it if needed.
 Runtime flags are listed by `./build/bin/kubescout --help`; avoid overriding
 Make's auth/context/identity flags through `ARGS`.
 
@@ -552,8 +569,8 @@ the delivery-status subresource.
 
 **Breaking field rename:** incident lifecycle JSON now uses
 `spec.lifecycle.state` (`open` or `resolved`), and the agent's indexing label is
-`kubescout.benc-uk.github.com/state`. The dashboard API, model input and incident
-output likewise use `lifecycle.state`; there is no legacy `phase` fallback.
+`kubescout.benc-uk.github.com/state`. The dashboard API, model input and stored
+incident specs likewise use `lifecycle.state`; there is no legacy `phase` fallback.
 Dismissed remains human triage status, not an AI lifecycle state.
 
 Kubernetes-owned Pod `status.phase` is unchanged.
@@ -595,7 +612,7 @@ Same-state updates require AI's material-change decision and a change in severit
 impact, stable diagnosis key or affected-resource set. The prior wording remains
 when the conclusion is unchanged.
 
-The agent loads its open incident index before publishing and looks up known
+The agent loads its open incident index before reconciling CRDs and looks up known
 families, including resolved incidents, before investigation. Updates use UID and
 resourceVersion preconditions. Ambiguous writes are read back/reconciled under
 the same name, without asking the model again. Unreconcilable persistence fails
@@ -647,7 +664,7 @@ reasoning and tool transcripts are never incident records.
 | Concurrent investigations | 1 |
 | Actual model HTTP attempts | 60 per rolling hour |
 | Model requests per investigation | Maximum 6, including synthesis |
-| Tool invocations per investigation | Maximum 8, serial |
+| Tool invocations per investigation | 64 across both tools, serial (`--max-tool-calls`) |
 | New evidence batching | 5 seconds |
 | Ordinary same-case cooldown | 2 minutes |
 | Fresh stable recovery before AI review | 2 minutes |
@@ -669,6 +686,43 @@ ordinary cooldown, not request/scope limits. Repeated failures receive bounded
 backoff; unchanged failed investigations eventually wait for scheduled review,
 rather than being cached as a successful no-action.
 
+Watch failures include a readable `[GO][SCHEDULE] investigation_deferred`
+message with investigation/resource identity, consecutive failure count,
+`retry_after_seconds` and UTC `next_retry_at`. The latter is the candidate's next
+scheduled eligibility, not a promise of an immediate model request: serial work,
+freshness and changed evidence still affect scheduling. Existing backoff remains
+2 seconds, 4 seconds, then the review interval (15 minutes by default).
+
+The failure category distinguishes `local_hourly_quota`,
+`provider_rate_limit` (HTTP 429), `provider_authentication` (HTTP 401/403),
+`provider_http_error`, request/investigation timeouts, local request/byte budgets,
+incomplete model output and `tool_or_model_protocol` failures. Failures include
+model/tool request counts and limits, rolling-hour usage, input/output byte
+counts and configured timeouts. Once execution errors carry safe failure
+categories and counters too; failed investigations still publish no incidents.
+
+Tool budget errors are classified separately: `local_tool_call_limit` reports a
+rejected call beyond the configured shared ceiling (64 by default); argument, event-read, per-result
+and cumulative evidence limits have their own `local_tool_*` or
+`local_cumulative_tool_bytes` categories with observed and allowed amounts.
+Set a positive tool-call budget with `--max-tool-calls=16`, for example:
+`make run ALLOW_MODEL=yes ARGS='--max-tool-calls=16'`. For in-cluster runs,
+add the flag to the agent container's `args` in [deploy/deployment.yaml](deploy/deployment.yaml).
+Like other numeric budget flags, this setting has no environment-variable alias.
+Changing the tool-call cap does not raise the independent 8 KiB per-result,
+32 KiB cumulative evidence, model-request or deadline limits.
+
+For local hourly exhaustion, `retry_not_before` identifies the earliest request
+slot expiry. For provider failures, it comes from valid `Retry-After` (seconds or
+HTTP date), `retry-after-ms` or `x-ms-retry-after-ms` headers; if multiple hints
+exist, the latest wins. Missing or invalid hints are omitted, not guessed.
+Numeric remaining-request/token headers are included when available, but HTTP
+429 alone does not establish which provider quota was exhausted. These hints
+are separate from the existing scheduler and do not change its retry timing.
+No provider error bodies, arbitrary header text, authentication credentials or
+raw tool argument/result strings are logged. AI transcripts retain approved
+context, normalized tool arguments, redacted results and returned model content.
+
 Observation continues while AI runs. Affected evidence is rechecked before
 publication; stale decisions are discarded. Recovery is reviewed even after all
 triggering signals disappear. Short healthy phases in a crash loop do not satisfy
@@ -682,34 +736,124 @@ prove a healthy cluster or a working agent.
 `--once` cannot prove continuous recovery from one snapshot, so it does not
 automatically resolve an existing incident. Use watch mode for recovery review.
 
-## Output
+## Operator logs and AI transcripts
 
-Schema **3.0** deliberately replaces the old assessment/report stream.
+**Incidents are recorded in Kubernetes CRDs, not stdout or log files.** Use
+`kubectl -n kubescout get incidents` or the dashboard for the incident record.
+Console output is human-readable operational feedback, not a machine-readable
+incident stream. The former schema 3.0 console envelopes and `--output-file`
+have been removed without a compatibility mode.
 
-- Watch stdout: accepted incident changes only, with operation/name/incident.
-  The legacy `simulated` field remains `false` for schema 3.0 compatibility.
-  No baseline, cache lifecycle or no-action records.
-- Stderr: operator diagnostics, including no-action reasons and model/tool failures.
-- `--once` stdout: exactly one execution-result envelope with zero or more changes.
-  Successful no-action has an empty `changes` array, not a synthetic healthy CR.
-- `--output-file`: atomically replace a private latest-output file; not an archive.
+Every runtime event has a UTC timestamp, level, origin and phase:
 
-```json
-{"schema_version":"3.0","type":"execution","execution_status":"completed","changes":[],"errors":[]}
+```text
+2026-11-01T16:34:25Z INFO  [GO][CHECK] run=example 2 deterministic signals in 1 candidates; not AI conclusions
+2026-11-01T16:34:30Z INFO  [GO][SCHEDULE] run=example inv=1 Deployment apps/api: new or changed evidence
+2026-11-01T16:34:30Z INFO  [GO][MODEL.REQUEST] run=example inv=1 Deployment apps/api request=1/6 Sending 6000 bytes
+2026-11-01T16:34:31Z INFO  [AI][TOOL.REQUEST] run=example inv=1 Deployment apps/api tool=1 inspect_resource for Pod apps/api-abc
+2026-11-01T16:34:31Z INFO  [GO][TOOL.EXECUTE] run=example inv=1 Deployment apps/api inspect_resource duration=8ms completed; approved evidence returned
+2026-11-01T16:34:32Z INFO  [AI][DECISION] run=example inv=1 Deployment apps/api proposed raise [high]: Replicas unavailable
+2026-11-01T16:34:32Z INFO  [GO][VALIDATE] run=example inv=1 Deployment apps/api decision contract accepted; freshness and persistence checks still apply
+2026-11-01T16:34:32Z INFO  [GO][INCIDENT] run=example inv=1 Deployment apps/api persisted raise inc-example [high]: Replicas unavailable
 ```
 
-Once exits 0 for completed execution, including an open incident or no-action;
-1 for incomplete execution/output; 2 for invalid configuration. Watch exits 0 on
-graceful signal, 1 on bootstrap/unrecoverable output failure, 2 on invalid config.
+- **GO** is deterministic code: collection, evidence checks, scheduling, HTTP
+  dispatch/failure, local tool execution, validation and CRD persistence.
+- **AI** identifies model-selected tools and model-authored conclusions.
+  A model proposal, Go acceptance and a successful CRD write are distinct steps.
+  An HTTP 429 or exhausted local quota is a Go diagnostic, not model advice.
+- Normal activity goes to stdout; warnings/errors go to stderr, in the same
+  text format. Combined pod logs remain readable. Controls/newlines in external
+  prose are escaped so they cannot impersonate another source.
+- `--log-color=always` is the default, including pod logs and redirected output:
+  **GO** labels are cyan, **AI** labels magenta, info green, warnings yellow and
+  errors red; timestamps and run IDs are dimmed. Text labels remain intact.
+  Use `--log-color=never` for plain output, for example
+  `make run ALLOW_MODEL=yes ARGS='--log-color=never'`. In Kubernetes, add the
+  same flag to the agent container's arguments to disable colour. AI transcript
+  files never receive the console formatter's colour codes.
+- `--log-level=info` is the default. `debug` adds per-kind collection and named
+  check/rule details; `warn` and `error` reduce console verbosity. Repeated
+  unchanged evidence is coalesced; watch emits a summary at most once per minute.
+- Model `no_action` is explicitly labelled AI. No investigation candidates is
+  labelled GO and does not invent an AI assessment or claim cluster health.
+- `--once` logs progress followed by completed/incomplete assessment counts,
+  not a JSON execution envelope. No-action creates no synthetic healthy CR.
+
+### AI file capture
+
+Capture is **on by default**, independently of console verbosity:
+
+| Setting | Behavior |
+|---|---|
+| `--ai-log-dir=logs` | Local default, relative to the working directory; the repository's `logs/` directory is gitignored. Newly created directories/files are private. |
+| `--ai-log-dir=/var/log/kubescout/ai` | Explicit path in the checked-in Deployment. |
+| `--ai-log=false` | Explicitly disable file capture; startup reports this. |
+| Rotation | `ai-transcript.log` plus `.1` through `.9`; each at most 10 MiB, total at most 100 MiB. Oldest owned file rotates out. |
+
+These settings are CLI flags, not additional environment variables. Startup
+reports the resolved path. The file contains labelled sections and indented
+payloads: instructions, model-visible context, every actual HTTP request
+(including repeated tool-round history), returned model content, normalized
+authorized tool arguments, approved redacted tool results, final answer, Go
+validation and reconciliation disposition. Run/investigation/request identifiers
+connect files to console activity but are not incident identities.
+
+This is an application transcript, not a raw HTTP dump or hidden model reasoning.
+Authentication headers/credentials, raw Kubernetes objects, raw rejected tool
+arguments and provider error bodies are excluded. HTTP failures retain safe
+category/status/retry details. Rejected model decisions remain visible as
+unvalidated content, not accepted incidents. Oversized transport content is
+rejected by existing budgets rather than read further for logging. Very large
+captured sections are split into correlated numbered chunks at rotation limits.
+Operational text can still be sensitive: protect access to the files.
+
+File open/write/rotation/close failures warn that **capture is incomplete** and
+do not stop AI investigations. Capture retries on the next record after a
+30-second backoff; repeated failures are not logged for every tool call.
+Recovery is announced and the next captured record marks the gap. Files append
+across process restart; a crash can leave an unfinished section. Retention and
+capture failures mean this is not a guaranteed complete audit archive.
+Transcripts are never replayed to the model as durable memory.
+
+Locally, inspect `logs/ai-transcript.log` with your editor. The pod mounts
+a 128 MiB disk-backed `emptyDir` at `/var/log/kubescout`, writable by UID/GID
+65532; the root filesystem stays read-only. Files survive container restart
+within that Pod, but **not Pod replacement**. A future persistent volume can
+mount at the same path; none is provisioned here.
+
+The distroless agent image has no shell, `cat` or `tar`, so ordinary
+`kubectl exec ... cat` and `kubectl cp` against the agent do not work.
+If you explicitly authorize an ephemeral debugging container, mount the
+existing `ai-transcripts` volume read-only and use the same UID 65532 to inspect
+its private files. For example, supply this container fragment to
+`kubectl debug --custom=/path/to/profile.json`, using an approved debug image:
+
+```json
+{
+  "securityContext": {"runAsUser": 65532, "runAsGroup": 65532, "runAsNonRoot": true},
+  "volumeMounts": [{"name": "ai-transcripts", "mountPath": "/var/log/kubescout", "readOnly": true}]
+}
+```
+
+The helper's tools can then read `/var/log/kubescout/ai/ai-transcript.log`.
+Adding a debug container requires explicit cluster authorization; the agent does
+not add one, expose a log HTTP endpoint or grant debugging permissions.
+
+Once exits 0 for completed assessment, including open incidents or no-action;
+1 for incomplete assessment/console failure; 2 for invalid configuration. Watch
+exits 0 on graceful signal, 1 on bootstrap/unrecoverable console failure, and 2
+on invalid configuration. Transcript failure alone does not change exit status.
 Recoverable model/collection problems remain diagnostics while observation runs.
-Kubernetes persistence and stdout/file output are not transactional.
+Logging success is not proof of persistence; the CRDs are authoritative.
 
 ## Container deployment and migration
 
 Build assets live in [build/](build/); manifests in [deploy/](deploy/).
 Images remain digest-pinned at the base, non-root, credential-free, with a
 read-only root filesystem, dropped capabilities and RuntimeDefault seccomp.
-No probes or writable progress files are introduced.
+The only writable application mount is the bounded ephemeral AI transcript
+directory; no probes or progress volumes are introduced.
 
 **The checked-in Deployment has zero replicas.** It must not silently enable
 billable model calls when applied over the old deterministic installation.
@@ -752,9 +896,11 @@ fails if the Secret already exists; rotate credentials deliberately with standar
 Kubernetes tooling. The target does not start the agent or call a model, and
 credential values are not placed in command arguments or printed.
 
-Old flags `--deterministic-only`, `--report-namespace` and `--report-file` are
-unsupported. Use required AI configuration, `--incident-namespace` and
-`--output-file` respectively.
+Old flags `--deterministic-only`, `--report-namespace`, `--report-file` and
+`--output-file` are unsupported. Use required AI configuration and
+`--incident-namespace` for the incident CRD store. There is no console/file
+incident-export replacement; `--ai-log-dir` configures diagnostic transcripts,
+not incident recording.
 `--simulate-incidents` has also been removed; both authentication modes persist
 accepted AI incident changes.
 
@@ -789,10 +935,11 @@ The collector tests now invoke collector/evidence APIs directly; their RSS is
 test-process RSS, not standalone agent memory. Full agent tests validate an AI
 decision; no-action is valid and does not require a CR to be manufactured.
 
-The [failure-injection script](scripts/inject-failures.sh) still creates optional
-development fixtures with an explicit context/namespace and owned cleanup.
-Run `bash scripts/inject-failures.sh CONTEXT NAMESPACE` in a development cluster,
-using a namespace watched by the agent. Option **7** creates an OOM-kill fixture:
+The [failure-injection script](scripts/inject-failures.sh) creates optional
+development fixtures in the current kubeconfig context, with owned cleanup.
+Select the intended development cluster with `kubectl config use-context ...`,
+then run `bash scripts/inject-failures.sh NAMESPACE` in a namespace watched by
+the agent. Option **7** creates an OOM-kill fixture:
 a Python container allocates 128 MiB against a 64 MiB memory limit, with CPU
 bounded to 100m. It uses `restartPolicy: Never` to retain the expected
 `OOMKilled` termination rather than immediately restarting. Image download and
@@ -816,7 +963,7 @@ running the offline suite.
 | [internal/analysis](internal/analysis) | Agent Framework tool loop, budgets and AI decision validation |
 | [internal/incident](internal/incident) | Correlation, AI incident domain, lifecycle and reconciliation |
 | [internal/runner](internal/runner) | Bounded candidate scheduling, recovery review and freshness checks |
-| [internal/output](internal/output) | Versioned accepted-change output and separate diagnostics |
+| [internal/output](internal/output) | Human-readable GO/AI activity logs and bounded diagnostic AI transcripts; not incident storage |
 | [internal/dashboard](internal/dashboard) | Bounded single-namespace Incident reads and embedded browser UI |
 | [build/](build/) | Separate pinned non-root images and allow-listed build contexts |
 | [deploy/](deploy/) | Incident schema, agent Deployment and workload/incident RBAC |
@@ -825,5 +972,5 @@ running the offline suite.
 AI can still misdiagnose or correlate incorrectly. Bounded references and stable
 identity are safeguards, not a guarantee of semantic correctness. A future sender
 should consume meaningful incident revisions and own delivery status; exactly-once
-notifications/history are separate work. AKS, HA, remediation, logs, automatic
-retention and independent agent-health monitoring remain out of scope.
+notifications/history are separate work. AKS, HA, remediation, Pod-log access,
+automatic incident retention and independent agent-health monitoring remain out of scope.

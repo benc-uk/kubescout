@@ -24,17 +24,19 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: localhost/kubescout:dev
-          imagePullPolicy: Never
+          image: kubescoutImage
+          imagePullPolicy: Always
           args:
             - --auth-mode=in-cluster
             - --incident-namespace=kubescout
             - --observer-id=kind-all
             - --model-calls-per-hour=300
+            - --ai-log-dir=/var/log/kubescout/ai
           # Omit both lists to watch all namespaces; configure at most one.
           env:
             - name: NAMESPACE_WATCH
@@ -49,6 +51,9 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: ai-transcripts
+              mountPath: /var/log/kubescout
           resources:
             requests:
               cpu: 25m
@@ -56,3 +61,7 @@ spec:
             limits:
               cpu: 250m
               memory: 128Mi
+      volumes:
+        - name: ai-transcripts
+          emptyDir:
+            sizeLimit: 128Mi

@@ -3,7 +3,7 @@ Purpose: Exercise collection, tool-assisted AI and incident persistence together
 Flow: Offline Kubernetes and model HTTP fixtures drive the real collector,
 Responses agent and reconciler through namespace scopes and Pod/Service cases.
 Assertions check collection-failure retention, projected evidence with named citations and
-AI-authored Incident output; no live cluster or model is contacted.
+AI-authored stored Incidents and readable activity; no live cluster or model is contacted.
 */
 package runner
 
@@ -81,13 +81,12 @@ func TestMultiNamespaceCollectionFailurePublishesNoIncident(t *testing.T) {
 			var out, diag bytes.Buffer
 
 			r := Runner{Config: c, Source: kube.NewSource(client, c), Analyzer: ai, Incidents: incident.Reconciler{Repository: repo},
-				Output: output.Writer{Out: &out, Err: &diag}}
+				Output: &output.Writer{Out: &out, Err: &diag}}
 			if r.Once(t.Context()) != 1 {
 				t.Fatal("partial multi-namespace collection accepted")
 			}
 
-			var result output.Result
-			if json.Unmarshal(out.Bytes(), &result) != nil || result.Status != "incomplete" || len(result.Changes) != 0 ||
+			if !strings.Contains(diag.String(), "Assessment incomplete") ||
 				ai.calls.Load() != 0 || repo.Records["existing"].Value.Lifecycle.State != "open" || strings.Contains(out.String(), "private-fixture-error") {
 				t.Fatal("collection outage called AI, leaked an error or changed an incident")
 			}
@@ -249,20 +248,19 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 	defer model.Close()
 
 	cfg := config.Config{Once: true, Auth: "in-cluster", ObserverID: "fixture", NamespaceWatch: []string{"apps"}, MaxObjects: 100, MaxInputChars: 20000, MaxOutputTokens: 2000,
-		CallsPerHour: 60, RequestTimeout: time.Second, RunTimeout: 5 * time.Second, InvestigationTimeout: 3 * time.Second, Endpoint: model.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture", Policy: health.DefaultPolicy()}
+		CallsPerHour: 60, MaxToolCalls: config.DefaultMaxToolCalls, RequestTimeout: time.Second, RunTimeout: 5 * time.Second, InvestigationTimeout: 3 * time.Second, Endpoint: model.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture", Policy: health.DefaultPolicy()}
 	cfg.NamespaceWatch, cfg.NamespaceIgnore = scope.NamespaceWatch, scope.NamespaceIgnore
 
 	var out, diag bytes.Buffer
 
 	r := Runner{Config: cfg, Source: kube.NewSource(client, cfg), Analyzer: &analysis.Analyzer{Config: cfg, Kubernetes: client},
 		Incidents: incident.Reconciler{Repository: incident.Kubernetes{Client: client, Namespace: "kubescout", Observer: "fixture", Limit: 100, Timeout: time.Second}, Observer: "fixture", Model: "fixture"},
-		Output:    output.Writer{Out: &out, Err: &diag}}
+		Output:    &output.Writer{Out: &out, Err: &diag}}
 	if code := r.Once(t.Context()); code != 0 {
 		t.Fatalf("code=%d out=%s diag=%s", code, &out, &diag)
 	}
 
-	var result output.Result
-	if json.Unmarshal(out.Bytes(), &result) != nil || len(result.Changes) != 1 || creates.Load() != 1 || modelCalls.Load() != 2 || toolReads.Load() != 1 {
+	if !strings.Contains(out.String(), "1 persisted incident changes") || creates.Load() != 1 || modelCalls.Load() != 2 || toolReads.Load() != 1 {
 		t.Fatalf("wrong end-to-end output: %s", &out)
 	}
 
@@ -270,10 +268,10 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 		t.Fatal("legacy HealthReport was published")
 	}
 
-	name := stored["metadata"].(map[string]any)["name"]
+	name := stored["metadata"].(map[string]any)["name"].(string)
 	if name != incident.Name(incident.Identity{Observer: "fixture", Anchor: resource, Family: family}) ||
-		result.Changes[0].Name != name || !strings.HasPrefix(result.Changes[0].Name, "inc-") {
-		t.Fatal("Incident create and report names do not match")
+		!strings.Contains(out.String(), name) || !strings.HasPrefix(name, "inc-") {
+		t.Fatal("stored Incident name missing from activity log")
 	}
 
 	analysisPayload := stored["spec"].(map[string]any)["analysis"].(map[string]any)

@@ -1,7 +1,7 @@
 /*
 Purpose: Define and validate runtime options, namespace selection and model settings.
-Flow: Combine CLI flags and environment values into collection, evidence-policy
-and AI scheduling limits; repository-root dotenv loading preserves existing values.
+Flow: Combine CLI flags and environment values into collection, evidence-policy,
+logging/console colour and AI limits; repository-root dotenv loading preserves existing values.
 Configuration requires AI settings and rejects removed runtime modes.
 */
 package config
@@ -24,17 +24,22 @@ import (
 )
 
 type Config struct {
-	Once                                                                 bool
-	Auth, Context, Kubeconfig, OutputFile, IncidentNamespace, ObserverID string
+	Once, AILog                                                          bool
+	Auth, Context, Kubeconfig, IncidentNamespace, ObserverID             string
+	LogLevel, LogColor, AILogDir                                         string
 	NamespaceWatch, NamespaceIgnore                                      []string
 	RequestTimeout, RunTimeout, BatchWindow, CheckInterval, WatchTimeout time.Duration
 	MaxObjects, MaxInputChars, MaxOutputTokens, CallsPerHour             int
+	MaxToolCalls                                                         int
 	Endpoint, APIKey, Model                                              string
 	Policy                                                               health.Policy
 	InvestigationTimeout, Cooldown, RecoveryWindow, ReviewInterval       time.Duration
 }
 
 type namespaces []string
+
+// DefaultMaxToolCalls is the default shared per-investigation invocation budget.
+const DefaultMaxToolCalls = 64
 
 // String renders the namespace list as a comma-separated flag value.
 func (n *namespaces) String() string { return strings.Join(*n, ",") }
@@ -88,8 +93,8 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 			return c, errors.New("--deterministic-only was removed; the runtime requires AI configuration, and offline tests use fixtures")
 		case "--report-namespace":
 			return c, errors.New("--report-namespace was replaced by --incident-namespace; HealthReport publication has been removed")
-		case "--report-file":
-			return c, errors.New("--report-file was replaced by --output-file using the schema 3.0 AI incident contract")
+		case "--report-file", "--output-file":
+			return c, errors.New(name + " was removed; incidents are stored in Kubernetes CRDs, not console/file exports; --ai-log-dir selects diagnostic AI transcripts")
 		case "--simulate-incidents":
 			return c, errors.New("--simulate-incidents was removed; accepted AI decisions persist Incidents in both authentication modes")
 		}
@@ -103,13 +108,16 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 		restart       int
 	)
 
-	f.BoolVar(&c.Once, "once", false, "Collect and report once instead of watching")
+	f.BoolVar(&c.Once, "once", false, "Run one bounded AI assessment instead of watching")
 	f.StringVar(&c.Auth, "auth-mode", "", "Required: kubeconfig or in-cluster")
 	f.StringVar(&c.Context, "context", "", "Kubeconfig context override (defaults to the current context)")
 	f.StringVar(&c.Kubeconfig, "kubeconfig", "", "Optional kubeconfig path")
 	f.Var(&watch, "namespace-watch", "Comma-separated namespaces to watch (NAMESPACE_WATCH); default is all")
 	f.Var(&ignore, "namespace-ignore", "Comma-separated namespaces to ignore (NAMESPACE_IGNORE); mutually exclusive with namespace-watch")
-	f.StringVar(&c.OutputFile, "output-file", "", "Atomically replace this file with the latest incident output")
+	f.StringVar(&c.LogLevel, "log-level", "info", "Console verbosity: debug, info, warn or error")
+	f.StringVar(&c.LogColor, "log-color", "always", "ANSI console colour: always or never (including pod logs and redirected output)")
+	f.BoolVar(&c.AILog, "ai-log", true, "Capture rotating AI transcripts; use --ai-log=false to disable")
+	f.StringVar(&c.AILogDir, "ai-log-dir", "logs", "Private AI transcript directory (10 files of at most 10 MiB)")
 	f.StringVar(&c.IncidentNamespace, "incident-namespace", "kubescout", "Namespace for persisted Incident records")
 	f.StringVar(&c.ObserverID, "observer-id", "", "Required stable unique identity for this cluster and observation scope")
 	f.DurationVar(&c.InvestigationTimeout, "investigation-timeout", 120*time.Second, "Whole AI investigation deadline")
@@ -125,6 +133,7 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	f.IntVar(&c.MaxInputChars, "max-input-chars", 20000, "Maximum model evidence length, never truncated")
 	f.IntVar(&c.MaxOutputTokens, "max-output-tokens", 2000, "Per-request model output token limit")
 	f.IntVar(&c.CallsPerHour, "model-calls-per-hour", 60, "Maximum model attempts in a rolling hour")
+	f.IntVar(&c.MaxToolCalls, "max-tool-calls", DefaultMaxToolCalls, "Maximum total tool calls per investigation across both tools (must be positive)")
 	f.DurationVar(&c.Policy.StartupGrace, "startup-grace", c.Policy.StartupGrace, "Normal pod startup/readiness grace")
 	f.DurationVar(&c.Policy.RolloutGrace, "rollout-grace", c.Policy.RolloutGrace, "Deployment rollout grace")
 	f.DurationVar(&c.Policy.EventLookback, "event-lookback", c.Policy.EventLookback, "Warning event lookback")
@@ -136,6 +145,18 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 
 	if f.NArg() != 0 {
 		return c, errors.New("unexpected positional arguments")
+	}
+
+	if !slices.Contains([]string{"debug", "info", "warn", "error"}, c.LogLevel) {
+		return c, errors.New("--log-level must be debug, info, warn or error")
+	}
+
+	if !slices.Contains([]string{"always", "never"}, c.LogColor) {
+		return c, errors.New("--log-color must be always or never")
+	}
+
+	if c.AILog && strings.TrimSpace(c.AILogDir) == "" {
+		return c, errors.New("--ai-log-dir must not be empty when AI logging is enabled")
 	}
 
 	watchSet, ignoreSet := false, false
@@ -204,6 +225,10 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	}
 
 	c.Policy.RestartThreshold = int32(restart)
+	if c.MaxToolCalls <= 0 {
+		return c, errors.New("--max-tool-calls must be positive")
+	}
+
 	if c.MaxObjects <= 0 || c.MaxInputChars <= 0 || c.MaxOutputTokens <= 0 || c.MaxOutputTokens > 1000000 || c.CallsPerHour <= 0 {
 		return c, errors.New("object, input, output and call limits must be positive; max output tokens cannot exceed 1000000")
 	}
