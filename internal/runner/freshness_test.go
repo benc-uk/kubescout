@@ -1,8 +1,9 @@
 /*
 Purpose: Test the inspected-resource freshness check before publication.
-Flow: Offline investigation and snapshot fixtures compare tool-observed
+Flow: Offline investigation and description fixtures compare tool-observed
 versions, rejecting changed or missing inspected resources while allowing
 unrelated resource changes; no AI or Kubernetes requests are made.
+Negative description reads also reject reappearance under a different UID.
 */
 package runner
 
@@ -35,5 +36,21 @@ func TestInspectedResourceMustStillMatchBeforePublication(t *testing.T) {
 	snapshot.Objects = snapshot.Objects[1:]
 	if toolsCurrent(in, snapshot) {
 		t.Fatal("disappeared inspected resource was accepted")
+	}
+}
+
+// TestAbsentDescriptionFreshness rejects resources recreated after an absent-resource description.
+func TestAbsentDescriptionFreshness(t *testing.T) {
+	resource := health.Resource{Kind: "Pod", Namespace: "apps", Name: "target", UID: "old"}
+	ref := incident.Ref(resource)
+
+	in := incident.InvestigationContext{ToolVersions: map[string]string{ref: ""}, Identities: map[string]health.Resource{ref: resource}}
+	if !toolsCurrent(in, health.Snapshot{}) {
+		t.Fatal("continued absence invalidated the observation")
+	}
+
+	resource.UID = "new"
+	if toolsCurrent(in, health.Snapshot{Objects: []health.Object{{Resource: resource, Version: "10"}}}) {
+		t.Fatal("same-name recreation accepted as continued absence")
 	}
 }

@@ -2,6 +2,7 @@
 Purpose: Verify failure logging preserves retry scheduling and incident boundaries.
 Flow: Offline candidate and HTTP model fixtures check readable Go-labelled diagnostics,
 exact backoff, safe once errors and stderr failures without live cluster resources.
+Snapshot preparation uses explicitly unavailable offline workload reads.
 */
 package runner
 
@@ -19,6 +20,8 @@ import (
 	"github.com/benc-uk/kubescout/internal/health"
 	"github.com/benc-uk/kubescout/internal/incident"
 	"github.com/benc-uk/kubescout/internal/output"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 type outputFailure struct{}
@@ -92,6 +95,11 @@ func (outputFailure) Write([]byte) (int, error) { return 0, errors.New("closed")
 // TestOnceProviderRateLimitDiagnostics checks safe execution errors and zero incident mutations.
 func TestOnceProviderRateLimitDiagnostics(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+
 		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(http.StatusTooManyRequests)
 		fmt.Fprint(w, `{"error":{"message":"private-provider-body"}}`)
@@ -102,7 +110,13 @@ func TestOnceProviderRateLimitDiagnostics(t *testing.T) {
 	cfg.Endpoint, cfg.APIKey, cfg.Model = server.URL+"/openai/v1/", "fixture", "fixture"
 	cfg.MaxInputChars, cfg.MaxOutputTokens, cfg.CallsPerHour = 20000, 2000, 60
 	cfg.RequestTimeout, cfg.InvestigationTimeout = time.Second, time.Second
-	ai := &analysis.Analyzer{Config: cfg}
+
+	client, err := dynamic.NewForConfig(&rest.Config{Host: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ai := &analysis.Analyzer{Config: cfg, Kubernetes: client}
 	repo := &incident.Memory{}
 	source := &fakeSource{objects: []health.Object{failedPod()}}
 

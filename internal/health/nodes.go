@@ -20,10 +20,16 @@ func Nodes(s Snapshot, _ Policy) []Finding {
 			out = append(out, NewFinding("node.ready", "critical", o.Resource, "", "Node is not reporting Ready=True", "Ready="+ready.Status))
 		}
 
-		for _, name := range []string{"MemoryPressure", "DiskPressure", "PIDPressure"} {
+		for _, name := range []string{"MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable"} {
 			c, found := condition(o, name)
 			if found && c.Status != "False" {
-				out = append(out, NewFinding("node."+name, "warning", o.Resource, "", "Node reports "+name+"="+c.Status))
+				severity := "warning"
+
+				if name == "NetworkUnavailable" {
+					severity = "critical"
+				}
+
+				out = append(out, NewFinding("node."+name, severity, o.Resource, "", "Node reports "+name+"="+c.Status))
 			}
 		}
 	}

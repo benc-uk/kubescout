@@ -6,6 +6,7 @@ gate reconciliation. Provenance-labelled text explains once/watch activity;
 CRDs alone store incidents. Transcript dispositions and safe failure details
 describe outcomes without changing the existing per-candidate retry schedule.
 Restart scope permits cluster PVs and attachments while retaining namespace boundaries for claims.
+Snapshot reads share freshness guards, including absence and recreated names.
 */
 package runner
 
@@ -464,7 +465,7 @@ func (r *Runner) current(in incident.InvestigationContext, open []incident.Recor
 	return ok && current.Revision == in.Revision && toolsCurrent(in, snapshot) && (!in.RecoveryEligible || !incident.Active(current))
 }
 
-// toolsCurrent requires every tool-inspected resource to retain its observed version.
+// toolsCurrent checks inspected versions and absence, rejecting same-name resource recreation.
 func toolsCurrent(in incident.InvestigationContext, snapshot health.Snapshot) bool {
 	if len(in.ToolVersions) == 0 {
 		return true
@@ -476,6 +477,17 @@ func toolsCurrent(in incident.InvestigationContext, snapshot health.Snapshot) bo
 	}
 
 	for ref, version := range in.ToolVersions {
+		if version == "" {
+			identity := in.Identities[ref]
+			for _, object := range snapshot.Objects {
+				if object.Kind == identity.Kind && object.Namespace == identity.Namespace && object.Name == identity.Name {
+					return false
+				}
+			}
+
+			continue
+		}
+
 		if versions[ref] != version {
 			return false
 		}

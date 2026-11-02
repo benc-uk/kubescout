@@ -82,6 +82,11 @@ func TestClientContextSelection(t *testing.T) {
 				t.Fatalf("context selection failed: identifier=%q err=%v", identifier, err)
 			}
 
+			connection, ok := client.(*Connection)
+			if !ok || connection.DescribeConfig == nil || connection.DescribeConfig.Host != server.URL {
+				t.Fatal("supplemental describe must use the explicitly selected Kubernetes connection")
+			}
+
 			_, err = client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "nodes"}).List(t.Context(), metav1.ListOptions{})
 			if err != nil {
 				t.Fatal(err)

@@ -1,8 +1,9 @@
 /*
 Purpose: Implement the handle-scoped related_warning_events local tool.
 Flow: Shared session validation authorizes paginated Kubernetes Warning reads;
-namespace and target checks filter scoped events before bounded redacted
+namespace and target checks filter scoped events before bounded, credential-protected
 projection. Invalid or incomplete reads return errors, not accepted evidence.
+Failed reads remain errors, never accepted empty events or healthy evidence.
 */
 package investigation
 
@@ -25,9 +26,9 @@ type RelatedWarningEvents struct {
 // Name identifies the related Warning event function registered with the model.
 func (t RelatedWarningEvents) Name() string { return "related_warning_events" }
 
-// Description tells the model that event reads are bounded, redacted and handle-scoped.
+// Description tells the model that event reads are bounded, credential-protected and handle-scoped.
 func (t RelatedWarningEvents) Description() string {
-	return "Read bounded, redacted Warning events for one authorised resource handle."
+	return "Read bounded, credential-protected Warning events for one authorised resource handle."
 }
 
 // Schema restricts event arguments to a single supplied resource handle.
@@ -83,7 +84,7 @@ func (t RelatedWarningEvents) readEvents(ctx context.Context, _ string, r health
 
 			page, err := s.Client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "events"}).Namespace(namespace).List(ctx, opts)
 			if err != nil {
-				return errors.New("related event read failed")
+				return &UnavailableError{Operation: "related event read"}
 			}
 
 			if page.GetResourceVersion() == "" || version != "" && version != page.GetResourceVersion() {

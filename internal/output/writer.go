@@ -1,7 +1,8 @@
 /*
 Purpose: Render operator-facing text with explicit Go/model provenance and phases.
 Flow: Concurrent callers emit bounded single-line events to stdout or stderr,
-optionally colouring trusted labels after escaping external text. Console
+optionally colouring trusted labels after escaping external text. Credential
+values are removed without discarding surrounding operational details. Console
 failures are retained for the runner. Logs describe work, never store
 incidents or turn deterministic observations into AI conclusions.
 */
@@ -31,9 +32,10 @@ type Writer struct {
 
 type investigationKey struct{}
 
-var credentialText = regexp.MustCompile(`(?i)(bearer\s+\S+|(?:password|passwd|api[_-]?key|access[_-]?token|secret)\s*[:=]\s*["']?[^\s"',;]+|https?://[^/\s]+:[^@\s]+@)`)
+var credentialText = regexp.MustCompile(`(?i)\b((?:bearer|basic)[ \t]+|(?:authorization|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret)[ \t]*["']?[ \t]*[:=][ \t]*(?:(?:bearer|basic)[ \t]+)?)(\[redacted credential\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\s"',;&<>]+)`)
+var credentialURL = regexp.MustCompile(`(?i)(https?://[^/\s:@]+:)(?:\[redacted credential\]|[^@\s]+)@`)
 
-// Redact removes configured credentials and recognizable credential assignments, not operational prose.
+// Redact removes credential values while retaining field names, URLs and surrounding operational prose.
 func Redact(text string, secrets ...string) string {
 	for _, secret := range secrets {
 		if secret != "" {
@@ -41,7 +43,19 @@ func Redact(text string, secrets ...string) string {
 		}
 	}
 
-	return credentialText.ReplaceAllString(text, "[redacted credential]")
+	text = credentialText.ReplaceAllStringFunc(text, func(match string) string {
+		parts := credentialText.FindStringSubmatch(match)
+		value := "[redacted credential]"
+
+		if parts[2][0] == '"' || parts[2][0] == '\'' {
+			quote := parts[2][:1]
+			value = quote + value + quote
+		}
+
+		return parts[1] + value
+	})
+
+	return credentialURL.ReplaceAllString(text, "${1}[redacted credential]@")
 }
 
 // WithInvestigation attaches diagnostic correlation without changing model input or incident identity.

@@ -123,6 +123,66 @@ spec:
                       type: string
                     analysis_id:
                       type: string
+                evidence:
+                  type: object
+                  description: Latest bounded native kubectl descriptions shown to AI for this lifecycle revision, not duplicate typed state or event copies.
+                  required: [format, descriptions, omitted_resources]
+                  properties:
+                    format:
+                      type: string
+                      enum: [kubectl-describe/v1]
+                    omitted_resources:
+                      type: integer
+                      minimum: 0
+                      maximum: 49
+                    descriptions:
+                      type: array
+                      minItems: 1
+                      maxItems: 4
+                      items:
+                        type: object
+                        required: [evidence_id, resource, source, observed_at, output]
+                        properties:
+                          evidence_id:
+                            type: string
+                            minLength: 1
+                            maxLength: 128
+                          resource:
+                            type: object
+                            required: [ref, kind, name]
+                            properties:
+                              ref:
+                                type: string
+                                minLength: 1
+                                maxLength: 128
+                              kind:
+                                type: string
+                                minLength: 1
+                                maxLength: 63
+                              namespace:
+                                type: string
+                                maxLength: 63
+                              name:
+                                type: string
+                                minLength: 1
+                                maxLength: 253
+                          observed_at:
+                            type: string
+                            format: date-time
+                          source:
+                            type: string
+                            enum: [kubectl/v0.35.9]
+                          output:
+                            type: object
+                            required: [status, text]
+                            properties:
+                              status:
+                                type: string
+                                enum: [captured, partial, unavailable, absent]
+                              text:
+                                type: string
+                                minLength: 1
+                                maxLength: 8192
                 lifecycle:
                   type: object
                   required: [state, revision, recurrences, raised_at, updated_at]

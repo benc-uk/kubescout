@@ -3,6 +3,7 @@ Purpose: Define incident identity, lifecycle and AI investigation contracts.
 Flow: Model-visible contexts keep host identities separate; decision validation
 checks actions, resource handles, citations and recovery eligibility before
 reconciliation, while allowing explicit AI no-action.
+Host-owned descriptions accompany decisions outside the model's JSON contract.
 */
 package incident
 
@@ -53,6 +54,7 @@ type Incident struct {
 	Resources []health.Resource `json:"resources"`
 	Analysis  Analysis          `json:"analysis"`
 	Lifecycle Lifecycle         `json:"lifecycle"`
+	Evidence  *Evidence         `json:"evidence,omitempty"`
 }
 
 type Resource struct {
@@ -86,6 +88,7 @@ type InvestigationContext struct {
 	Resources        []Resource `json:"resources"`
 	Signals          []Signal   `json:"signals"`
 	Incidents        []Existing `json:"incidents"`
+	Evidence         *Evidence  `json:"evidence,omitempty"`
 	// Identities and objects are host-side only. UIDs are never model evidence.
 	Identities   map[string]health.Resource `json:"-"`
 	Objects      map[string]health.Object   `json:"-"`
@@ -110,9 +113,10 @@ type Action struct {
 }
 
 type Decision struct {
-	Outcome string   `json:"outcome"`
-	Reason  string   `json:"reason"`
-	Actions []Action `json:"actions"`
+	Outcome  string    `json:"outcome"`
+	Reason   string    `json:"reason"`
+	Actions  []Action  `json:"actions"`
+	Evidence *Evidence `json:"-"`
 }
 
 type Change struct {
@@ -122,7 +126,7 @@ type Change struct {
 }
 
 const APIVersion = "kubescout.benc-uk.github.com/v1alpha1"
-const PromptVersion = "incident-v2"
+const PromptVersion = "incident-v4"
 
 // Name derives a stable Incident name from observer, anchor identity and incident family.
 func Name(identity Identity) string {

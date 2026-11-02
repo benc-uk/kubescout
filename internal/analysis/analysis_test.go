@@ -3,6 +3,7 @@ Purpose: Test AI decision validation, tool round trips and transport limits.
 Flow: Offline local HTTP fixtures exercise actual SDK requests, projected
 evidence with operation-named citations and no-action; malformed output, model failures
 and exhausted budgets must not yield incident actions.
+Native describe resource and Warning reads precede the model's optional tools.
 */
 package analysis
 
@@ -87,12 +88,19 @@ func TestResponsesToolRoundTripAndNoAction(t *testing.T) {
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reads.Add(1)
 
+		if r.URL.Path == "/api/v1/namespaces/apps/events" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"apiVersion":"v1","kind":"EventList","metadata":{"resourceVersion":"1"},"items":[]}`)
+
+			return
+		}
+
 		if r.Method != "GET" || r.URL.Path != "/api/v1/namespaces/apps/pods/bad" {
 			t.Error("unscoped tool request")
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"bad","namespace":"apps","uid":"private-uid"},"spec":{"containers":[{"name":"bad","env":[{"name":"PASSWORD","value":"do-not-send"}]}]},"status":{"phase":"Failed","conditions":[{"type":"Ready","status":"False","message":"password=do-not-send"}]}}`)
+		fmt.Fprint(w, `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"bad","namespace":"apps","uid":"private-uid","resourceVersion":"7"},"spec":{"containers":[{"name":"bad","env":[{"name":"PASSWORD","value":"do-not-send"}]}]},"status":{"phase":"Failed","conditions":[{"type":"Ready","status":"False","message":"password=do-not-send"}]}}`)
 	}))
 	defer kubeServer.Close()
 
@@ -132,14 +140,15 @@ func TestResponsesToolRoundTripAndNoAction(t *testing.T) {
 	defer model.Close()
 
 	a := Analyzer{Config: config.Config{Endpoint: model.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture", MaxInputChars: 20000,
-		MaxOutputTokens: 2000, MaxToolCalls: config.DefaultMaxToolCalls, RequestTimeout: time.Second, InvestigationTimeout: 5 * time.Second, CallsPerHour: 60}, Kubernetes: kube}
+		MaxOutputTokens: 2000, MaxToolCalls: config.DefaultMaxToolCalls, RequestTimeout: time.Second, InvestigationTimeout: 5 * time.Second, CallsPerHour: 60},
+		Kubernetes: kube, DescribeConfig: &rest.Config{Host: kubeServer.URL}}
 
 	d, err := a.Investigate(t.Context(), in)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if d.Outcome != "no_action" || calls.Load() != 2 || reads.Load() != 1 {
+	if d.Outcome != "no_action" || calls.Load() != 2 || reads.Load() != 3 {
 		t.Fatal("unexpected investigation flow")
 	}
 }
@@ -170,7 +179,7 @@ func TestModelFailuresHaveNoIncidentDecision(t *testing.T) {
 			defer server.Close()
 
 			a := Analyzer{Config: config.Config{Endpoint: server.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture", MaxInputChars: 20000, MaxOutputTokens: 1000,
-				MaxToolCalls: config.DefaultMaxToolCalls, RequestTimeout: time.Second, InvestigationTimeout: time.Second, CallsPerHour: 60}}
+				MaxToolCalls: config.DefaultMaxToolCalls, RequestTimeout: time.Second, InvestigationTimeout: time.Second, CallsPerHour: 60}, Kubernetes: descriptionKubernetes(t)}
 
 			d, err := a.Investigate(t.Context(), inputFixture())
 			if err == nil || len(d.Actions) != 0 || calls.Load() != 1 {

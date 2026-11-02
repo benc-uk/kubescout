@@ -1,9 +1,11 @@
 /*
-Purpose: Share investigation tool validation, budgets, redaction and diagnostics.
+Purpose: Share investigation tool validation, budgets, credential protection and diagnostics.
 Flow: Both local tools resolve model-supplied handles through private identities
 before scoped reads, including cluster-scoped PVs and attachments; one session enforces call, byte and timeout limits and
 registers operation-named citations only for accepted evidence. Logs distinguish
 AI requests from Go execution without publishing incidents or raw objects.
+Automatic native descriptions share authorization and evidence-byte limits with tools,
+using private authentication and their own bounded transport.
 */
 package investigation
 
@@ -13,9 +15,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/benc-uk/kubescout/internal/config"
 	"github.com/benc-uk/kubescout/internal/health"
@@ -23,19 +25,22 @@ import (
 	"github.com/benc-uk/kubescout/internal/output"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 // Session holds the shared scope, budgets and evidence registry for one investigation.
 type Session struct {
-	Client        dynamic.Interface
-	Investigation incident.InvestigationContext
-	Timeout       time.Duration
-	Calls, Bytes  int
-	MaxCalls      int
-	Citations     map[string]bool
-	Scope         config.Config
-	Log           *output.Writer
-	Transcript    *output.Transcript
+	Client         dynamic.Interface
+	Investigation  incident.InvestigationContext
+	Timeout        time.Duration
+	Calls, Bytes   int
+	MaxCalls       int
+	Citations      map[string]bool
+	Scope          config.Config
+	Log            *output.Writer
+	Transcript     *output.Transcript
+	DescribeConfig *rest.Config
+	SecretValues   []string
 }
 
 // LimitError describes a local tool budget rejection without arguments or evidence.
@@ -43,6 +48,14 @@ type LimitError struct {
 	Kind            string
 	Observed, Limit int
 }
+
+// UnavailableError identifies a failed API read without retaining upstream error text.
+type UnavailableError struct {
+	Operation string
+}
+
+// Error reports only the fixed local read operation.
+func (e *UnavailableError) Error() string { return e.Operation + " failed" }
 
 // Error reports only a fixed budget category and numeric usage.
 func (e *LimitError) Error() string {
@@ -138,19 +151,9 @@ func (s *Session) call(ctx context.Context, name, args string, read func(context
 		return nil, errors.New("trailing tool arguments")
 	}
 
-	r, ok := s.Investigation.Identities[ref]
-
-	_, known := resources[r.Kind]
-	if !ok || !known {
-		return nil, errors.New("unauthorised tool resource")
-	}
-
-	if health.ClusterScoped(r.Kind) {
-		if r.Namespace != "" {
-			return nil, errors.New("unauthorised cluster resource namespace")
-		}
-	} else if !s.Scope.WatchesNamespace(r.Namespace) {
-		return nil, errors.New("tool resource outside namespace scope")
+	r, err := s.authorize(ref)
+	if err != nil {
+		return nil, err
 	}
 
 	s.Calls++
@@ -188,20 +191,40 @@ func (s *Session) call(ctx context.Context, name, args string, read func(context
 	return result, nil
 }
 
-// A regular expression to match sensitive information patterns in strings.
-var sensitive = regexp.MustCompile(`(?i)(authorization|bearer|password|passwd|api[_-]?key|secret|token|://[^/\s]+:[^@\s]+@)`)
+// authorize resolves a supplied handle and enforces resource-kind and namespace scope.
+func (s *Session) authorize(ref string) (health.Resource, error) {
+	r, ok := s.Investigation.Identities[ref]
 
-// redactValue recursively replaces strings matching sensitive patterns and truncates long strings.
-// Other scalar values pass through; arbitrary text is not guaranteed secret-free.
+	_, known := resources[r.Kind]
+	if !ok || !known {
+		return health.Resource{}, errors.New("unauthorised tool resource")
+	}
+
+	if health.ClusterScoped(r.Kind) {
+		if r.Namespace != "" {
+			return health.Resource{}, errors.New("unauthorised cluster resource namespace")
+		}
+	} else if !s.Scope.WatchesNamespace(r.Namespace) {
+		return health.Resource{}, errors.New("tool resource outside namespace scope")
+	}
+
+	return r, nil
+}
+
+// redactValue removes credential values and bounds strings without filtering operational keywords.
+// Other scalar values pass through; arbitrary text is not guaranteed credential-free.
 func redactValue(v any) any {
 	switch value := v.(type) {
 	case string:
-		if sensitive.MatchString(value) {
-			return "[redacted sensitive text]"
-		}
+		value = output.Redact(value)
 
 		if len(value) > 1024 {
-			return value[:1024] + " [truncated]"
+			end := 1024
+			for end > 0 && !utf8.RuneStart(value[end]) {
+				end--
+			}
+
+			return value[:end] + " [truncated]"
 		}
 
 		return value

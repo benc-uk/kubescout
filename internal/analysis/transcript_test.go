@@ -3,6 +3,7 @@ Purpose: Verify AI capture at actual SDK request and tool boundaries.
 Flow: Offline HTTP fixtures compare enabled, disabled and failed file capture,
 including multiple model rounds, invalid decisions, quotas and credential exclusion.
 Transcripts must not change model attempts or create incident decisions on failure.
+The same native describe reads run with capture enabled or disabled.
 */
 package analysis
 
@@ -32,10 +33,16 @@ func TestSDKTranscriptRoundTrips(t *testing.T) {
 
 			var calls, reads atomic.Int32
 
-			kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				reads.Add(1)
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"bad","namespace":"apps","uid":"private-uid"},"status":{"phase":"Failed"}}`)
+
+				if r.URL.Path == "/api/v1/namespaces/apps/events" {
+					fmt.Fprint(w, `{"apiVersion":"v1","kind":"EventList","metadata":{"resourceVersion":"1"},"items":[]}`)
+					return
+				}
+
+				fmt.Fprint(w, `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"bad","namespace":"apps","uid":"private-uid","resourceVersion":"7"},"status":{"phase":"Failed"}}`)
 			}))
 			defer kubeServer.Close()
 
@@ -59,7 +66,7 @@ func TestSDKTranscriptRoundTrips(t *testing.T) {
 			dir := t.TempDir()
 			a := Analyzer{Config: config.Config{Endpoint: model.URL + "/openai/v1/", APIKey: "fixture-secret", Model: "fixture-model",
 				MaxInputChars: 20000, MaxOutputTokens: 2000, MaxToolCalls: 64, CallsPerHour: 60, RequestTimeout: time.Second, InvestigationTimeout: 5 * time.Second},
-				Kubernetes: client, Log: log}
+				Kubernetes: client, DescribeConfig: &rest.Config{Host: kubeServer.URL}, Log: log}
 
 			if mode != "disabled" {
 				if mode == "unwritable" {
@@ -75,7 +82,7 @@ func TestSDKTranscriptRoundTrips(t *testing.T) {
 			ctx := output.WithInvestigation(t.Context(), "42", "Pod apps/bad")
 
 			decision, err := a.Investigate(ctx, in)
-			if err != nil || decision.Outcome != "no_action" || calls.Load() != 2 || reads.Load() != 1 {
+			if err != nil || decision.Outcome != "no_action" || calls.Load() != 2 || reads.Load() != 3 {
 				t.Fatalf("capture changed execution: %v calls=%d reads=%d", err, calls.Load(), reads.Load())
 			}
 
@@ -180,7 +187,7 @@ func TestTranscriptRejectedResponses(t *testing.T) {
 
 			a := Analyzer{Config: config.Config{Endpoint: server.URL + "/openai/v1/", APIKey: "fixture-secret", Model: "fixture",
 				MaxInputChars: 20000, MaxOutputTokens: 2000, MaxToolCalls: 64, CallsPerHour: 60, RequestTimeout: time.Second, InvestigationTimeout: time.Second},
-				Transcript: output.NewTranscript(dir, nil)}
+				Transcript: output.NewTranscript(dir, nil), Kubernetes: descriptionKubernetes(t)}
 			if mode == "quota" {
 				a.Config.CallsPerHour = 0
 			}

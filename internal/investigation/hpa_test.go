@@ -1,7 +1,7 @@
 /*
 Purpose: Test HPA inspection, evidence limits and approved target handles.
 Flow: Offline HTTP fixtures verify autoscaling/v2 GET and Warning-event shapes,
-numeric scaling facts, redacted messages/identifiers and selector exclusion.
+numeric scaling facts, preserved metric names, credential-protected messages and selector exclusion.
 Invalid scope, schema or oversized results receive no accepted citations.
 */
 package investigation
@@ -23,7 +23,7 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// hpaInspectionObject supplies CPU and external metrics with synthetic selectors and sensitive identifiers.
+// hpaInspectionObject supplies CPU and token-rate metrics with synthetic selectors and credentials.
 func hpaInspectionObject() map[string]any {
 	return map[string]any{"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
 		"metadata": map[string]any{"name": "web", "namespace": "apps", "uid": "hpa-uid", "resourceVersion": "7", "generation": int64(2),
@@ -100,13 +100,13 @@ func TestHPAInspectionAndEvents(t *testing.T) {
 
 	current := state["current_metrics"].([]map[string]any)
 	if len(metrics) != 2 || metrics[0]["average_utilization"] != int32(70) ||
-		len(current) != 1 || current[0]["average_utilization"] != int32(90) || metrics[1]["name"] != "[redacted sensitive text]" ||
+		len(current) != 1 || current[0]["average_utilization"] != int32(90) || metrics[1]["name"] != "token_rate" ||
 		state["scale_down"].(map[string]any)["stabilization_window_seconds"] != int32(300) {
 		t.Fatal("metric or scaling behavior projection missing")
 	}
 
 	data, _ := json.Marshal(value)
-	for _, forbidden := range []string{"private-", "hpa-uid", "target-uid", "token_rate", "password=fixture", "matchLabels", "selector"} {
+	for _, forbidden := range []string{"private-", "hpa-uid", "target-uid", "password=fixture", "matchLabels", "selector"} {
 		if strings.Contains(string(data), forbidden) {
 			t.Fatalf("unapproved HPA data reached model output: %s", forbidden)
 		}

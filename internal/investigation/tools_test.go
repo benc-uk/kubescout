@@ -3,7 +3,7 @@ Purpose: Test separate investigation tool contracts, scope and shared budgets.
 Flow: Offline Kubernetes HTTP fixtures check handles before API access,
 operation-named citations, version tracking, private-field exclusion, cross-tool
 call and byte limits and node event pagination; typed budget failures must not
-return accepted tool evidence. Tool names, descriptions and schemas stay stable.
+return accepted tool evidence. Operational keywords remain visible while credential values do not.
 */
 package investigation
 
@@ -41,11 +41,11 @@ func TestToolContracts(t *testing.T) {
 	}{
 		{
 			tool: InspectResource{}, name: "inspect_resource",
-			description: "Read approved current state and redacted condition messages for one supplied resource handle; never raw objects.",
+			description: "Read approved current state and credential-protected condition messages for one supplied resource handle; never raw objects.",
 		},
 		{
 			tool: RelatedWarningEvents{}, name: "related_warning_events",
-			description: "Read bounded, redacted Warning events for one authorised resource handle.",
+			description: "Read bounded, credential-protected Warning events for one authorised resource handle.",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -61,6 +61,38 @@ func TestToolContracts(t *testing.T) {
 				t.Fatal("model-facing tool contract changed")
 			}
 		})
+	}
+}
+
+// TestOperationalTextPreserved verifies shared projections retain keywords, identifiers and credential context.
+func TestOperationalTextPreserved(t *testing.T) {
+	input := map[string]any{
+		"name": "token_rate",
+		"path": "/secrets/token-refresh",
+		"messages": []any{
+			"FailedToRetrieveImagePullSecret: secret app-registry unavailable",
+			"authorization denied for worker-1 at 10.20.30.40; token refresh failed",
+			"Attach failed: password=fixture-password; volume=data",
+		},
+	}
+	want := map[string]any{
+		"name": "token_rate",
+		"path": "/secrets/token-refresh",
+		"messages": []any{
+			"FailedToRetrieveImagePullSecret: secret app-registry unavailable",
+			"authorization denied for worker-1 at 10.20.30.40; token refresh failed",
+			"Attach failed: password=[redacted credential]; volume=data",
+		},
+	}
+
+	gotJSON, err := json.Marshal(redactValue(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantJSON, err := json.Marshal(want)
+	if err != nil || string(gotJSON) != string(wantJSON) {
+		t.Fatalf("operational content changed: %s", gotJSON)
 	}
 }
 
@@ -267,7 +299,7 @@ func TestToolsShareSessionBudgets(t *testing.T) {
 					}
 				} else {
 					events, ok := evidence["events"].([]map[string]any)
-					if !ok || len(events) != 1 || events[0]["message"] != "[redacted sensitive text]" ||
+					if !ok || len(events) != 1 || !strings.Contains(fmt.Sprint(events[0]["message"]), "[redacted credential]") ||
 						evidence["exists"] != nil || evidence["state"] != nil {
 						t.Fatal("Warning event result shape or redaction changed")
 					}

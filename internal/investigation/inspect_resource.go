@@ -1,12 +1,13 @@
 /*
 Purpose: Implement the handle-scoped inspect_resource local tool.
 Flow: Shared session validation authorizes a bounded Kubernetes GET; identity
-checks and approved projections return redacted state and track inspected
-resource versions. No raw objects, credentials or workload writes are exposed.
+checks and approved projections protect credential values and track inspected
+resource versions or absence, consistent with automatic description reads. No raw
+objects, credentials or workload writes are exposed.
 Storage inspection excludes all volume sources, raw claim references and storage paths.
 CronJob inspection includes approved schedule/status facts and template container specifications.
-HPA inspection shares condition redaction and excludes metric selectors and metrics API calls.
-Ingress inspection returns redacted configuration, not TLS validity or network reachability.
+HPA inspection shares credential protection and excludes metric selectors and metrics API calls.
+Ingress inspection returns configuration, not TLS validity or network reachability.
 Attachment inspection returns bounded driver errors without metadata or inline volume configuration.
 */
 package investigation
@@ -33,7 +34,7 @@ func (t InspectResource) Name() string { return "inspect_resource" }
 
 // Description tells the model that inspection returns approved fields, never raw objects.
 func (t InspectResource) Description() string {
-	return "Read approved current state and redacted condition messages for one supplied resource handle; never raw objects."
+	return "Read approved current state and credential-protected condition messages for one supplied resource handle; never raw objects."
 }
 
 // Schema restricts inspection arguments to a single supplied resource handle.
@@ -47,19 +48,28 @@ func (t InspectResource) Call(ctx context.Context, args string) (any, error) {
 	return t.Session.call(ctx, t.Name(), args, t.inspect)
 }
 
-// inspect reads one resource incarnation and projects only approved, redacted state.
-// Successful reads track resource versions for later stale-result rejection.
+// inspect reads one resource incarnation and projects approved state with credential values removed.
+// Successful reads track resource versions or absence for later stale-result rejection.
 func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resource, result map[string]any) error {
 	s := t.Session
 
 	obj, err := s.Client.Resource(resources[r.Kind]).Namespace(r.Namespace).Get(ctx, r.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		result["exists"] = false
+
+		if s.Investigation.ToolVersions != nil {
+			if version, read := s.Investigation.ToolVersions[ref]; read && version != "" {
+				return errors.New("resource disappeared between investigation reads")
+			}
+
+			s.Investigation.ToolVersions[ref] = ""
+		}
+
 		return nil
 	}
 
 	if err != nil {
-		return errors.New("resource inspection failed")
+		return &UnavailableError{Operation: "resource inspection"}
 	}
 
 	if string(obj.GetUID()) != r.UID || obj.GetName() != r.Name || obj.GetNamespace() != r.Namespace || obj.GetKind() != r.Kind {
@@ -69,6 +79,10 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 	if s.Investigation.ToolVersions != nil {
 		if obj.GetResourceVersion() == "" {
 			return errors.New("inspection response lacks a resource version")
+		}
+
+		if version, read := s.Investigation.ToolVersions[ref]; read && version != obj.GetResourceVersion() {
+			return errors.New("resource changed between investigation reads")
 		}
 
 		s.Investigation.ToolVersions[ref] = obj.GetResourceVersion()

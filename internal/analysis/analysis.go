@@ -5,7 +5,10 @@ inspection and Warning event tools sharing a session invocation cap and HTTP bud
 citation and lifecycle checks return a
 decision, including no-action, or safe classified failure details without
 publishing an incident or exposing raw provider errors. Each actual HTTP attempt
-and validation outcome can be captured in a bounded, sanitized local transcript.
+and validation outcome can be captured in a bounded, credential-protected local transcript.
+Native kubectl descriptions enter AI context first and accompany only validated
+decisions as host-owned Incident evidence. On-demand typed tools share evidence
+limits without storing duplicate state or Warning-event snapshots.
 */
 package analysis
 
@@ -34,16 +37,18 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 type Analyzer struct {
-	Config     config.Config
-	Kubernetes dynamic.Interface
-	HTTPClient *http.Client
-	Log        *output.Writer
-	Transcript *output.Transcript
-	mu         sync.Mutex
-	calls      []time.Time
+	Config         config.Config
+	Kubernetes     dynamic.Interface
+	DescribeConfig *rest.Config
+	HTTPClient     *http.Client
+	Log            *output.Writer
+	Transcript     *output.Transcript
+	mu             sync.Mutex
+	calls          []time.Time
 }
 
 type boundedClient struct {
@@ -129,6 +134,11 @@ func (a *Analyzer) Investigate(ctx context.Context, in incident.InvestigationCon
 		return incident.Decision{}, errors.New("investigation tool-call limit must be positive")
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, a.Config.InvestigationTimeout)
+	defer cancel()
+
+	in.Evidence = nil
+
 	payload, err := json.Marshal(in)
 	if err != nil {
 		return incident.Decision{}, errors.New("investigation input serialization failed")
@@ -146,12 +156,41 @@ func (a *Analyzer) Investigate(ctx context.Context, in incident.InvestigationCon
 		}
 	}
 
+	citations := map[string]bool{"snapshot": true}
+	for _, signal := range in.Signals {
+		citations[signal.ID] = true
+	}
+
+	session := &investigation.Session{Client: a.Kubernetes, Investigation: in, Timeout: a.Config.RequestTimeout, Citations: citations,
+		MaxCalls: a.Config.MaxToolCalls, Log: a.Log, Transcript: a.Transcript,
+		DescribeConfig: a.DescribeConfig, SecretValues: []string{a.Config.APIKey},
+		Scope: config.Config{NamespaceWatch: a.Config.NamespaceWatch, NamespaceIgnore: a.Config.NamespaceIgnore}}
+
+	evidenceBudget := min(incident.MaxDescriptionBytes, a.Config.MaxInputChars-len(payload)-len(`,"evidence":`))
+
+	in.Evidence, err = session.CaptureDescriptions(ctx, evidenceBudget)
+	if err != nil {
+		if ctx.Err() != nil {
+			kind := "investigation_deadline"
+			if errors.Is(ctx.Err(), context.Canceled) {
+				kind = "investigation_canceled"
+			}
+
+			return incident.Decision{}, &Failure{Kind: kind, ModelRequestLimit: 6, ToolCallLimit: a.Config.MaxToolCalls,
+				CallsInHour: a.callsInHour(time.Now()), CallsPerHourLimit: a.Config.CallsPerHour}
+		}
+
+		return incident.Decision{}, fmt.Errorf("resource describe preparation: %w", err)
+	}
+
+	payload, err = json.Marshal(in)
+	if err != nil {
+		return incident.Decision{}, errors.New("investigation input serialization failed")
+	}
+
 	if a.Transcript != nil {
 		a.Transcript.Record(scope, "GO", "CONTEXT", transcriptPayload(payload, a.Config.APIKey, in))
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, a.Config.InvestigationTimeout)
-	defer cancel()
 
 	client := a.HTTPClient
 	if client == nil {
@@ -167,15 +206,6 @@ func (a *Analyzer) Investigate(ctx context.Context, in incident.InvestigationCon
 		ToolAutoCall: &toolautocall.Config{MaximumIterationsPerRequest: new(4), MaximumConsecutiveErrorsPerRequest: new(0),
 			TerminateOnUnknownCalls: true, AllowConcurrentInvocations: false},
 	})
-
-	citations := map[string]bool{"snapshot": true}
-	for _, s := range in.Signals {
-		citations[s.ID] = true
-	}
-
-	session := &investigation.Session{Client: a.Kubernetes, Investigation: in, Timeout: a.Config.RequestTimeout, Citations: citations,
-		MaxCalls: a.Config.MaxToolCalls, Log: a.Log, Transcript: a.Transcript,
-		Scope: config.Config{NamespaceWatch: a.Config.NamespaceWatch, NamespaceIgnore: a.Config.NamespaceIgnore}}
 
 	result, err := agentClient.RunText(ctx, string(payload),
 		agent.WithTool(investigation.InspectResource{Session: session}),
@@ -220,6 +250,8 @@ func (a *Analyzer) Investigate(ctx context.Context, in incident.InvestigationCon
 	decision, investigationErr = Validate(result.String(), in, citations)
 	if investigationErr != nil {
 		_ = a.Log.Log("warn", "GO", "VALIDATE", scope+" model decision rejected: "+investigationErr.Error())
+	} else {
+		decision.Evidence = in.Evidence
 	}
 
 	return decision, investigationErr

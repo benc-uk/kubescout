@@ -73,8 +73,32 @@ export function validateDetail(data) {
       || !analysis || !["diagnosis", "explanation", "uncertainty", "model", "prompt_version", "analysis_id"]
         .every((key) => typeof analysis[key] === "string")
       || !["recommendations", "evidence_ids"].every((key) => Array.isArray(analysis[key])
-        && analysis[key].every((value) => typeof value === "string"))) {
+        && analysis[key].every((value) => typeof value === "string"))
+      || !isEvidence(data?.incident?.evidence)) {
     throw new Error("The dashboard returned invalid incident details.");
+  }
+
+  function isEvidence(evidence) {
+    if (evidence === undefined) return true;
+    if (!evidence || evidence.format !== "kubectl-describe/v1" || !Array.isArray(evidence.descriptions)
+        || evidence.descriptions.length < 1 || evidence.descriptions.length > 4
+        || !Number.isInteger(evidence.omitted_resources) || evidence.omitted_resources < 0
+        || evidence.omitted_resources + evidence.descriptions.length > 50
+        || new TextEncoder().encode(JSON.stringify(evidence)).length > 16384) return false;
+    const refs = new Set();
+    const ids = new Set();
+    return evidence.descriptions.every((description) => {
+      if (!description || !isResource(description.resource) || typeof description.resource.ref !== "string"
+          || !description.resource.ref || typeof description.evidence_id !== "string" || !description.evidence_id
+          || description.source !== "kubectl/v0.35.9" || refs.has(description.resource.ref) || ids.has(description.evidence_id)
+          || !Number.isFinite(Date.parse(description.observed_at))) return false;
+      refs.add(description.resource.ref);
+      ids.add(description.evidence_id);
+      const section = description.output;
+      return section && ["captured", "partial", "unavailable", "absent"].includes(section.status)
+        && typeof section.text === "string" && section.text.trim().length > 0
+        && new TextEncoder().encode(section.text).length <= 8192;
+    });
   }
   return data;
 }

@@ -3,6 +3,8 @@ Purpose: Bootstrap the KubeScout CLI and coordinate process shutdown and exit co
 Flow: Load validated configuration, select Kubernetes access and wire collection,
 AI investigation, CRD reconciliation, colour-configurable logs and optional rotating AI
 transcripts into once or watch execution.
+Supplemental kubectl describe shares the explicit Kubernetes authentication,
+with independent guarded reads rather than replacing collection or AI tools.
 Both authentication modes persist cluster-scoped Incidents; there is no runtime simulation path.
 */
 package main
@@ -93,7 +95,13 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 
 	source := kube.NewSource(client, c)
 	source.Log = sink
-	r := runner.Runner{Config: c, Source: source, Analyzer: &analysis.Analyzer{Config: c, Kubernetes: client, Log: sink, Transcript: transcript}, Output: sink,
+
+	analyzer := &analysis.Analyzer{Config: c, Kubernetes: client, Log: sink, Transcript: transcript}
+	if connection, ok := client.(*kube.Connection); ok {
+		analyzer.DescribeConfig = connection.DescribeConfig
+	}
+
+	r := runner.Runner{Config: c, Source: source, Analyzer: analyzer, Output: sink,
 		Transcript: transcript, Incidents: newIncidentReconciler(c, client)}
 	_ = sink.Log("info", "GO", "BOOT", fmt.Sprintf("AI investigation for %s, %s (once=%t)", cluster, c.NamespaceScope(), c.Once))
 

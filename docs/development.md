@@ -22,7 +22,7 @@ make check
 `make setup` downloads/verifies modules and installs the pinned linter locally.
 Routine tests use offline fixtures, not a cluster or model. They exercise actual
 Kubernetes/Responses HTTP request shapes, tool rounds, decisions and incident
-writes. Coverage includes no-action on critical evidence, scope/redaction,
+writes. Coverage includes no-action on critical evidence, scope/credential protection,
 budgets, coalescing, failures, recovery, restart reconciliation and material updates.
 
 Keep production behavior AI-first: fixtures are test repositories, not an
@@ -97,7 +97,8 @@ the host with Ctrl+C. If port 8000 is occupied, set
 `K8S_DASHBOARD_BROWSER_PORT=0`; the fixture prints the selected loopback URL.
 
 Use a desktop browser. The suite covers filtering, sorting, pagination, safe text
-rendering, details, stale/deleted/error states, response races, refresh, themes,
+rendering (including one exact-copy native description per resource and partial/unavailable coverage),
+details, stale/deleted/error states, response races, refresh, themes,
 text sizes and contrast. Go fixtures also cover auth/context selection,
 cluster-scoped Incident requests, workload namespaces and status-only triage writes. Browser fixtures are test-only, skipped by
 routine runs and absent from production images.

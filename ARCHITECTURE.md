@@ -109,7 +109,7 @@ Missing access means incomplete collection, not healthy resources.
 
 VolumeAttachments retain attacher/target names, attached/deleting state and error
 metadata, not attachment metadata, inline volume specs or raw driver messages.
-Inspection adds bounded redacted errors and supplied current named PV/Node handles.
+Inspection adds bounded credential-protected errors and supplied current named PV/Node handles.
 Named links are not UID-based ownership; scoped mutual PV/PVC bindings add
 consumer context while preserving standalone attachment/PV and workload anchors.
 Attach errors use creation-based startup grace; detach errors use deletion-based
@@ -188,17 +188,17 @@ the mapping to Kubernetes identity private and validates tool requests against i
 The [Responses agent](internal/analysis/analysis.go) has two typed local tools:
 
 - [`inspect_resource`](internal/investigation/inspect_resource.go) returns approved
-  state, scheduling/capacity facts, container state and bounded redacted condition
+  state, scheduling/capacity facts, container state and bounded credential-protected condition
   messages. It includes controller template images/resources/container ports,
   Service port definitions, EndpointSlice readiness counts and approved PVC/PV
   facts with authorized binding handles, not raw templates, volume sources,
   claim references, selectors, endpoint addresses or target UIDs. CronJob scheduling
   facts and nested Job-template container specifications are approved; raw active
   Job references, commands and environment values are excluded. HPA inspection
-  returns bounded metric/scaling facts, redacted conditions and an optional
+  returns bounded metric/scaling facts, credential-protected conditions and an optional
   already-authorized supported workload handle, never metric selectors or arbitrary reads.
 - [`related_warning_events`](internal/investigation/related_warning_events.go)
-  returns bounded redacted Warning events for an authorized resource. Node/PV-event
+  returns bounded credential-protected Warning events for an authorized resource. Node/PV-event
   reads use the same namespace watch/ignore scope. Reads are limited to 20 pages
   and 20 retained events per call; incomplete/oversized results fail explicitly.
 
@@ -207,12 +207,62 @@ authorization, normalized arguments and shared call/byte budgets. Tools do not
 accept arbitrary namespaces, selectors, URLs or API paths. Unknown handles/tools
 and malformed arguments fail before API access.
 
+### Native incident descriptions
+
+Before the first model request, [describe capture](internal/investigation/describe.go)
+selects the anchor and up to three related resources, prioritizing symptom-bearing
+handles. The [pinned kubectl library](go.mod) describes each selected
+resource through [a guarded REST transport](internal/investigation/describe_transport.go).
+Native describe is the sole resource-detail payload in AI's initial evidence and
+the Incident record. State and Warning events are already in that text; separate
+typed state/event copies are neither collected nor stored. The two typed tools
+remain available to AI on demand, without appending duplicate stored payloads.
+The explicit Kubernetes connection supplies the same private authentication.
+No executable, shell tool, new workload permission or dashboard workload access
+is introduced.
+
+The transport allows only GETs for approved APIs and supplied resource identities.
+Related lists honor namespace watch/ignore selection, enforce complete bounded
+pagination and return only authorized resources; events remain Warning-only and
+incarnation-scoped. Additional requests such as Node Leases are denied locally.
+All library reads share a 16-HTTP-attempt and 1 MiB raw-response budget, with a
+128 KiB per-response cap. Context-aware transport reads and per-resource timeouts
+bound kubectl implementations that use `context.TODO()`. Inspected versions join
+the same stale-result checks as the existing tools.
+
+[Describe capture](internal/investigation/describe.go) escapes control characters
+before rendering and retains native operational sections without a heading allowlist.
+Labels, addresses, selectors, commands, probes, storage details and non-UID
+identifiers remain available as emitted by kubectl. Credential values are redacted;
+annotations, environment and UIDs remain excluded. Diagnostic words such as
+`secret`, `token`, `password` and `authorization` no longer remove whole messages.
+Failed event/related reads remain explicit even where kubectl would otherwise ignore
+the error or print `<none>`. Unsupported kinds, including VolumeAttachment in the
+pinned library, produce unavailable output rather than a typed or raw-object fallback.
+
+The `kubectl-describe/v1` envelope contains one entry per selected resource:
+`resource`, `source`, `evidence_id`, `observed_at` and `output` (`status`/`text`).
+These entries are stored in `spec.evidence.descriptions`, defined and validated
+by [the description contract](internal/incident/descriptions.go).
+There is no nested supplemental `describe`, typed `state` or `warning_events`.
+The exact credential-protected text reaches AI before its decision and is
+persisted with the same material Incident revision. Native text is capped at
+8 KiB per resource and the entire serialized envelope at 16 KiB, shrinking further
+to the remaining initial-context budget. Resource identity, citation and coverage
+metadata are retained; insufficient metadata space fails explicitly.
+Capture counts toward the shared 32 KiB evidence allowance, not AI tool
+invocation slots, and introduces no extra model round or duplicate typed reads.
+Versions and negative reads participate in stale-result rejection, including
+changes between describe and later tools. Missing/unavailable evidence never
+establishes recovery. The previous evidence format is not supported or migrated.
+
 Raw API objects, UIDs, annotations, credentials and environment variables are not
 model input. Tools cannot read Secrets, ConfigMaps, Pod logs or arbitrary custom
 resources, execute commands, modify workloads or deliver notifications.
 Approved names, image references, scheduling facts and messages can still reveal
-sensitive operational details. Redaction reduces risk; it cannot prove arbitrary
-text secret-free. Tool results are untrusted evidence, not instructions.
+sensitive operational details. Credential filtering is not a general sanitization
+policy or a guarantee that arbitrary text is credential-free. Tool results are
+untrusted evidence, not instructions.
 
 The tool loop has independent request, tool-call, byte and deadline limits,
 including a transport ceiling counting actual HTTP attempts. Automatic HTTP
@@ -255,6 +305,7 @@ observer ownership is validated by the application, not isolated by RBAC.
 | `spec.identity` | Immutable observer, verified anchor and problem family |
 | `spec.resources` | Affected resource identities |
 | `spec.analysis` | AI title, severity, impact, diagnosis, explanation, citations, recommendations, uncertainty and provenance |
+| `spec.evidence` | Latest bounded native kubectl descriptions shown to AI for this revision; no duplicate typed state/event copies |
 | `spec.lifecycle` | `state` (`open`/`resolved`), material revision, timestamps and recurrence count |
 | `status` | Human triage and reserved delivery-controller state; not written by the agent |
 
@@ -266,6 +317,12 @@ is status, not another lifecycle state.
 Rewording, event/restart counts or timestamps alone do not update a CR.
 Same-state updates require AI's material-change decision and a change to severity,
 impact, stable diagnosis key or affected resources; otherwise prior wording stays.
+The host attaches the exact reviewed description envelope only after this material
+gate, on raise, update, reopen and resolve. No-action and description timestamp/text
+churn do not write Incidents or change human dismissal. Only the latest envelope
+is retained; it is not automatically replayed as model memory on subsequent
+investigations. Old-format records must be removed before switching; no migration
+or compatibility layer is provided.
 The indexing label is `kubescout.benc-uk.github.com/state`, matching
 `spec.lifecycle.state`; Pod `status.phase` is unrelated.
 
@@ -332,10 +389,14 @@ failures, new observations and the AI conclusion can delay or prevent a change.
 
 The [dashboard](internal/dashboard/) reads all observers' cluster-scoped incidents.
 Workload-namespace filtering uses anchor and affected-resource namespaces without
-changing that cluster-wide API scope. Incident summaries and snapshots have no
-storage-namespace field. It cannot read workloads, AI
-credentials, tool evidence or revision history, call AI, create/delete incidents
-or write their specs.
+changing that cluster-wide API scope. Incident summaries and descriptions have no
+storage-namespace field. Details expose only the approved descriptions already
+stored in the Incident; summaries omit their text. The dashboard cannot read
+workloads, AI credentials, live tool evidence or revision history, call AI,
+create/delete incidents or write their specs. Description text is safely rendered
+and copyable on the Resources tab, with capture times and explicit partial,
+unavailable and omitted coverage. It is non-atomic historical evidence, not a
+live resource view.
 
 | Route | Contract |
 |---|---|
@@ -371,7 +432,7 @@ not just each investigation. [Transcript projection](internal/analysis/transcrip
 retains model-visible input, instructions, tool-round history and returned model
 content without authentication metadata or raw provider error bodies.
 [The shared tool session](internal/investigation/session.go) records normalized
-authorized arguments and approved redacted results for both tools. Call and byte
+authorized arguments and approved credential-protected results for both tools. Call and byte
 budgets are shared across resource inspection and Warning event reads, not
 reset per tool. Runner dispositions distinguish
 accepted, stale, failed and nonmaterial outcomes.
@@ -392,7 +453,7 @@ for flags, privacy, retention, ephemeral storage and retrieval.
 | [internal/config](internal/config/) | Validated options, limits, namespace selection and root dotenv loading |
 | [internal/kube](internal/kube/) | Scoped collection, approved projection, ownership and freshness |
 | [internal/health](internal/health/) | Pure evidence rules, not incident publication |
-| [internal/investigation](internal/investigation/) | Typed scoped read-only tools, shared budgets and redaction |
+| [internal/investigation](internal/investigation/) | Typed scoped read-only tools, native describe, shared budgets and credential protection |
 | [internal/analysis](internal/analysis/) | Agent Framework Responses loop, budgets, decision validation and transcript projection |
 | [internal/incident](internal/incident/) | Correlation, domain types, lifecycle and Kubernetes reconciliation |
 | [internal/runner](internal/runner/) | Candidate scheduling, recovery review and stale-result rejection |

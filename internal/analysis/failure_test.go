@@ -3,6 +3,7 @@ Purpose: Verify safe failure classification and precise quota/retry diagnostics.
 Flow: Offline HTTP fixtures exercise the real Responses SDK for rate limits,
 authentication, protocol failures and deadlines; direct transport fixtures check
 local budgets and reject untrusted header text without producing incident actions.
+Model fixtures include bounded offline description preparation before SDK dispatch.
 */
 package analysis
 
@@ -118,7 +119,7 @@ func TestSDKFailureDiagnostics(t *testing.T) {
 				Endpoint: server.URL + "/openai/v1/", APIKey: "private-key", Model: "fixture",
 				MaxInputChars: 20000, MaxOutputTokens: 2000, MaxToolCalls: config.DefaultMaxToolCalls, CallsPerHour: 60,
 				RequestTimeout: time.Second, InvestigationTimeout: 5 * time.Second,
-			}}
+			}, Kubernetes: descriptionKubernetes(t)}
 			started := time.Now()
 
 			decision, err := a.Investigate(t.Context(), inputFixture())
@@ -173,7 +174,7 @@ func TestLocalQuotaDiagnostics(t *testing.T) {
 		Endpoint: server.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture",
 		MaxInputChars: 20000, MaxOutputTokens: 2000, MaxToolCalls: config.DefaultMaxToolCalls, CallsPerHour: 2,
 		RequestTimeout: time.Second, InvestigationTimeout: 5 * time.Second,
-	}, calls: []time.Time{now.Add(-2 * time.Hour), oldest, now.Add(-time.Minute)}}
+	}, calls: []time.Time{now.Add(-2 * time.Hour), oldest, now.Add(-time.Minute)}, Kubernetes: descriptionKubernetes(t)}
 
 	decision, err := a.Investigate(t.Context(), inputFixture())
 
@@ -204,16 +205,17 @@ func TestSDKDeadlineDiagnostics(t *testing.T) {
 		request, investigation time.Duration
 		kind                   string
 	}{
-		{"request", 20 * time.Millisecond, time.Second, "model_request_timeout"},
-		{"investigation", time.Second, 20 * time.Millisecond, "investigation_deadline"},
+		{"request", 100 * time.Millisecond, 5 * time.Second, "model_request_timeout"},
+		{"investigation", 5 * time.Second, 500 * time.Millisecond, "investigation_deadline"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var calls atomic.Int32
 
+			finished := make(chan struct{})
+
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
-				time.Sleep(100 * time.Millisecond)
-				respond(w, textResponse(`{"outcome":"no_action","reason":"fixture","actions":[]}`))
+				<-finished
 			}))
 			defer server.Close()
 
@@ -221,8 +223,10 @@ func TestSDKDeadlineDiagnostics(t *testing.T) {
 				Endpoint: server.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture",
 				MaxInputChars: 20000, MaxOutputTokens: 2000, MaxToolCalls: config.DefaultMaxToolCalls, CallsPerHour: 60,
 				RequestTimeout: test.request, InvestigationTimeout: test.investigation,
-			}}
+			}, Kubernetes: descriptionKubernetes(t)}
 			decision, err := a.Investigate(t.Context(), inputFixture())
+
+			close(finished)
 
 			var failure *Failure
 
@@ -287,7 +291,7 @@ func TestSafeTransportAndCancellationDiagnostics(t *testing.T) {
 				Endpoint: "https://private-endpoint/openai/v1/", APIKey: "private-key", Model: "fixture",
 				MaxInputChars: 20000, MaxOutputTokens: 2000, MaxToolCalls: config.DefaultMaxToolCalls, CallsPerHour: 60,
 				RequestTimeout: time.Second, InvestigationTimeout: time.Second,
-			}, HTTPClient: &http.Client{Transport: failingTransport{}}}
+			}, HTTPClient: &http.Client{Transport: failingTransport{}}, Kubernetes: descriptionKubernetes(t)}
 
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -332,7 +336,7 @@ func TestResponseBodyTimeoutDiagnostics(t *testing.T) {
 		Endpoint: server.URL + "/openai/v1/", APIKey: "fixture", Model: "fixture",
 		MaxInputChars: 20000, MaxOutputTokens: 2000, MaxToolCalls: config.DefaultMaxToolCalls, CallsPerHour: 60,
 		RequestTimeout: 20 * time.Millisecond, InvestigationTimeout: time.Second,
-	}}
+	}, Kubernetes: descriptionKubernetes(t)}
 	decision, err := a.Investigate(t.Context(), inputFixture())
 
 	var failure *Failure

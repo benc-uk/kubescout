@@ -1,6 +1,6 @@
 /*
 Purpose: Test safe Ingress inspection and scoped controller Warning events.
-Flow: Offline HTTP fixtures verify networking GETs, route redaction, authorized
+Flow: Offline HTTP fixtures verify networking GETs, credential-only route protection, authorized
 Service handles, private-data exclusion and shared tool budgets. Invalid
 scope/schema/incarnation returns no accepted evidence; no external probes run.
 */
@@ -39,7 +39,7 @@ func ingressInspectionObject() map[string]any {
 	}
 }
 
-// TestIngressInspectionAndEvents checks exact redacted routes, authorized backend handles and scoped Warning reads.
+// TestIngressInspectionAndEvents checks credential-protected routes, authorized backend handles and scoped Warning reads.
 func TestIngressInspectionAndEvents(t *testing.T) {
 	reads := 0
 
@@ -91,7 +91,7 @@ func TestIngressInspectionAndEvents(t *testing.T) {
 	if state["generation"] != int64(2) || state["class_name"] != "nginx" || state["tls_entry_count"] != 1 ||
 		state["load_balancer_address_count"] != 1 || s.Investigation.ToolVersions["ref"] != "7" || len(routes) != 3 ||
 		routes[0]["default_backend"] != true || routes[0]["port_number"] != int32(80) || routes[0]["service_ref"] != ref ||
-		routes[1]["port_name"] != "http" || routes[1]["path"] != "[redacted sensitive text]" || routes[1]["service_ref"] != ref ||
+		routes[1]["port_name"] != "http" || !strings.Contains(fmt.Sprint(routes[1]["path"]), "[redacted credential]") || routes[1]["service_ref"] != ref ||
 		routes[2]["backend_type"] != "Resource" || routes[2]["service_ref"] != nil {
 		t.Fatalf("approved Ingress inspection shape missing: %+v", state)
 	}

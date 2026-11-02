@@ -4,6 +4,8 @@ Flow: Bounded, complete cluster-scoped Incident reads become
 validated summaries and details. Dismiss/restore uses displayed-version and
 UID/resourceVersion checks to patch status.triage only; it neither calls AI
 nor writes incident specs, and reports upstream failures as explicit errors.
+Details include validated stored native descriptions; list summaries omit
+their text and the dashboard never fetches live workload evidence.
 */
 package dashboard
 
@@ -55,7 +57,8 @@ type Summary struct {
 
 type Detail struct {
 	Summary
-	Analysis incident.Analysis `json:"analysis"`
+	Analysis incident.Analysis  `json:"analysis"`
+	Evidence *incident.Evidence `json:"evidence,omitempty"`
 }
 
 type Snapshot struct {
@@ -186,13 +189,17 @@ func (r *Reader) Get(ctx context.Context, name string) (DetailResponse, error) {
 }
 
 // decode validates cluster-scoped incident fields and projects a view without raw metadata or resource UIDs.
-// Dismissal applies only when the stored triage revision matches the incident lifecycle revision.
+// Stored descriptions are bounded and dismissal remains scoped to the lifecycle revision.
 func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 	var value incident.Incident
 
 	spec, ok := obj.Object["spec"].(map[string]any)
 	if !ok || runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &value) != nil {
 		return Detail{}, invalidSnapshot("Stored incident has an invalid schema.")
+	}
+
+	if err := incident.ValidateEvidence(value.Evidence); err != nil {
+		return Detail{}, invalidSnapshot("Stored incident has invalid resource description evidence.")
 	}
 
 	if obj.GetNamespace() != "" || len(validation.IsDNS1123Subdomain(obj.GetName())) != 0 ||
@@ -254,6 +261,7 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 			Dismissed: dismissedRevision == value.Lifecycle.Revision, Version: incidentVersion(obj),
 		},
 		Analysis: value.Analysis,
+		Evidence: value.Evidence,
 	}, nil
 }
 

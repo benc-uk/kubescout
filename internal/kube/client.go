@@ -2,6 +2,7 @@
 Purpose: Construct the dynamic Kubernetes client for the selected auth mode.
 Flow: Validated configuration selects in-cluster credentials or a kubeconfig
 context without cross-mode fallback, returning a client and cluster identifier.
+The same private REST configuration supplies independent guarded describe reads.
 This bootstrap performs no AI assessment or workload operation.
 */
 package kube
@@ -17,8 +18,14 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// Connection shares explicit authentication with collection and supplemental describe.
+type Connection struct {
+	dynamic.Interface
+	DescribeConfig *rest.Config
+}
+
 // Client builds a rate-limited dynamic client and cluster identifier for the selected auth mode,
-// sanitizing initialization errors and leaving watch and list deadlines to callers.
+// carrying the same private REST configuration for guarded describe without authentication fallback.
 func Client(c config.Config) (dynamic.Interface, string, error) {
 	var (
 		rc  *rest.Config
@@ -68,5 +75,5 @@ func Client(c config.Config) (dynamic.Interface, string, error) {
 		return nil, identifier, errors.New("Kubernetes client initialisation failed")
 	}
 
-	return client, identifier, nil
+	return &Connection{Interface: client, DescribeConfig: rest.CopyConfig(rc)}, identifier, nil
 }

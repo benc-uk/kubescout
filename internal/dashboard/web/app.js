@@ -74,9 +74,9 @@ function resourceText(resource) {
   return `${resource.kind} / ${resource.namespace ? `${resource.namespace}/` : ""}${resource.name}`;
 }
 
-function copyable(value, description) {
+function copyable(value, description, displayValue = value) {
   const group = element("span", undefined, "copyable");
-  const text = element("code", value, "copy-value");
+  const text = element("code", displayValue, "copy-value");
   const button = element("button", undefined, "copy-button");
   button.type = "button";
   button.title = `Copy ${description}`;
@@ -106,6 +106,7 @@ function copyable(value, description) {
     if (temporary) feedbackTimer = setTimeout(() => { feedback.hidden = true; }, 2000);
   };
   const selectManually = (message) => {
+    text.textContent = value;
     const selection = document.getSelection();
     if (!selection) {
       report(`${message} Select the value and copy it manually.`);
@@ -314,6 +315,79 @@ function factList(entries) {
   return facts;
 }
 
+function descriptionStatus(title, section) {
+  const status = element("span", `${title}: ${label(section.status)}`, "description-status");
+  status.dataset.status = section.status;
+  return status;
+}
+
+function descriptionPanel(title, section, evidenceID, resourceRef) {
+  const panel = element("section", undefined, "description-panel");
+  const heading = element("div", undefined, "description-panel-heading");
+  const content = copyable(section.text, `${evidenceID} ${title.toLowerCase()}`);
+  const button = content.querySelector(".copy-button");
+  button.append(element("span", "Copy"));
+  heading.append(element("h5", title), descriptionStatus("Coverage", section), button);
+  const text = content.querySelector(".copy-value");
+  text.tabIndex = 0;
+  text.setAttribute("role", "region");
+  text.setAttribute("aria-label", `${title} description text`);
+  text.classList.add("native-describe");
+  text.dataset.descriptionFocus = `output:${resourceRef}`;
+  panel.append(heading, content);
+  return panel;
+}
+
+function resourceDescriptions(evidence, revisionKey) {
+  const previous = $("detail-resources").querySelector(".resource-descriptions");
+  const expanded = new Set(previous?.dataset.revisionKey === revisionKey
+    ? [...previous.querySelectorAll(".description-entry[open]")].map((entry) => entry.dataset.resourceRef) : []);
+  const block = element("section", undefined, "detail-section resource-descriptions");
+  block.dataset.revisionKey = revisionKey;
+  const header = element("div", undefined, "description-toolbar");
+  header.append(element("h3", "Resource descriptions"));
+  block.append(header);
+  if (!evidence) {
+    block.append(element("p", "No descriptions captured for this incident revision.", "muted"));
+    return block;
+  }
+  const actions = element("div", undefined, "description-actions");
+  for (const [text, open] of [["Expand all", true], ["Collapse all", false]]) {
+    const button = element("button", text, "secondary");
+    button.type = "button";
+    button.setAttribute("aria-label", `${text} resource descriptions`);
+    button.dataset.descriptionFocus = open ? "expand" : "collapse";
+    button.addEventListener("click", () => {
+      for (const entry of block.querySelectorAll(".description-entry")) entry.open = open;
+    });
+    actions.append(button);
+  }
+  header.append(actions);
+  block.append(element("p", `${evidence.descriptions.length} resources captured; ${evidence.omitted_resources} additional context resources omitted.`, "description-coverage"),
+    element("p", "Captured during investigation, not live status. Expand a resource for its kubectl describe output.", "muted description-intro"));
+  for (const description of evidence.descriptions) {
+    const entry = element("details", undefined, "description-entry");
+    entry.dataset.resourceRef = description.resource.ref;
+    entry.open = expanded.has(description.resource.ref);
+    const summary = element("summary", undefined, "description-summary");
+    summary.dataset.descriptionFocus = `resource:${description.resource.ref}`;
+    const identity = element("span", undefined, "description-identity");
+    identity.append(element("span", description.resource.kind, "description-kind"),
+      element("strong", description.resource.name, "description-name"),
+      element("span", description.resource.namespace ? `Namespace: ${description.resource.namespace}` : "Cluster-scoped", "description-namespace"));
+    const statuses = element("span", undefined, "description-statuses");
+    statuses.append(descriptionStatus("Describe", description.output));
+    summary.append(identity, statuses);
+    const body = element("div", undefined, "description-body");
+    body.append(element("p", `${description.source} · Observed: ${date(description.observed_at)} · Evidence: ${description.evidence_id}`, "muted description-metadata"),
+      descriptionPanel("kubectl describe", description.output, description.evidence_id, description.resource.ref));
+    entry.append(summary, body);
+    block.append(entry);
+  }
+  block.append(element("p", "Native kubectl describe retains operational details with credential values redacted. Annotations, environment values, UIDs, Pod logs and Normal events are excluded. Reads and text are scoped and size-limited. Copy preserves the original stored text.", "muted description-exclusions"));
+  return block;
+}
+
 function selectDetailTab(name) {
   for (const tab of detailTabs) {
     const active = name === tab;
@@ -341,9 +415,16 @@ function clearDetail() {
 
 function renderDetail(data) {
   const incident = data.incident;
+  const revisionKey = `${incident.name}:${incident.lifecycle.revision}`;
+  const previousDescriptions = $("detail-resources").querySelector(".resource-descriptions");
+  const outputScroll = new Map(previousDescriptions?.dataset.revisionKey === revisionKey
+    ? [...previousDescriptions.querySelectorAll(".native-describe")].map((node) =>
+      [node.dataset.descriptionFocus, { top: node.scrollTop, left: node.scrollLeft }]) : []);
   const scrollTop = $("detail-body").scrollTop;
   const focusedCopy = $("detail-content").contains(document.activeElement)
     ? document.activeElement.closest(".copy-button")?.getAttribute("aria-label") : null;
+  const focusedDescription = $("detail-resources").contains(document.activeElement)
+    ? document.activeElement.dataset.descriptionFocus : null;
   $("detail-title").textContent = incident.title;
   $("detail-freshness").textContent = `Last success: ${date(data.fetched_at)}`;
   $("detail-tags").replaceChildren(badge(incident.severity), badge(incident.dismissed ? "dismissed" : incident.lifecycle.state),
@@ -360,8 +441,8 @@ function renderDetail(data) {
     overview, section("What is uncertain", incident.analysis.uncertainty, "detail-uncertainty"));
   const resources = listSection("Affected resources", incident.resources.map(resourceText));
   resources.classList.add("detail-card", "detail-resources");
-  $("detail-resources").replaceChildren(resources,
-    element("p", "Resource references from the latest stored incident. This view does not read workloads or show live resource status.", "muted"));
+  const descriptions = resourceDescriptions(incident.evidence, revisionKey);
+  $("detail-resources").replaceChildren(resources, descriptions);
   const facts = factList([
     ["Incident", copyable(incident.name, "incident name")],
     ["Problem namespace", incident.anchor.namespace ? copyable(incident.anchor.namespace, "namespace") : "Cluster-scoped"],
@@ -373,10 +454,10 @@ function renderDetail(data) {
   ]);
   const provenance = element("section", undefined, "provenance");
   provenance.append(element("h3", "Evidence references and model provenance"),
-    listSection("Evidence IDs (references only)", incident.analysis.evidence_ids),
+    listSection("Evidence IDs", incident.analysis.evidence_ids),
     factList([["Model", incident.analysis.model], ["Prompt version", incident.analysis.prompt_version],
       ["Analysis ID", incident.analysis.analysis_id]]),
-    element("p", "Only the latest stored conclusion is available, not raw evidence or revision history.", "muted"));
+    element("p", "Resource descriptions, when captured, are on the Resources tab. Other evidence IDs remain references only. No raw objects or revision history are available.", "muted"));
   const record = element("section", undefined, "detail-card");
   record.append(element("h3", "Incident record"), facts, provenance);
   $("detail-record").replaceChildren(record);
@@ -387,6 +468,17 @@ function renderDetail(data) {
   if (focusedCopy) {
     [...$("detail-content").querySelectorAll(".copy-button")].find((button) =>
       button.getAttribute("aria-label") === focusedCopy)?.focus({ preventScroll: true });
+  }
+  if (focusedDescription) {
+    [...descriptions.querySelectorAll("[data-description-focus]")].find((node) =>
+      node.dataset.descriptionFocus === focusedDescription)?.focus({ preventScroll: true });
+  }
+  for (const node of descriptions.querySelectorAll(".native-describe")) {
+    const position = outputScroll.get(node.dataset.descriptionFocus);
+    if (position) {
+      node.scrollTop = position.top;
+      node.scrollLeft = position.left;
+    }
   }
   updateTriageAction();
 }

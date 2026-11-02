@@ -3,6 +3,7 @@ Purpose: Check agent deployment, RBAC and Incident schema contracts offline.
 Flow: Decode checked-in manifests and validate synthetic configuration and incidents
 to check inactive deployment defaults, workload/PV/attachment read permissions, cluster-scoped incident writes
 and lifecycle.state migration plus the bounded transcript mount without activating a cluster or contacting a model.
+Schema fixtures check native-only descriptions, section bounds and obsolete-format rejection.
 Shared decoding helpers also supply manifests to opt-in integration fixtures.
 */
 package cluster
@@ -239,7 +240,7 @@ func TestRBACContract(t *testing.T) {
 }
 
 // TestIncidentSchemaAndMigration validates synthetic incidents against the checked-in CRD,
-// requiring lifecycle.state and immutable identity while preserving safe record handling.
+// requiring lifecycle.state, immutable identity and bounded optional resource descriptions.
 func TestIncidentSchemaAndMigration(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "incidents-crd.yaml"))
 	if err != nil {
@@ -286,6 +287,78 @@ func TestIncidentSchemaAndMigration(t *testing.T) {
 		if err := validate.AgainstSchema(&familySchema, family, strfmt.Default); err != nil {
 			t.Fatalf("CRD rejects validated incident family %q: %v", family, err)
 		}
+	}
+
+	evidenceSchema, ok := schema.Properties["spec"].Properties["evidence"]
+	if !ok || slices.Contains(schema.Properties["spec"].Required, "evidence") {
+		t.Fatal("description schema must be present but optional")
+	}
+
+	evidence := incident.Evidence{Format: incident.DescriptionFormat, Descriptions: []incident.ResourceDescription{{
+		EvidenceID: "kubectl-describe-1", Resource: incident.Resource{Ref: "ref", Kind: "Pod", Namespace: "apps", Name: "pod"},
+		Source: incident.DescribeSource, ObservedAt: time.Now().UTC(),
+		Output: incident.DescriptionOutput{Status: "captured", Text: "Name: pod\nEvents: <none>"},
+	}}}
+	for _, status := range []string{"captured", "partial", "unavailable", "absent", "healthy"} {
+		evidence.Descriptions[0].Output.Status = status
+		data, _ := json.Marshal(evidence)
+
+		var payload any
+		json.Unmarshal(data, &payload)
+
+		err := validate.AgainstSchema(&evidenceSchema, payload, strfmt.Default)
+		if (err != nil) != (status == "healthy") {
+			t.Fatalf("description status %s: %v", status, err)
+		}
+	}
+
+	if evidenceSchema.Properties["descriptions"].MaxItems == nil ||
+		*evidenceSchema.Properties["descriptions"].MaxItems != incident.MaxDescriptions {
+		t.Fatal("description schema count limit differs from application")
+	}
+
+	if !slices.Contains(evidenceSchema.Required, "descriptions") {
+		t.Fatal("description array is not required in the evidence envelope")
+	}
+
+	if _, exists := evidenceSchema.Properties["snapshots"]; exists {
+		t.Fatal("previous field remains in the evidence schema")
+	}
+
+	describeSchema := evidenceSchema.Properties["descriptions"].Items.Schema
+	if len(describeSchema.Required) != 5 || len(describeSchema.Properties["source"].Enum) != 1 ||
+		describeSchema.Properties["source"].Enum[0] != incident.DescribeSource {
+		t.Fatal("native description is missing from the CRD or has the wrong source")
+	}
+
+	for _, removed := range []string{"state", "warning_events", "describe"} {
+		if _, exists := describeSchema.Properties[removed]; exists {
+			t.Fatalf("duplicate evidence schema remains: %s", removed)
+		}
+	}
+
+	evidence.Descriptions[0].Output.Status = "captured"
+	renamedJSON, _ := json.Marshal(evidence)
+
+	var renamed map[string]any
+	json.Unmarshal(renamedJSON, &renamed)
+
+	renamed["snapshots"] = renamed["descriptions"]
+	delete(renamed, "descriptions")
+
+	if validate.AgainstSchema(&evidenceSchema, renamed, strfmt.Default) == nil {
+		t.Fatal("previous field accepted as a descriptions alias")
+	}
+
+	evidence.Format = "describe-style/v1"
+	evidence.Descriptions[0].Output.Status = "captured"
+	obsoleteJSON, _ := json.Marshal(evidence)
+
+	var obsolete any
+	json.Unmarshal(obsoleteJSON, &obsolete)
+
+	if validate.AgainstSchema(&evidenceSchema, obsolete, strfmt.Default) == nil {
+		t.Fatal("obsolete evidence format accepted")
 	}
 
 	identity := schema.Properties["spec"].Properties["identity"]

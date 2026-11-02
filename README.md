@@ -4,7 +4,7 @@
 
 <img src="internal/dashboard/web/logo.png" alt="KubeScout logo" width="180">
 
-KubeScout watches your Kubernetes cluster and uses AI to investigate problems.
+KubeScout monitors your Kubernetes cluster and uses AI to investigate problems.
 It brings related observations together, gathers supporting evidence, and
 records a diagnosis, impact and recommended next steps as a Kubernetes incident.
 As conditions change, it revisits the incident and assesses recovery.
@@ -199,8 +199,9 @@ See [updates and shutdown](docs/operations.md#updates-and-shutdown).
 
 - Workload access is read-only. The agent cannot run shell commands, read Pod
   logs or Secrets, or remediate resources. Its writes are limited to incidents.
-- Approved resource facts and bounded, redacted operational messages are sent
-  to the configured model. Names and messages can still be sensitive.
+- Approved resource facts, bounded operational messages and native describe
+  details are sent to the configured model. Credential values are redacted,
+  not entire messages or diagnostic sections. Operational details can be sensitive.
 - AI can misdiagnose problems. No incidents is not proof of cluster health or
   agent activity; collection/model failures are diagnostics, not incidents.
 - Run one agent replica per observer identity. Incident state survives restarts;

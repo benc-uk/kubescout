@@ -196,6 +196,14 @@ try {
   const rawDetail = await (await fetch("/api/incidents/incident-000")).json();
   assert(rawDetail.incident && !("item" in rawDetail), "incident detail API uses an incident property");
   validateDetail(rawDetail);
+  assert(Array.isArray(rawDetail.incident.evidence.descriptions) && !("snapshots" in rawDetail.incident.evidence),
+    "incident evidence uses descriptions without the previous field");
+  const obsoleteDetail = structuredClone(rawDetail);
+  obsoleteDetail.incident.evidence.snapshots = obsoleteDetail.incident.evidence.descriptions;
+  delete obsoleteDetail.incident.evidence.descriptions;
+  rejected = false;
+  try { validateDetail(obsoleteDetail); } catch { rejected = true; }
+  assert(rejected, "previous resource evidence field is not accepted as a descriptions alias");
   assert(document.querySelectorAll(".incident-link").length === 50 && $("next").disabled === false, "table starts on first page");
   $("next").click();
   assert(document.querySelectorAll(".incident-link").length === 10 && $("page-info").textContent.includes("Page 2"), "next page shows remaining rows");
@@ -310,7 +318,99 @@ try {
   assert(parseFloat(getComputedStyle(document.querySelector(".detail-section p")).fontSize) >= 16, "larger detail text");
   assert($("detail").open && !$("detail").querySelector("img, script") && !window.injected, "safe drill-down and untrusted title and recommendations");
   assert($("detail-content").textContent.includes("Evidence IDs") && $("detail-content").textContent.includes("Revision"), "evidence and lifecycle details");
+  assert($("detail-resources").textContent.includes("Resource descriptions")
+    && $("detail-resources").textContent.includes("2 additional context resources omitted")
+    && $("detail-resources").textContent.includes("Partial")
+    && $("detail-resources").textContent.includes("Unavailable"),
+    "stored descriptions display coverage and unavailable sections");
+  assert($("detail-resources").textContent.includes("<img src=x onerror=alert(1)>")
+    && !document.querySelector(".description-entry img")
+    && document.querySelector('.description-entry button[aria-label="Copy kubectl-describe-1 kubectl describe"]'),
+    "description text is safely rendered and copyable");
+  $("detail-tab-resources").click();
+  const descriptionEntries = [...document.querySelectorAll(".description-entry")];
+  assert(descriptionEntries.length === 3 && descriptionEntries.every((entry) => entry.tagName === "DETAILS" && !entry.open),
+    "each resource starts collapsed instead of exposing one long evidence list");
+  assert(descriptionEntries.every((entry) => entry.querySelector("summary .description-name")
+    && entry.querySelector("summary .description-kind") && entry.querySelectorAll("summary .description-status").length === 1)
+    && descriptionEntries[2].querySelector("summary").textContent.includes("Cluster-scoped"),
+    "collapsed summaries show resource identity, namespace or cluster scope, and section coverage");
+  const firstDescription = descriptionEntries[0];
+  firstDescription.querySelector("summary").click();
+  assert(firstDescription.open && descriptionEntries.slice(1).every((entry) => !entry.open),
+    "a resource expands independently");
+  const storedText = rawDetail.incident.evidence.descriptions[0].output.text;
+  const descriptionOutput = firstDescription.querySelector(".copy-value");
+  assert(descriptionOutput.textContent === storedText
+    && descriptionOutput.textContent.includes("Ready  False")
+    && getComputedStyle(descriptionOutput).whiteSpace === "pre-wrap"
+    && getComputedStyle(descriptionOutput).overflowY === "auto"
+    && parseFloat(getComputedStyle(descriptionOutput).lineHeight) >= 22,
+    "native text preserves indentation, readable spacing and bounded scrolling");
+  const nativeDescribe = firstDescription.querySelector(".native-describe");
+  assert(nativeDescribe.textContent === storedText
+    && getComputedStyle(nativeDescribe).tabSize === "8"
+    && firstDescription.querySelector("summary").textContent.includes("Describe: Partial")
+    && firstDescription.textContent.includes("kubectl describe")
+    && firstDescription.textContent.includes("kubectl-describe-1")
+    && firstDescription.querySelectorAll(".description-panel").length === 1
+    && !firstDescription.textContent.includes("Resource state")
+    && !firstDescription.textContent.includes("Warning events"),
+    "each resource shows only one native describe block, coverage and citation");
+  assert(Object.keys(rawDetail.incident.evidence.descriptions[0]).sort().join() === "evidence_id,observed_at,output,resource,source",
+    "Incident payload contains native describe only, without typed state or event copies");
+  const descriptionClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  let copiedDescription;
+  try {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      writeText: async (text) => { copiedDescription = text; },
+    } });
+    firstDescription.querySelector(".copy-button").click();
+    await until(() => copiedDescription !== undefined && !firstDescription.querySelector(".copy-button").disabled, "description copied");
+    assert(copiedDescription === storedText && copiedDescription === nativeDescribe.textContent,
+      "native describe copy matches the sole stored resource description");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    firstDescription.querySelector(".copy-button").click();
+    assert(document.getSelection().toString() === storedText && descriptionOutput.textContent === storedText
+      && firstDescription.querySelector(".copy-feedback").textContent.includes("Clipboard unavailable"),
+      "manual description copying reveals and selects the original stored text");
+  } finally {
+    if (descriptionClipboardDescriptor) Object.defineProperty(navigator, "clipboard", descriptionClipboardDescriptor);
+    else delete navigator.clipboard;
+    document.getSelection().removeAllRanges();
+  }
+  document.querySelector('[aria-label="Expand all resource descriptions"]').click();
+  assert(descriptionEntries.every((entry) => entry.open), "Expand all opens every resource");
+  document.querySelector('[aria-label="Collapse all resource descriptions"]').click();
+  assert(descriptionEntries.every((entry) => !entry.open), "Collapse all closes every resource");
+  firstDescription.querySelector("summary").click();
+  firstDescription.querySelector("summary").focus();
+  await refresh();
+  await until(() => !document.contains(firstDescription), "resource descriptions refreshed");
+  assert(document.querySelector(".description-entry").open
+    && document.querySelectorAll(".description-entry[open]").length === 1
+    && document.activeElement === document.querySelector(".description-entry summary"),
+    "refresh preserves expanded resources and disclosure keyboard focus");
+  const readingEntries = [...document.querySelectorAll(".description-entry")];
+  readingEntries[1].querySelector("summary").click();
+  const readingOutputs = readingEntries.slice(0, 2).map((entry) => entry.querySelector(".native-describe"));
+  readingOutputs[1].focus({ preventScroll: true });
+  readingOutputs[0].scrollTop = 180;
+  readingOutputs[1].scrollTop = 240;
+  $("detail-body").scrollTop = 400;
+  const readingScroll = $("detail-body").scrollTop;
+  assert(readingOutputs[0].scrollTop === 180 && readingOutputs[1].scrollTop === 240 && readingScroll > 0,
+    "long native fixtures exercise independent output and modal scrolling");
+  await refresh();
+  await until(() => !document.contains(readingEntries[0]), "scrolled native outputs refreshed");
+  const refreshedOutputs = [...document.querySelectorAll(".native-describe")];
+  assert(Math.abs(refreshedOutputs[0].scrollTop - 180) <= 2
+    && Math.abs(refreshedOutputs[1].scrollTop - 240) <= 2
+    && Math.abs($("detail-body").scrollTop - readingScroll) <= 2
+    && document.activeElement === refreshedOutputs[1],
+    "refresh preserves each describe reading position, output keyboard focus and modal scroll");
   const beforeRecord = $("detail-record").firstElementChild;
+  $("detail-tab-record").click();
   $("detail-tab-record").focus();
   $("detail-body").scrollTop = 100;
   const recordScroll = $("detail-body").scrollTop;
@@ -358,6 +458,7 @@ try {
   await until(() => $("detail-content").textContent.includes("worker-1"), "new selection");
   assert($("detail-tab-overview").getAttribute("aria-selected") === "true" && $("detail-record").hidden,
     "new selection resets the previous Record tab to Overview");
+  assert(!document.querySelector(".description-entry[open]"), "a different incident does not inherit expanded resources");
   const nodeNamespace = [...$("detail-content").querySelectorAll("dt")].find((node) => node.textContent === "Problem namespace");
   assert(nodeNamespace?.nextElementSibling?.textContent === "Cluster-scoped", "node problems display cluster scope rather than incident-storage namespace");
   await sleep(600);
@@ -434,6 +535,18 @@ try {
     && [...$("detail-content").querySelectorAll("dt")].find((node) =>
       node.textContent === "Revision").nextElementSibling.textContent !== previousRevision, "fresh detail after conflict");
   assert($("triage-action").textContent === "Dismiss incident", "conflict does not hide the newer revision");
+  $("detail-tab-resources").click();
+  const revisionEntry = document.querySelector(".description-entry");
+  revisionEntry.querySelector("summary").click();
+  const revisionOutput = revisionEntry.querySelector(".native-describe");
+  revisionOutput.scrollTop = 160;
+  await state("update");
+  await refresh();
+  await until(() => !document.contains(revisionEntry), "new revision descriptions refreshed");
+  assert(!document.querySelector(".description-entry[open]")
+    && document.querySelector(".native-describe").scrollTop === 0,
+    "material revision resets expansion and describe scroll rather than reusing the old reading position");
+  await until(() => !$("triage-action").disabled, "new revision ready to dismiss");
   $("triage-action").click();
   await until(() => $("triage-action").textContent === "Restore incident" && !$("triage-action").disabled, "new revision dismissed");
   await state("update");
@@ -450,6 +563,24 @@ try {
   await until(() => $("empty").hidden, "automatic refresh", 18000);
   const after = (await (await fetch("/__test/state")).json()).requests;
   assert(after > before && $("error").hidden, "15-second automatic refresh recovers");
+  set("search", "onerror");
+  document.querySelector(".incident-link").click();
+  await until(() => !$("detail-content").hidden, "automatic refresh reading fixture");
+  $("detail-tab-resources").click();
+  const automaticEntry = document.querySelector(".description-entry");
+  automaticEntry.querySelector("summary").click();
+  const automaticOutput = automaticEntry.querySelector(".native-describe");
+  automaticOutput.focus({ preventScroll: true });
+  automaticOutput.scrollTop = 220;
+  $("detail-body").scrollTop = 300;
+  const automaticScroll = $("detail-body").scrollTop;
+  await until(() => !document.contains(automaticEntry), "automatic description refresh", 18000);
+  const automaticReplacement = document.querySelector(".native-describe");
+  assert(Math.abs(automaticReplacement.scrollTop - 220) <= 2
+    && Math.abs($("detail-body").scrollTop - automaticScroll) <= 2
+    && document.activeElement === automaticReplacement,
+    "15-second automatic refresh preserves describe scroll and reading focus");
+  $("close-detail").click();
   assert(document.documentElement.scrollWidth <= window.innerWidth, "page fits viewport; only table scrolls horizontally");
   assert(scriptErrors.length === 0, `no uncaught script errors: ${scriptErrors.join("; ")}`);
   document.title = `PASS: ${results.length} dashboard checks`;

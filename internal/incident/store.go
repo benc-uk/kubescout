@@ -3,6 +3,8 @@ Purpose: Persist and reconcile AI-directed incident lifecycle changes.
 Flow: Reviewed actions and stored revisions produce material changes through
 cluster-scoped Incident writes; offline tests use a memory fixture repository. Retries
 reconcile ambiguous writes, preserve identity and leave human triage status untouched.
+Material revisions retain the exact host-captured descriptions reviewed by AI;
+write responses must confirm retention rather than silently accept schema pruning.
 */
 package incident
 
@@ -72,6 +74,10 @@ func (s Kubernetes) decode(obj *unstructured.Unstructured) (*Record, error) {
 
 	if value.Lifecycle.State != "open" && value.Lifecycle.State != "resolved" {
 		return nil, errors.New("invalid incident lifecycle")
+	}
+
+	if err := ValidateEvidence(value.Evidence); err != nil {
+		return nil, err
 	}
 
 	return &Record{Name: obj.GetName(), Version: obj.GetResourceVersion(), UID: string(obj.GetUID()), Value: value}, nil
@@ -150,8 +156,12 @@ func (s Kubernetes) Get(ctx context.Context, name string) (*Record, error) {
 }
 
 // Save creates a cluster-scoped Incident or patches agent-owned fields with UID and version preconditions.
-// Existing status and foreign metadata are preserved; ambiguous failures require reconciliation.
+// Existing status and foreign metadata are preserved; responses must retain attached evidence.
 func (s Kubernetes) Save(ctx context.Context, r Record) error {
+	if err := ValidateEvidence(r.Value.Evidence); err != nil {
+		return err
+	}
+
 	payload, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&r.Value)
 	if err != nil {
 		return errors.New("cannot encode incident")
@@ -168,7 +178,7 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 	defer cancel()
 
 	if r.Version == "" {
-		_, err = s.Client.Resource(GVR).Create(ctx, obj, metav1.CreateOptions{})
+		obj, err = s.Client.Resource(GVR).Create(ctx, obj, metav1.CreateOptions{})
 	} else {
 		// Patch only fields owned by this agent. Delivery status and foreign metadata survive.
 		patch, marshalErr := json.Marshal([]map[string]any{
@@ -181,11 +191,18 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 			return errors.New("cannot encode incident update")
 		}
 
-		_, err = s.Client.Resource(GVR).Patch(ctx, r.Name, "application/json-patch+json", patch, metav1.PatchOptions{})
+		obj, err = s.Client.Resource(GVR).Patch(ctx, r.Name, "application/json-patch+json", patch, metav1.PatchOptions{})
 	}
 
 	if err != nil {
 		return errors.New("incident persistence failed; state will be reconciled before retry")
+	}
+
+	if r.Value.Evidence != nil {
+		stored, decodeErr := s.decode(obj)
+		if decodeErr != nil || !reflect.DeepEqual(stored.Value.Evidence, r.Value.Evidence) {
+			return errors.New("Incident description retention not confirmed; install the updated Incident CRD before running the agent")
+		}
 	}
 
 	return nil
@@ -252,6 +269,20 @@ func (s Reconciler) Existing(ctx context.Context, anchor health.Resource) ([]Exi
 // Bounded retries reread ambiguous writes under the same name; only material changes are returned.
 func (s Reconciler) Apply(ctx context.Context, in InvestigationContext, d Decision, current func() bool) ([]Change, error) {
 	changes := []Change{}
+
+	if err := ValidateEvidence(d.Evidence); err != nil {
+		return changes, err
+	}
+
+	in.Evidence = d.Evidence
+	if in.Evidence != nil {
+		for _, description := range in.Evidence.Descriptions {
+			resource, ok := in.Identities[description.Resource.Ref]
+			if !ok || resource.Kind != description.Resource.Kind || resource.Name != description.Resource.Name || resource.Namespace != description.Resource.Namespace {
+				return changes, errors.New("description resource outside investigation scope")
+			}
+		}
+	}
 
 	for _, a := range d.Actions {
 		identity := Identity{s.Observer, in.Identities[in.Anchor], a.Family}
@@ -380,7 +411,7 @@ func matchesInput(prior *Record, a Action, in InvestigationContext) bool {
 }
 
 // next builds a material lifecycle revision without persisting it, preserving semantic no-ops.
-// It gates resolution on recovery eligibility and tracks recurrence when reopening a record.
+// It attaches reviewed descriptions only to material revisions and gates stable recovery.
 func next(prior *Record, identity Identity, a Action, in InvestigationContext, model string, now time.Time) (Record, error) {
 	r := Record{Name: Name(identity), Value: Incident{Identity: identity}}
 	if prior != nil {
@@ -413,6 +444,7 @@ func next(prior *Record, identity Identity, a Action, in InvestigationContext, m
 	}
 
 	r.Value.Resources = resources
+	r.Value.Evidence = in.Evidence
 	r.Value.Analysis = Analysis{a.Title, a.Severity, a.Impact, a.Diagnosis, a.Explanation, a.EvidenceIDs, a.Recommendations, a.Uncertainty, model, PromptVersion, rand.Text()}
 
 	l := &r.Value.Lifecycle

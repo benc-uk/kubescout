@@ -1,6 +1,6 @@
 /*
 Purpose: Test approved attachment inspection and scoped cluster-resource events.
-Flow: Offline HTTP fixtures verify storage API shapes, redacted/truncated driver
+Flow: Offline HTTP fixtures verify storage API shapes, credential-protected/truncated driver
 errors, authorized PV/Node handles and shared budgets. Raw attachment metadata
 and inline configuration never become accepted evidence or API parameters.
 */
@@ -88,7 +88,7 @@ func TestAttachmentInspectionAndEvents(t *testing.T) {
 	attach, detach := state["attachError"].(map[string]any), state["detachError"].(map[string]any)
 	if state["attacher"] != "disk.csi.example" || state["attached"] != false || state["inline_volume"] != false ||
 		state["volume_ref"] != pvRef || state["node_ref"] != nodeRef || s.Investigation.ToolVersions["ref"] != "7" ||
-		attach["message"] != "[redacted sensitive text]" || attach["error_code"] != int32(0) || attach["time"] == nil ||
+		!strings.Contains(fmt.Sprint(attach["message"]), "[redacted credential]") || attach["error_code"] != int32(0) || attach["time"] == nil ||
 		detach["error_code"] != nil || detach["time"] != nil || detach["message"] != strings.Repeat("x", 1024)+" [truncated]" {
 		t.Fatalf("approved attachment evidence shape missing: %+v", state)
 	}

@@ -145,3 +145,6 @@ dash-forward: ## 🌐 Open localhost:8000 access (current context)
 dash-undeploy: ## 🧹 Remove only dashboard resources; retain agent and Incidents (current context)
 	$(KUBECTL) delete -f deploy/dashboard/deployment.yaml \
 		-f deploy/dashboard/service.yaml -f deploy/dashboard/rbac.yaml
+
+clean-incidents: ## 🧹 Remove all incident resources (current context)
+	$(KUBECTL) delete incidents --all

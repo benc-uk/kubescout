@@ -112,26 +112,31 @@ relationships; these are not passed to the model as raw objects. Investigations
 receive bounded related-resource handles and approved evidence rather than the
 entire cache.
 
+Before assessment, native kubectl describe is captured for the anchor and up to
+three related resources. This is the only stored resource-detail text; it already
+includes state and scoped Warning events. The tools below remain available on
+demand, without collecting or storing duplicate typed evidence.
+
 The [inspection tool](../internal/investigation/inspect_resource.go) can GET a
 supplied, authorized handle and return additional approved facts:
 
 | Resources | Examples of additional inspection facts |
 |---|---|
-| Nodes | Capacity, allocatable resources, taints and redacted condition messages |
+| Nodes | Capacity, allocatable resources, taints and credential-protected condition messages |
 | Pods | Node assignment, scheduling constraints, condition messages, regular-container status, and regular/init container specifications limited to names, images, resource requests/limits and ports |
 | Deployments, StatefulSets, DaemonSets | Current status counts and conditions; configured replica counts where applicable; update strategy and minimum-ready time where present; approved template container specifications |
 | StatefulSets | Current and update revision strings, in addition to replica counts |
 | ReplicaSets | Current replica status and conditions, configured replica count |
 | Jobs | Failed/succeeded counts, backoff limit, conditions and approved template container specifications |
 | CronJobs | Approved schedule/status facts above and regular/init container names, images, resource requests/limits and ports from the nested Job template; no commands, environment values or raw active Job references |
-| HPAs | Approved scale-target, replica, metric and behavior facts; bounded redacted conditions/messages; an authorized target handle only when a supported current workload matches |
-| Ingresses | Bounded redacted class/host/path and backend Service port descriptions, default/custom-backend flags, TLS/address counts and already-authorized same-namespace Service handles |
+| HPAs | Approved scale-target, replica, metric and behavior facts; bounded credential-protected conditions/messages; an authorized target handle only when a supported current workload matches |
+| Ingresses | Bounded credential-protected class/host/path and backend Service port descriptions, default/custom-backend flags, TLS/address counts and already-authorized same-namespace Service handles |
 | Services, EndpointSlices | Approved port and Service settings or aggregate endpoint-condition counts; no raw selectors or endpoint addresses |
-| PVCs, PVs | Phase, storage class, capacity, access/volume modes; requested PVC storage or PV reclaim policy; bounded redacted conditions and PV status reason/message; verified binding handles only when the peer is authorized |
-| VolumeAttachments | Attacher, Node/PV names or inline flag; attached/deleting state; optional deletion/error times and error codes; bounded redacted attach/detach messages; supplied current PV/Node handles |
+| PVCs, PVs | Phase, storage class, capacity, access/volume modes; requested PVC storage or PV reclaim policy; bounded credential-protected conditions and PV status reason/message; verified binding handles only when the peer is authorized |
+| VolumeAttachments | Attacher, Node/PV names or inline flag; attached/deleting state; optional deletion/error times and error codes; bounded credential-protected attach/detach messages; supplied current PV/Node handles |
 
 The [related Warning-event tool](../internal/investigation/related_warning_events.go)
-reads events for an authorized resource, returning bounded, redacted reasons and
+reads events for an authorized resource, returning bounded, credential-protected reasons and
 messages with counts/timestamps. It accepts at most 20 events and rejects
 incomplete or over-limit reads rather than returning a success-shaped partial
 list. The health rule's `--event-lookback` is **not** a time filter on this tool;
@@ -140,8 +145,10 @@ AI must interpret the returned timestamps.
 Both tools share [scope, call, byte and timeout limits](../internal/investigation/session.go).
 An Event itself is not an `inspect_resource` handle. Tools cannot run commands,
 fetch arbitrary URLs, read Secrets or Pod logs, or write workloads. Operational
-text is bounded and redacted, but arbitrary names/messages can still be sensitive;
-redaction is not a guarantee that all sensitive text has been removed.
+text is bounded with credential values removed, not filtered by diagnostic keywords.
+Native describe also retains labels, addresses, selectors, commands, probes and
+storage details emitted by the library, without a section allowlist. Operational
+details can be sensitive; credential protection is not a general privacy filter.
 
 ## Policy defaults
 
@@ -182,6 +189,7 @@ Source: [nodes.go](../internal/health/nodes.go).
 | `node.MemoryPressure` | `MemoryPressure` exists and its status is not `False` | `warning` |
 | `node.DiskPressure` | `DiskPressure` exists and its status is not `False` | `warning` |
 | `node.PIDPressure` | `PIDPressure` exists and its status is not `False` | `warning` |
+| `node.NetworkUnavailable` | `NetworkUnavailable` exists and its status is not `False` | `critical` |
 
 There is no grace period. `Unknown` readiness is not healthy readiness;
 an absent pressure condition does not trigger a pressure rule, but a present
@@ -440,8 +448,8 @@ claims and their explicit consumers/controllers. Attachment, PV and workload
 anchors remain separate, using the existing `storage-availability` family.
 
 Inspection excludes `attachmentMetadata`, raw inline specifications and backend
-configuration. Operational error messages are bounded/redacted, but arbitrary
-driver text is not guaranteed secret-free. Optional numeric error codes and
+configuration. Operational error messages are bounded and credential-protected,
+but arbitrary driver text is not guaranteed credential-free. Optional numeric error codes and
 timestamps remain absent when not reported; an explicit code zero stays zero.
 Error-time churn alone does not invalidate semantic fingerprints, while attached
 state, deletion, target identity, error presence and codes do.

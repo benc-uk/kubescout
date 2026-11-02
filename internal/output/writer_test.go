@@ -2,6 +2,7 @@
 Purpose: Verify console provenance, colour, filtering and failure handling.
 Flow: Offline buffers and concurrent writers test labelled Go/AI events, trusted
 ANSI formatting, safe external text and stream failures, not incident storage.
+Credential fixtures verify value-only removal preserves operational keywords and context.
 */
 package output
 
@@ -18,6 +19,47 @@ type failedWriter struct{}
 
 // Write rejects every byte to simulate an unavailable output destination.
 func (failedWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
+
+// TestCredentialValuesOnly checks narrow, repeatable credential removal without hiding diagnostic prose.
+func TestCredentialValuesOnly(t *testing.T) {
+	for _, test := range []struct {
+		name, input, want string
+	}{
+		{"operational words", "FailedToRetrieveImagePullSecret: token refresh failed; authorization denied; password file missing; metric=token_rate",
+			"FailedToRetrieveImagePullSecret: token refresh failed; authorization denied; password file missing; metric=token_rate"},
+		{"assignment", "Mount failed: password=fixture-password; node=worker-1",
+			"Mount failed: password=[redacted credential]; node=worker-1"},
+		{"token", "HTTP 401: token=fixture-token; endpoint=10.20.30.40",
+			"HTTP 401: token=[redacted credential]; endpoint=10.20.30.40"},
+		{"quoted", `request failed: {"api_key":"fixture key with spaces","status":401}`,
+			`request failed: {"api_key":"[redacted credential]","status":401}`},
+		{"single quoted", "password='fixture password'; retry later",
+			"password='[redacted credential]'; retry later"},
+		{"authorization", "Authorization: Bearer fixture-bearer; status=403",
+			"Authorization: Bearer [redacted credential]; status=403"},
+		{"basic", "Authorization: Basic Zml4dHVyZTpwYXNz; status=403",
+			"Authorization: Basic [redacted credential]; status=403"},
+		{"url", "connect https://operator:fixture-password@db.example:8443/data failed",
+			"connect https://operator:[redacted credential]@db.example:8443/data failed"},
+		{"query", "https://api.example/check?access_token=fixture-token&namespace=apps",
+			"https://api.example/check?access_token=[redacted credential]&namespace=apps"},
+		{"configured value", "request literal-credential failed for worker-1",
+			"request [redacted credential] failed for worker-1"},
+		{"ordinary identifiers", "app=token-service; selector=secret-reader; path=/password/reset; api_key_name=example",
+			"app=token-service; selector=secret-reader; path=/password/reset; api_key_name=example"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := Redact(test.input, "literal-credential")
+			if got != test.want {
+				t.Fatalf("got %q, want %q", got, test.want)
+			}
+
+			if repeated := Redact(got, "literal-credential"); repeated != got {
+				t.Fatalf("repeated protection changed content: %q", repeated)
+			}
+		})
+	}
+}
 
 // TestConsoleProvenance checks readable origins, stream routing, filtering and forged-line prevention.
 func TestConsoleProvenance(t *testing.T) {

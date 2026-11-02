@@ -4,6 +4,7 @@ Flow: Offline Kubernetes and model HTTP fixtures drive the real collector,
 Responses agent and reconciler through workload namespace scopes, cluster-scoped Incidents and workload/storage/attachment cases.
 Assertions check collection-failure retention, projected evidence with named citations and
 AI-authored stored Incidents and readable activity; no live cluster or model is contacted.
+Named GETs serve the same resource incarnations as collection for automatic descriptions.
 */
 package runner
 
@@ -190,6 +191,17 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 			t.Error("workload write attempted")
 		}
 
+		resourceName := ""
+
+		for _, name := range []string{"failed", "failed-a", "failed-run", "node", "disk", "target", "backend"} {
+			if strings.HasSuffix(r.URL.Path, "/"+name) {
+				resourceName = name
+				r.URL.Path = strings.TrimSuffix(r.URL.Path, "/"+name)
+
+				break
+			}
+		}
+
 		pod := map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": "failed", "namespace": "apps", "uid": "pod-id", "resourceVersion": "1"},
 			"status": map[string]any{"phase": "Failed"}}
 		slice := map[string]any{"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv4",
@@ -248,53 +260,11 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 				"active": []any{map[string]any{"name": "private-cron-active", "uid": "private-cron-uid"}}}
 		}
 
-		if kind == "Service" && strings.HasSuffix(r.URL.Path, "/endpointslices/failed-a") {
-			toolReads.Add(1)
-			json.NewEncoder(w).Encode(slice)
-
-			return
-		}
-
-		if strings.HasSuffix(r.URL.Path, "/pods/failed") {
-			toolReads.Add(1)
-			json.NewEncoder(w).Encode(pod)
-
-			return
-		}
-
-		if kind == "CronJob" && strings.HasSuffix(r.URL.Path, "/cronjobs/failed") {
-			toolReads.Add(1)
-			json.NewEncoder(w).Encode(pod)
-
-			return
-		}
-
-		if kind == "HorizontalPodAutoscaler" && strings.HasSuffix(r.URL.Path, "/horizontalpodautoscalers/failed") {
-			toolReads.Add(1)
-			json.NewEncoder(w).Encode(pod)
-
-			return
-		}
-
-		if kind == "Ingress" && strings.HasSuffix(r.URL.Path, "/ingresses/failed") {
-			toolReads.Add(1)
-			json.NewEncoder(w).Encode(pod)
-
-			return
-		}
-
 		storageResource := "persistentvolumeclaims"
 		if kind == "PersistentVolume" {
 			storageResource = "persistentvolumes"
 		} else if kind == "VolumeAttachment" {
 			storageResource = "volumeattachments"
-		}
-
-		if family == "storage-availability" && strings.HasSuffix(r.URL.Path, "/"+storageResource+"/failed") {
-			toolReads.Add(1)
-			json.NewEncoder(w).Encode(pod)
-
-			return
 		}
 
 		items := []any{}
@@ -350,6 +320,24 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 		if strings.HasSuffix(r.URL.Path, "/nodes") {
 			items = append(items, map[string]any{"apiVersion": "v1", "kind": "Node", "metadata": map[string]any{"name": "node", "uid": "node-id", "resourceVersion": "1"},
 				"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}})
+		}
+
+		if resourceName != "" {
+			if modelCalls.Load() > 0 {
+				toolReads.Add(1)
+			}
+
+			for _, raw := range items {
+				item := raw.(map[string]any)
+				if item["metadata"].(map[string]any)["name"] == resourceName {
+					json.NewEncoder(w).Encode(item)
+					return
+				}
+			}
+
+			http.NotFound(w, r)
+
+			return
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "List", "metadata": map[string]any{"resourceVersion": "1"}, "items": items})
@@ -480,6 +468,10 @@ func collectorToolAgentAndIncidentAPI(t *testing.T, scope config.Config, kind st
 	}
 
 	analysisPayload := stored["spec"].(map[string]any)["analysis"].(map[string]any)
+	if stored["spec"].(map[string]any)["evidence"] == nil {
+		t.Fatal("reviewed descriptions missing from stored Incident")
+	}
+
 	if analysisPayload["title"] != "Workload failed" || analysisPayload["severity"] != "high" {
 		t.Fatal("deterministic evidence replaced AI judgment")
 	}

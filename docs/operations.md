@@ -352,7 +352,9 @@ explicit choice is remembered.
 - The **Problem namespace** belongs to the anchor resource. Incident records
   themselves have no namespace; Node, PV and VolumeAttachment problems show `Cluster-scoped`.
 - Use Left/Right or Home/End within the tabs. Refresh retains the tab and scroll
-  position; another incident opens on Overview. Escape, the backdrop or Close
+  position, including each expanded describe panel's reading position and keyboard
+  focus within the same lifecycle revision. A material revision resets resource
+  expansion and describe scroll; another incident opens on Overview. Escape, the backdrop or Close
   returns focus to the list. The modal is designed for desktop, not a separate
   mobile layout.
 - Record-tab copy buttons copy only the identifier. If clipboard access fails,
@@ -382,6 +384,94 @@ Evidence citations such as `inspect-resource-1` and `related-warning-events-2`
 identify calls within one investigation. Older `tool-N` references remain
 unchanged. They do not provide access to raw evidence, logs or revision history.
 
+### Resource descriptions
+
+The Resources tab shows **native kubectl describe output** captured by Go before
+AI assessment. This is the only resource-detail text stored in `spec.evidence`
+with each accepted raise, material update, reopen and resolve. State and Warning
+events are already part of describe, so no duplicate typed state/event copies
+are collected or stored. Only the latest revision's description set is retained.
+
+Each resource starts collapsed, with its name, kind, namespace and section
+coverage visible in the summary. Expand resources individually or use Expand all /
+Collapse all. Open resources remain open across refreshes of the same lifecycle
+revision. Each resource has one native text panel, one coverage status, one
+observation time and one citation. Display and Copy preserve the same stored
+text, without compacting or reformatting it. Partial and unavailable coverage
+remain visible even while collapsed.
+Captured text starts directly with native output, without added policy or
+partial-read preambles. Coverage remains in `output.status`, with unavailable
+sections identified inline.
+
+Each set covers the anchor and up to three authorized related resources,
+prioritizing symptom-bearing resources, with a count of omitted context resources.
+Output comes directly from `k8s.io/kubectl` v0.35.9, not from an AI renderer or a
+reconstruction of typed inspection fields. The `kubectl-describe/v1` envelope
+stores `resource`, `source`, `observed_at`, `evidence_id` and `output`
+(`status`/`text`) per entry in `spec.evidence.descriptions`. The previous field is
+not accepted as an alias; apply the renamed CRD alongside the updated binaries.
+The exact text shown to AI is stored and displayed. The AI can still request
+additional facts through `inspect_resource` and `related_warning_events`; their
+results are citations, not additional stored state/event copies.
+
+Describe uses the same explicitly selected Kubernetes authentication, but its
+transport independently restricts APIs, identities, namespaces, deadlines and
+response sizes. Related objects must already be authorized investigation handles;
+Warning events must match the resource incarnation. No Secrets, ConfigMaps,
+logs, commands, Node Leases or other unapproved API reads are added. No RBAC
+expansion is needed. An unsupported native kind (currently VolumeAttachment)
+is explicitly unavailable, never a typed or generic raw-object fallback.
+
+Native output no longer uses a section allowlist. Labels, addresses, selectors,
+commands, probes, storage details and non-UID identifiers remain visible as emitted
+by kubectl. Only credential values are redacted from operational text, preserving
+field names and surrounding diagnostics; words such as `secret`, `token`,
+`password` and `authorization` alone do not trigger redaction. Annotations,
+environment values and UIDs remain excluded from model input. Control characters
+are escaped before native formatting; browser text remains safely rendered.
+This does not guarantee arbitrary operational text is credential-free.
+Omitted fields and scoped totals are not proof
+of absence or health. Additional read failures are labelled even when kubectl
+would otherwise hide an event error.
+
+Output status explicitly distinguishes captured, partial, unavailable and absent
+observations. API denial/timeouts or event limits do not become "no problems";
+scope, incarnation and protocol violations still abort the investigation.
+Resource disappearance and missing evidence never independently establish recovery.
+Capture time is not dashboard refresh time, and separate reads are not an atomic
+cluster snapshot. The model does not author or regenerate the stored text.
+
+Preparation also runs for investigations that ultimately choose no-action, but
+no-action and description-only changes never write an Incident. Automatic reads are
+logged as `GO DESCRIBE`, not AI tool requests. They share the investigation
+deadline and evidence-byte budget without consuming AI tool invocation slots.
+Plain UTF-8 avoids base64 overhead; it is not encrypted, and redaction cannot
+guarantee arbitrary operational text is secret-free. Anyone able to read
+Incidents or access the trusted dashboard can read these descriptions.
+
+**Rollout:** apply the updated [Incident CRD](../deploy/incidents-crd.yaml) before
+running the updated agent, and remove old-format Incident records before switching.
+The previous evidence layout has no migration or compatibility layer. No records
+are deleted automatically and no RBAC expansion is needed. The agent checks that
+create/patch responses retain its descriptions and reports schema pruning explicitly.
+Avoid mixed-version writers. Rebuild agent/dashboard binaries and images to
+include the new instructions and embedded UI.
+
+The envelope is capped at 16 KiB of serialized JSON, including escaped text and
+metadata, and shrinks further to fit the remaining initial AI context budget.
+Mandatory coverage metadata must fit or the investigation fails explicitly.
+Describe uses at most 16 actual HTTP attempts per investigation,
+128 KiB per raw response and 1 MiB cumulatively. Its lists use 20-item pages,
+with at most 20 Warning events or 50 authorized related objects per complete list.
+Each resource's describe has its own request-timeout window inside the same
+investigation deadline. Each resource's native text is capped at 8 KiB; the
+16 KiB serialized envelope is available to descriptions without reserving space
+for duplicate typed evidence. Text may be explicitly shortened without relaxing
+any model limit and counts toward the shared 32 KiB evidence allowance.
+The two existing tool invocation and result-size limits are unchanged.
+List summaries omit text, but Kubernetes pages still carry full Incident specs;
+100 maximal description envelopes add roughly 1.56 MiB per upstream page.
+
 ## Limits and scheduling
 
 These are binary defaults from [configuration parsing](../internal/config/config.go),
@@ -404,7 +494,9 @@ hourly quota as noted above.
 | Once / initial informer synchronization deadline | 120s; `--run-timeout` |
 | Watch connection lifetime | 5m; `--watch-timeout` |
 | Initial evidence budget | 20,000 bytes; `--max-input-chars` |
-| Tool result / cumulative output | 8 KiB / 32 KiB |
+| Automatic resource descriptions | At most 4 resources, 16 KiB serialized total within remaining initial budget; explicit omissions |
+| Native kubectl describe reads | 8 KiB text per resource; 16 API HTTP attempts / 128 KiB per raw response / 1 MiB cumulative |
+| Tool result / cumulative evidence output | 8 KiB per AI tool result / 32 KiB including prepared descriptions |
 | Model output per request | 2,000 tokens; `--max-output-tokens`, plus cumulative byte checks |
 | Retained objects / pending cases / open index | Bounded by `--max-objects`, default 5,000 |
 
@@ -445,7 +537,7 @@ Capture is on by default, independently of console verbosity:
 
 Newly created directories/files are private. Transcripts contain instructions,
 model-visible context, actual request/tool rounds, normalized authorized tool
-arguments, approved redacted results, model responses, validation and final
+arguments, approved credential-protected results, model responses, validation and final
 disposition. They exclude authentication metadata, raw objects, rejected raw
 arguments and provider error bodies. Protect access: operational text may still
 be sensitive. Unvalidated model content is not an accepted incident.

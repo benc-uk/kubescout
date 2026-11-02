@@ -3,6 +3,8 @@ Purpose: Provide an opt-in, loopback-only dashboard browser-test harness.
 Flow: In-memory cluster-scoped incidents supply desktop modal checks with workload namespace,
 empty detail lists, rendering, error, latency and revision-scoped triage scenarios. The harness
 serves until signalled and never contacts a live cluster or model.
+Stored native descriptions exercise collapsible resources, one exact-copy text block,
+independent long-output scrolling, partial coverage and unavailable output without live resource reads.
 */
 package dashboard
 
@@ -24,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/benc-uk/kubescout/internal/incident"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -140,6 +143,22 @@ func TestBrowserFixture(t *testing.T) {
 		item.Analysis.Title = item.Title
 		item.Anchor.Name = fmt.Sprintf("workload-%02d", i)
 		item.Resources = []Resource{item.Anchor}
+		item.Evidence = dashboardEvidence()
+		item.Evidence.Descriptions[0].Output.Text += strings.Repeat("\n  api       Running   Ready   0 restarts", 60)
+		item.Evidence.Descriptions = append(item.Evidence.Descriptions,
+			incident.ResourceDescription{
+				EvidenceID: "kubectl-describe-2",
+				Resource:   incident.Resource{Ref: "deployment-ref", Kind: "Deployment", Namespace: "apps", Name: "checkout"},
+				Source:     incident.DescribeSource, ObservedAt: item.Evidence.Descriptions[0].ObservedAt,
+				Output: incident.DescriptionOutput{Status: "captured", Text: "Name:\tcheckout\nReplicas:\t3 desired | 2 available\nEvents:\t<none>" +
+					strings.Repeat("\n  replica   Running   Ready", 50)},
+			},
+			incident.ResourceDescription{
+				EvidenceID: "kubectl-describe-3",
+				Resource:   incident.Resource{Ref: "node-ref", Kind: "Node", Name: "worker-1"},
+				Source:     incident.DescribeSource, ObservedAt: item.Evidence.Descriptions[0].ObservedAt,
+				Output: incident.DescriptionOutput{Status: "unavailable", Text: "kubectl describe unavailable. This is not evidence of health."},
+			})
 
 		item.Lifecycle.UpdatedAt = item.Lifecycle.UpdatedAt.Add(time.Duration(i) * time.Minute)
 		if i >= 60 {
