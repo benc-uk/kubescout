@@ -8,6 +8,7 @@ CronJob ownership groups scheduled runs while preserving unresolved legacy Job a
 HPA scale targets add workload context without becoming ownership or changing anchors.
 Ingress routes share Service/backend context without duplicating endpoint evidence or changing anchors.
 VolumeAttachments share named current PV/Node and scoped claim context without changing incident ownership.
+Recovery retains original anchors and adds same-name replacement evidence without merging identities.
 */
 package incident
 
@@ -65,8 +66,13 @@ func anchor(o health.Object, objects map[string]health.Object, jobAnchors map[st
 // It does not decide whether any group merits a user-facing incident.
 func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, open []Record, limit int) (map[string]InvestigationContext, error) {
 	objects := map[string]health.Object{}
+	named := map[health.Resource]health.Object{}
+
 	for _, o := range snapshot.Objects {
 		objects[Ref(o.Resource)] = o
+		name := o.Resource
+		name.UID = ""
+		named[name] = o
 	}
 
 	jobAnchors := map[string]bool{}
@@ -84,7 +90,8 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 		in, ok := out[key]
 		if !ok {
 			in = InvestigationContext{Anchor: key, ObservedAt: snapshot.At, Resources: []Resource{}, Signals: []Signal{}, Incidents: []Existing{},
-				Identities: map[string]health.Resource{}, Objects: map[string]health.Object{}, ToolVersions: map[string]string{}}
+				Identities: map[string]health.Resource{}, Objects: map[string]health.Object{}, ToolVersions: map[string]string{},
+				Continuity: snapshot.Continuity, RecoveryChanges: map[string]uint64{}}
 		}
 
 		return in
@@ -98,10 +105,16 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 		in.Identities[key] = r
 
 		in.Resources = append(in.Resources, Resource{key, r.Kind, r.Namespace, r.Name})
+		name := r
+		name.UID = ""
+		in.RecoveryChanges[key] = snapshot.RecoveryChanges[name]
+
 		if o, ok := objects[key]; ok {
 			in.Objects[key] = o
 		}
 	}
+
+	signals := map[string][]Signal{}
 
 	for _, f := range health.Evaluate(snapshot, policy) {
 		o, ok := objects[Ref(f.Resource)]
@@ -123,13 +136,28 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 		in := ensure(a)
 		add(&in, a)
 		add(&in, o.Resource)
-		in.Signals = append(in.Signals, Signal{f.ID, f.Rule, f.Severity, Ref(o.Resource), f.Summary, f.Evidence})
+		signal := Signal{f.ID, f.Rule, f.Severity, Ref(o.Resource), f.Summary, f.Evidence}
+		in.Signals = append(in.Signals, signal)
+		signals[in.Anchor] = append(signals[in.Anchor], signal)
 		out[in.Anchor] = in
 	}
 
 	for _, existing := range open {
 		in := ensure(existing.Value.Identity.Anchor)
 		add(&in, existing.Value.Identity.Anchor)
+
+		in.Recovery = &Recovery{AnchorState: "present"}
+		if _, ok := objects[in.Anchor]; !ok {
+			in.Recovery.AnchorState = "absent"
+			name := existing.Value.Identity.Anchor
+			name.UID = ""
+
+			if replacement, ok := named[name]; ok {
+				in.Recovery.AnchorState = "replaced"
+				in.Recovery.ReplacementRef = Ref(replacement.Resource)
+				add(&in, replacement.Resource)
+			}
+		}
 
 		for _, r := range existing.Value.Resources {
 			add(&in, r)
@@ -143,14 +171,24 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 	}
 
 	for key, in := range out {
+		focus := in.Anchor
+
+		focusAnchor := in.Identities[in.Anchor]
+		if in.Recovery != nil && in.Recovery.ReplacementRef != "" {
+			focus = in.Recovery.ReplacementRef
+			focusAnchor = anchor(objects[focus], objects, jobAnchors)
+			add(&in, focusAnchor)
+			in.Signals = append(in.Signals, signals[Ref(focusAnchor)]...)
+		}
+
 		// Include bounded known owner/replica context without adding unrelated scopes.
 		for _, o := range snapshot.Objects {
-			if anchor(o, objects, jobAnchors) == in.Identities[in.Anchor] {
+			if a := anchor(o, objects, jobAnchors); a == in.Identities[in.Anchor] || a == focusAnchor {
 				add(&in, o.Resource)
 			}
 		}
 
-		if job, ok := objects[in.Anchor]; ok && job.Kind == "Job" && job.Owner.Kind == "CronJob" {
+		if job, ok := objects[focus]; ok && job.Kind == "Job" && job.Owner.Kind == "CronJob" {
 			if cron, ok := objects[Ref(job.Owner)]; ok {
 				add(&in, cron.Resource)
 			}
@@ -172,8 +210,8 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 
 		services := map[string]health.Object{}
 
-		if service, ok := objects[in.Anchor]; ok && service.Kind == "Service" {
-			services[in.Anchor] = service
+		if service, ok := objects[focus]; ok && service.Kind == "Service" {
+			services[focus] = service
 		}
 
 		for _, related := range slices.Clone(in.Resources) {
@@ -258,7 +296,7 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 
 				for _, attachment := range snapshot.Objects {
 					if health.MatchesAttachmentVolume(attachment, o) ||
-						related.Ref == in.Anchor && health.MatchesAttachmentNode(attachment, o) {
+						related.Ref == focus && health.MatchesAttachmentNode(attachment, o) {
 						addAttachment(attachment)
 					}
 				}
@@ -501,12 +539,31 @@ func Fingerprint(in InvestigationContext) string {
 	}
 
 	data, _ := json.Marshal(struct {
-		Facts  []fact
-		States []state
-	}{facts, states})
+		Facts                       []fact
+		States                      []state
+		AnchorState, ReplacementRef string
+	}{facts, states, recoveryState(in), replacementRef(in)})
 	sum := sha256.Sum256(data)
 
 	return hex.EncodeToString(sum[:])
+}
+
+// recoveryState returns the stable host-observed anchor state without timing or eligibility churn.
+func recoveryState(in InvestigationContext) string {
+	if in.Recovery == nil {
+		return ""
+	}
+
+	return in.Recovery.AnchorState
+}
+
+// replacementRef returns the approved replacement handle without changing the original anchor.
+func replacementRef(in InvestigationContext) string {
+	if in.Recovery == nil {
+		return ""
+	}
+
+	return in.Recovery.ReplacementRef
 }
 
 // Active reports warning or critical scheduling hints, not an AI incident decision.

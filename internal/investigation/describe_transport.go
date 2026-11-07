@@ -4,6 +4,8 @@ Flow: A private REST transport enforces GET-only APIs, authorized incarnations,
 namespace filters, complete bounded pagination, byte/request caps and the parent
 deadline. Only scoped responses reach the library; upstream errors never enter its text.
 Native rendering retains operational sections and HPA metric selectors.
+Missing list-item kinds come from approved endpoints; identity and version checks stay strict.
+Named reads prefer the describer's exact root or a supplied current incarnation, never a random historical handle.
 */
 package investigation
 
@@ -178,8 +180,22 @@ func matchDescribePath(path, kind string, gvr schema.GroupVersionResource) (desc
 	return result, true
 }
 
-// identity resolves names only through host-authorized resource handles.
+// identity resolves names through the exact root or a supplied current incarnation before historical handles.
 func (t *describeTransport) identity(path describePath, name, namespace string) (health.Resource, string, bool) {
+	for ref, r := range t.session.Investigation.Identities {
+		if r == t.root && r.Kind == path.kind && r.Name == name && r.Namespace == namespace {
+			return r, ref, true
+		}
+	}
+
+	for ref, r := range t.session.Investigation.Identities {
+		if r.Kind == path.kind && r.Name == name && r.Namespace == namespace {
+			if _, current := t.session.Investigation.Objects[ref]; current {
+				return r, ref, true
+			}
+		}
+	}
+
 	for ref, r := range t.session.Investigation.Identities {
 		if r.Kind == path.kind && r.Name == name && r.Namespace == namespace {
 			return r, ref, true
@@ -289,7 +305,8 @@ func (t *describeTransport) list(req *http.Request, path describePath) (*http.Re
 	return t.response(req, obj)
 }
 
-// listNamespace validates every page and filters ignored or unsupplied resources before library access.
+// listNamespace validates pages, supplies omitted item kinds from approved endpoints,
+// and filters ignored or unsupplied resources before library access.
 func (t *describeTransport) listNamespace(req *http.Request, path describePath, namespace string, items *[]any) error {
 	query := req.URL.Query()
 	query.Set("limit", "20")
@@ -372,6 +389,10 @@ func (t *describeTransport) listNamespace(req *http.Request, path describePath, 
 					t.relatedIncomplete = true
 
 					continue
+				}
+
+				if _, present := object["kind"]; !present {
+					obj.SetKind(path.kind)
 				}
 
 				if err := t.checkObject(obj, r, ref); err != nil {

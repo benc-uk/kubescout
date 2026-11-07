@@ -2,8 +2,9 @@
 
 [Overview](../README.md) · [Architecture](../ARCHITECTURE.md) · [Operations](operations.md)
 
-KubeScout has two Go executables: the investigation agent and the independent
-dashboard. Read the [architecture guide](../ARCHITECTURE.md) for component
+KubeScout's primary Go executables are the investigation agent and the independent
+dashboard. A separate local [alert-test watcher](#alert-delivery-test-watcher) is
+available for manual testing. Read the [architecture guide](../ARCHITECTURE.md) for component
 ownership and the boundary between evidence, AI decisions and human triage.
 
 ## Setup and validation
@@ -97,7 +98,8 @@ the host with Ctrl+C. If port 8000 is occupied, set
 `K8S_DASHBOARD_BROWSER_PORT=0`; the fixture prints the selected loopback URL.
 
 Use a desktop browser. The suite covers filtering, sorting, pagination, safe text
-rendering (including one exact-copy native description per resource and partial/unavailable coverage),
+rendering (including exact-copy native descriptions, full-screen reading with
+focus/scroll restoration and partial/unavailable coverage),
 details, stale/deleted/error states, response races, refresh, themes,
 text sizes and contrast. Go fixtures also cover auth/context selection,
 cluster-scoped Incident requests, workload namespaces and status-only triage writes. Browser fixtures are test-only, skipped by
@@ -173,12 +175,90 @@ bash scripts/inject-failures.sh your-test-namespace
 ```
 
 Choose a namespace watched by the agent. The script offers owned cleanup;
-inspect prompts before authorizing resource creation/deletion. Option 7 creates
+inspect prompts before authorizing resource creation/deletion. Options 1 through 5 select
+individual failures, option 6 creates all five, option 7 removes matching fixtures
+after confirmation, and option 0 cancels. Option 5 creates
 an OOM fixture: a Python container allocates 128 MiB against a 64 MiB limit, with
 CPU limited to 100m and `restartPolicy: Never` to retain the termination.
 Image download and working memory-limit enforcement are required; inspect Pod
-status to confirm `OOMKilled`. Option 5 creates all five failures; option 6
-removes matching fixtures after confirmation. An AI incident is not guaranteed.
+status to confirm `OOMKilled`. An AI incident is not guaranteed.
+
+### Alert delivery test watcher
+
+The standalone [Go watcher](../cmd/kubescout-alerts/main.go) replaces the Bash
+smoke test. It uses the current kubeconfig context directly, with no `kubectl`,
+`jq` or `curl` dependency and no in-cluster authentication fallback.
+Add an endpoint URL to the repository-root
+`.env` (do not commit it):
+
+```dotenv
+ALERT_ENDPOINT_URL='https://your-endpoint.example/invoke?your=query'
+```
+
+Then run:
+
+```bash
+kubectl config current-context
+go run ./cmd/kubescout-alerts
+```
+
+By default, the initial list establishes a startup boundary; existing Incidents
+are **not** processed. To include stored open Incidents before continuing to watch:
+
+```bash
+go run ./cmd/kubescout-alerts --include-existing
+```
+
+Startup replay follows all list pages and includes open Incidents across every
+observer, including dismissed open records. Resolved Incidents are skipped in
+both normal and dry-run modes. Records with missing or invalid
+`spec.lifecycle.state` are skipped with an explicit error.
+Every restart with this flag reprocesses existing open records; there is no
+delivery deduplication.
+The watch resumes from the initial snapshot's resource version, including records
+created while the startup replay runs. Updates, resolutions, dismissals and
+deletions do not trigger watch alerts.
+
+To preview alerts without sending HTTP requests, use dry-run mode:
+
+```bash
+go run ./cmd/kubescout-alerts --dry-run --include-existing
+```
+
+`--dry-run` prints each alert as a separate two-space-indented JSON object to
+stdout, with no log prefixes. Progress and errors stay on stderr, so stdout can
+be redirected. No `ALERT_ENDPOINT_URL` is required, and no HTTP alerts are sent.
+Kubernetes list/watch access is still required. Omit `--include-existing` to
+preview only new Incidents. The watcher continues until Ctrl+C; a stdout write
+failure stops it with an error.
+
+Without `--dry-run` (or with `--dry-run=false`), alerts are sent to the configured
+endpoint using the normal HTTP delivery path.
+
+Each payload contains `title`, `severity`, `impact`, `diagnosis`, `explanation`
+and `recommendations` from `spec.analysis`, plus `source` from
+`spec.identity.anchor.name`; recommendations are joined into a newline-separated string.
+Malformed records are skipped with errors naming the missing or invalid field,
+without logging that field's contents.
+Severity and impact are capitalized (`Critical`, `Degraded`).
+The watcher does not modify Kubernetes or call AI. When HTTP delivery is enabled,
+it does not follow redirects.
+Each POST has a 30-second timeout. Failed requests (including non-2xx responses)
+are retried up to three times, waiting five seconds after each failure: at most
+four attempts per alert. Retries block later alerts and are canceled by Ctrl+C.
+After retries are exhausted, the failure is logged and watching continues.
+An ambiguous failure can cause duplicate delivery if the endpoint already
+accepted the request. Watch disconnects resume from the last resource version; expired
+history stops the process with an error rather than replaying existing records.
+Restarting establishes a new boundary and skips records created while stopped
+unless `--include-existing` is set.
+There is no controller, work queue, persistent delivery state or exactly-once
+guarantee. Stop with Ctrl+C. Kubeconfig credentials need cluster-scoped
+Incident `list` and `watch` permissions.
+
+An existing `ALERT_ENDPOINT_URL` environment value takes precedence. The watcher
+uses the agent's repository-root dotenv loader without requiring model settings.
+Endpoints and response bodies are not printed.
 
 ## Make reference
 

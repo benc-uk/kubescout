@@ -229,6 +229,9 @@ actual SDK/tool/CR request shapes. Keep the Makefile's generated help and emoji
 descriptions. Add no-action, coalescing, boundary, scope, failure and recovery
 fixtures whenever changing behavior.
 
+Do not create or recreate tests for [scripts/inject-failures.sh](scripts/inject-failures.sh),
+including its menu, fixture creation or cleanup.
+
 Live tests are opt-in under the `integration` build tag. Select contexts and
 namespaces explicitly. Full model/container tests require model authorisation
 and account for every HTTP attempt, including tool rounds. Collector-only tests

@@ -3,6 +3,7 @@ Purpose: Exercise configuration validation and repository-root dotenv precedence
 Flow: Offline argument tables, synthetic environment values and filesystem fixtures
 check namespace filters, authentication, logging/colour controls, configurable tool budgets, endpoint and model requirements.
 Removed runtime modes and incident-storage namespace options are rejected without contacting Kubernetes or a model.
+Unified recovery defaults and watch lifetimes reject unreachable or invalid review windows.
 */
 package config
 
@@ -12,11 +13,46 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 // testEnv supplies synthetic model settings so parser tests require no real credentials.
 func testEnv(key string) string {
 	return map[string]string{"AZURE_OPENAI_ENDPOINT": "https://fixture/openai/v1/", "AZURE_OPENAI_API_KEY": "fixture", "AZURE_AI_MODEL_DEPLOYMENT_NAME": "fixture"}[key]
+}
+
+// TestRecoveryConfiguration checks the unified five-minute default, overrides and renewal compatibility.
+func TestRecoveryConfiguration(t *testing.T) {
+	base := []string{"--auth-mode=kubeconfig", "--observer-id=test"}
+
+	c, err := Parse(base, testEnv, io.Discard)
+	if err != nil || c.RecoveryWindow != 5*time.Minute || c.WatchTimeout != 10*time.Minute {
+		t.Fatalf("recovery defaults: window=%s watch=%s err=%v", c.RecoveryWindow, c.WatchTimeout, err)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		invalid bool
+		window  time.Duration
+	}{
+		{name: "shorter unified window", args: []string{"--recovery-window=2m"}, window: 2 * time.Minute},
+		{name: "longer unified window", args: []string{"--recovery-window=10m", "--watch-timeout=13m"}, window: 10 * time.Minute},
+		{name: "zero window", args: []string{"--recovery-window=0s"}, invalid: true},
+		{name: "negative window", args: []string{"--recovery-window=-1s"}, invalid: true},
+		{name: "invalid window", args: []string{"--recovery-window=invalid"}, invalid: true},
+		{name: "renewal equals recovery", args: []string{"--watch-timeout=5m"}, invalid: true},
+		{name: "no investigation margin", args: []string{"--watch-timeout=7m"}, invalid: true},
+		{name: "once has no continuous recovery", args: []string{"--once", "--watch-timeout=1s"}, window: 5 * time.Minute},
+		{name: "no separate absence window", args: []string{"--absence-window=5m"}, invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := Parse(append(slices.Clone(base), tt.args...), testEnv, io.Discard)
+			if (err != nil) != tt.invalid || err == nil && c.RecoveryWindow != tt.window {
+				t.Fatalf("window=%s error=%v", c.RecoveryWindow, err)
+			}
+		})
+	}
 }
 
 // TestLoggingConfiguration checks capture/colour defaults, explicit disable and rejected logging options.

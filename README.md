@@ -123,7 +123,9 @@ make once NAMESPACE_WATCH=default OBSERVER_ID=local-default ALLOW_MODEL=yes
 
 `ALLOW_MODEL=yes` explicitly authorizes model use through Make. A completed
 assessment may produce no incidents. Watch mode is needed to establish
-continuous recovery for resolution.
+continuous recovery for resolution. One configurable `--recovery-window`
+(default 5 minutes) covers cleared problem signals and confirmed anchor absence;
+AI still decides whether to resolve. See [Incident recovery](docs/operations.md#incident-recovery).
 
 ### Review incidents
 
@@ -143,6 +145,10 @@ The local dashboard needs incident read permissions, plus status-patch
 permission for dismissal/restore. It does not start the agent or make model calls.
 See the [operations guide](docs/operations.md) for authentication, configuration
 and dashboard details.
+
+For a separate local test consumer that POSTs newly created Incidents to your
+own endpoint, see the [alert-test watcher](docs/development.md#alert-delivery-test-watcher).
+It is not part of the AI agent or dashboard.
 
 ## Deploy to Kubernetes
 

@@ -125,7 +125,32 @@ tools. Typed inspection omits metric selectors; native describe retains whatever
 the library emits. Distinguish autoscaling failure from workload impact
 and choose no-action when no meaningful user-facing problem is established.
 Resolve only when recovery_eligible is true, after reviewing current recovery
-evidence, and only by referencing a known open incident. Absence during incomplete
+evidence, and only by referencing a known open incident. The recovery context
+uses one continuous window for cleared signals and confirmed anchor absence.
+anchor_state distinguishes present, absent and replaced. An absent anchor can
+make the original resource-specific incident obsolete. Resolution can mean the
+original condition ended because its subject was removed; it does not certify
+that related workloads, services or the cluster are healthy.
+
+For recovery_eligible=true and anchor_state=absent, Go has confirmed continuous
+absence through fresh, complete scoped observations for the configured window.
+Normally resolve an obsolete resource-specific incident when the original
+resource is gone and supplied evidence does not establish continuing related
+impact belonging to that same incident. Explain that the triggering resource
+was removed and the original condition is obsolete, not that broader health
+was proven. Do not require a replacement workload, a successful replacement Job,
+a CronJob owner for a standalone Job, or service-health proof to close an obsolete
+resource-specific incident. Missing replacement or owner context alone is not a
+reason for no_action. Unrelated partial Node descriptions do not invalidate
+host-confirmed continuous anchor absence and must not be presented as health proof.
+Choose no_action when evidence supports continuing related impact or the host's
+recovery prerequisites are not satisfied; do not invent recovery observations.
+
+A replacement_ref identifies a current same-name resource, not the original
+incarnation; review it and its related signals without merging incident identities.
+Deleting a child Pod is not recovery of its still-failing controller.
+Recovery timing is host-observed eligibility, never proof of application health.
+Absence during incomplete
 collection cannot prove recovery. An unavailable tool or missing evidence is not
 proof that a problem resolved. No-action never resolves an existing incident.
 Never include intermediate reasoning, tool transcripts, extra fields or Markdown.

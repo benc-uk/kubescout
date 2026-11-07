@@ -379,14 +379,94 @@ try {
     else delete navigator.clipboard;
     document.getSelection().removeAllRanges();
   }
-  document.querySelector('[aria-label="Expand all resource descriptions"]').click();
-  assert(descriptionEntries.every((entry) => entry.open), "Expand all opens every resource");
-  document.querySelector('[aria-label="Collapse all resource descriptions"]').click();
-  assert(descriptionEntries.every((entry) => !entry.open), "Collapse all closes every resource");
-  firstDescription.querySelector("summary").click();
-  firstDescription.querySelector("summary").focus();
+  const inlineScroll = $("detail-body").scrollTop;
+  const expandDescription = firstDescription.querySelector(".description-expand");
+  assert(expandDescription.classList.contains("secondary") && !expandDescription.classList.contains("primary")
+    && expandDescription.querySelector('svg[width="16"]')
+    && expandDescription.textContent === "Full screen"
+    && expandDescription.getBoundingClientRect().height >= 36
+    && expandDescription.getBoundingClientRect().height <= 40
+    && getComputedStyle(expandDescription).backgroundColor === "rgba(0, 0, 0, 0)",
+    "Full screen is a compact neutral outlined action with an expand icon and clear label");
+  expandDescription.click();
+  const fullView = $("description-view");
+  const fullOutput = fullView.querySelector(".native-describe");
+  const fullBounds = fullView.getBoundingClientRect();
+  assert(fullView.open && $("detail").open && document.activeElement === $("close-description-view")
+    && expandDescription.getAttribute("aria-haspopup") === "dialog",
+    "Full screen opens a labelled modal above incident details with a focused return control");
+  assert(Math.abs(fullBounds.width - window.innerWidth) <= 1
+    && Math.abs(fullBounds.height - window.innerHeight) <= 1
+    && Math.abs(fullBounds.left) <= 1 && Math.abs(fullBounds.top) <= 1
+    && parseFloat(getComputedStyle(fullOutput).fontSize) >= 18
+    && fullOutput.scrollHeight > fullOutput.clientHeight,
+    "full-screen output fills the viewport with larger text and independent scrolling");
+  assert(fullOutput.textContent === storedText && !fullView.querySelector("img, script")
+    && fullView.textContent.includes("Coverage: Partial")
+    && $("description-view-resource").textContent.includes(rawDetail.incident.evidence.descriptions[0].resource.name)
+    && $("description-view-capture").textContent.includes("not live status")
+    && $("description-view-capture").textContent.includes("kubectl-describe-1"),
+    "full-screen descriptions preserve exact safe text, resource identity, capture context and coverage");
+  try {
+    copiedDescription = undefined;
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      writeText: async (text) => { copiedDescription = text; },
+    } });
+    fullView.querySelector(".copy-button").click();
+    await until(() => copiedDescription !== undefined && !fullView.querySelector(".copy-button").disabled, "full-screen description copied");
+    assert(copiedDescription === storedText, "full-screen Copy preserves the original stored output");
+  } finally {
+    if (descriptionClipboardDescriptor) Object.defineProperty(navigator, "clipboard", descriptionClipboardDescriptor);
+    else delete navigator.clipboard;
+  }
+  fullOutput.focus({ preventScroll: true });
+  fullOutput.scrollTop = 340;
   await refresh();
-  await until(() => !document.contains(firstDescription), "resource descriptions refreshed");
+  await until(() => !fullView.contains(fullOutput), "full-screen output refreshed");
+  const refreshedFullOutput = fullView.querySelector(".native-describe");
+  assert(fullView.open && Math.abs(refreshedFullOutput.scrollTop - 340) <= 2
+    && document.activeElement === refreshedFullOutput
+    && Math.abs($("detail-body").scrollTop - inlineScroll) <= 2,
+    "same-revision refresh preserves full-screen reading focus, output scroll and underlying incident position");
+  const fullCopy = fullView.querySelector(".copy-button");
+  fullCopy.focus({ preventScroll: true });
+  await refresh();
+  await until(() => !fullView.contains(fullCopy), "full-screen Copy refreshed");
+  assert(document.activeElement === fullView.querySelector(".copy-button"),
+    "refresh preserves keyboard focus on full-screen Copy");
+  await state("error");
+  await refresh();
+  await until(() => !$("description-view-error").hidden, "full-screen stale warning");
+  assert(fullView.open && fullView.querySelector(".native-describe").textContent === storedText
+    && $("description-view-error").textContent.includes("stale")
+    && $("description-view-freshness").textContent.includes("Stale"),
+    "failed refresh retains full-screen captured output with explicit stale status");
+  await state("normal");
+  await refresh();
+  await until(() => $("description-view-error").hidden, "full-screen refresh recovered");
+  $("close-description-view").click();
+  await until(() => document.activeElement?.classList.contains("description-expand"), "full-screen focus restored");
+  assert(!fullView.open && $("detail").open && document.querySelector(".description-entry").open
+    && Math.abs($("detail-body").scrollTop - inlineScroll) <= 2,
+    "Back to incident closes only full-screen output and restores the resource without losing reading position");
+  const unavailableEntry = document.querySelectorAll(".description-entry")[2];
+  unavailableEntry.open = true;
+  unavailableEntry.querySelector(".description-expand").click();
+  assert(fullView.textContent.includes("Coverage: Unavailable")
+    && $("description-view-resource").textContent.includes("Node / worker-1")
+    && fullView.querySelector(".native-describe").scrollTop === 0,
+    "full-screen unavailable node output retains coverage and starts at its own reading position");
+  $("close-description-view").click();
+  await until(() => document.activeElement === unavailableEntry.querySelector(".description-expand"), "unavailable output focus restored");
+  const currentEntries = [...document.querySelectorAll(".description-entry")];
+  document.querySelector('[aria-label="Expand all resource descriptions"]').click();
+  assert(currentEntries.every((entry) => entry.open), "Expand all opens every resource");
+  document.querySelector('[aria-label="Collapse all resource descriptions"]').click();
+  assert(currentEntries.every((entry) => !entry.open), "Collapse all closes every resource");
+  currentEntries[0].querySelector("summary").click();
+  currentEntries[0].querySelector("summary").focus();
+  await refresh();
+  await until(() => !document.contains(currentEntries[0]), "resource descriptions refreshed");
   assert(document.querySelector(".description-entry").open
     && document.querySelectorAll(".description-entry[open]").length === 1
     && document.activeElement === document.querySelector(".description-entry summary"),
@@ -427,6 +507,9 @@ try {
   await until(() => !$("detail-record").contains(copyBeforeRefresh), "copy controls refreshed");
   assert(document.activeElement?.getAttribute("aria-label") === copyBeforeRefresh.getAttribute("aria-label"),
     "refresh restores focus to the same copy control in Record");
+  $("detail-tab-resources").click();
+  document.querySelector(".description-entry").open = true;
+  document.querySelector(".description-expand").click();
   await state("error");
   await refresh();
   await until(() => !$("detail-error").hidden, "detail failure");
@@ -434,13 +517,13 @@ try {
   assert(!$("counts-stale").hidden && $("freshness").textContent.includes("Stale"),
     "combined overview visibly marks both counts and snapshot status stale");
   assert($("detail-error").textContent.includes("stale") && $("detail-content").textContent.includes("Recommendations")
-    && !$("detail-record").hidden && $("triage-action").disabled, "failed detail refresh keeps the selected tab and stale content but disables triage");
+    && !$("detail-resources").hidden && $("triage-action").disabled, "failed detail refresh keeps the selected tab and stale content but disables triage");
   await state("deleted");
   await refresh();
   await until(() => $("detail-freshness").textContent === "Incident unavailable", "deleted detail");
   assert($("detail-content").textContent.trim() === "" && $("detail-content").hidden
     && $("detail-tabs").hidden && $("detail-tags").hidden && $("detail-resource").hidden
-    && $("detail-resource-count").textContent === "" && $("triage-action").hidden,
+    && $("detail-resource-count").textContent === "" && $("triage-action").hidden && !$("description-view").open,
     "deleted incident clears all panels, header context and tabs rather than showing current data");
   $("close-detail").click();
   await until(() => document.activeElement?.className === "incident-link", "focus restoration");
@@ -540,12 +623,13 @@ try {
   revisionEntry.querySelector("summary").click();
   const revisionOutput = revisionEntry.querySelector(".native-describe");
   revisionOutput.scrollTop = 160;
+  revisionEntry.querySelector(".description-expand").click();
   await state("update");
   await refresh();
   await until(() => !document.contains(revisionEntry), "new revision descriptions refreshed");
   assert(!document.querySelector(".description-entry[open]")
-    && document.querySelector(".native-describe").scrollTop === 0,
-    "material revision resets expansion and describe scroll rather than reusing the old reading position");
+    && document.querySelector(".native-describe").scrollTop === 0 && !$("description-view").open,
+    "material revision closes full-screen output and resets expansion and describe scroll rather than reusing the old reading position");
   await until(() => !$("triage-action").disabled, "new revision ready to dismiss");
   $("triage-action").click();
   await until(() => $("triage-action").textContent === "Restore incident" && !$("triage-action").disabled, "new revision dismissed");

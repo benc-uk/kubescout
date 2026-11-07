@@ -7,6 +7,10 @@ CRDs alone store incidents. Transcript dispositions and safe failure details
 describe outcomes without changing the existing per-candidate retry schedule.
 Restart scope permits cluster PVs and attachments while retaining namespace boundaries for claims.
 Snapshot reads share freshness guards, including absence and recreated names.
+Periodic bounded Incident reads refresh candidates independently of AI work.
+One continuous recovery window uses collection generations and semantic change
+markers; index outages pause review and AI alone approves lifecycle changes.
+Absent-anchor reviews assess obsolescence; AI no-action explicitly retains open Incidents and reports next eligibility.
 */
 package runner
 
@@ -17,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/benc-uk/kubescout/internal/config"
@@ -55,6 +60,7 @@ type candidate struct {
 	failures                        int
 	open                            bool
 	scope                           string
+	recoveryAnnounced               bool
 }
 
 type completion struct {
@@ -62,6 +68,12 @@ type completion struct {
 	investigation incident.InvestigationContext
 	decision      incident.Decision
 	err           error
+}
+
+type indexResult struct {
+	records  []incident.Record
+	revision uint64
+	err      error
 }
 
 // Once runs a bounded AI assessment with readable progress and a completion summary.
@@ -107,7 +119,11 @@ func (r *Runner) Once(ctx context.Context) (code int) {
 
 	for _, key := range sortedKeys(investigations) {
 		in := investigations[key]
+
 		in.Reason = "manual assessment"
+		if in.Recovery != nil {
+			in.Recovery.WindowSeconds = r.Config.RecoveryWindow.Seconds()
+		}
 
 		in.Incidents, err = r.Incidents.Existing(ctx, in.Identities[in.Anchor])
 		if err != nil {
@@ -132,7 +148,7 @@ func (r *Runner) Once(ctx context.Context) (code int) {
 
 			current, err := incident.BuildInvestigationContexts(fresh, r.Config.Policy, open, r.Config.MaxObjects)
 
-			return err == nil && current[in.Anchor].Revision == in.Revision && toolsCurrent(in, fresh)
+			return err == nil && fresh.Continuity == in.Continuity && current[in.Anchor].Revision == in.Revision && toolsCurrent(in, fresh)
 		})
 		writes += len(changes)
 		r.persisted(work, changes)
@@ -171,12 +187,21 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 	workers.Go(func() { r.Source.Run(ctx) })
 
 	results := make(chan completion, 1)
+	indexResults := make(chan indexResult, 1)
 	states := map[string]*candidate{}
 
 	ticker := time.NewTicker(min(r.Config.CheckInterval, r.Config.BatchWindow))
 	defer ticker.Stop()
 
 	busy := false
+	indexBusy := false
+
+	var indexFresh atomic.Bool
+	indexFresh.Store(true)
+
+	indexRevision := uint64(0)
+	nextIndex := time.Now().Add(r.Config.CheckInterval)
+	indexError := ""
 	lastError := ""
 	lastSummary := time.Time{}
 	revisions := map[string]string{}
@@ -195,6 +220,36 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 		case <-r.Source.Changes():
 		case <-ticker.C:
 		case <-wake:
+		case result := <-indexResults:
+			indexBusy = false
+
+			if result.err != nil {
+				indexFresh.Store(false)
+
+				resetRecovery(states)
+
+				if indexError != result.err.Error() {
+					if err := r.Output.Diagnostic("INCIDENT", "incident_index_unknown: "+result.err.Error()+"; investigations paused until a complete refresh"); err != nil {
+						return 1
+					}
+
+					indexError = result.err.Error()
+				}
+			} else if result.revision == indexRevision {
+				open = result.records
+
+				indexFresh.Store(true)
+
+				if indexError != "" {
+					if err := r.Output.Log("info", "GO", "INCIDENT", "incident_index_recovered: complete scoped index refreshed; recovery tracking restarts"); err != nil {
+						return 1
+					}
+
+					indexError = ""
+				}
+			} else {
+				nextIndex = time.Time{}
+			}
 		case result := <-results:
 			busy = false
 
@@ -212,8 +267,9 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			now := time.Now()
 
 			current := func() bool {
-				return r.current(result.investigation, open) && (!result.investigation.RecoveryEligible ||
-					(!c.recoverySince.IsZero() && !time.Now().Before(c.recoverySince.Add(r.Config.RecoveryWindow))))
+				return indexFresh.Load() && r.current(result.investigation, open) && (!result.investigation.RecoveryEligible ||
+					(recoveryEligible(c, time.Now(), r.Config.RecoveryWindow) && result.investigation.Recovery != nil &&
+						result.investigation.Recovery.Since != nil && c.recoverySince.Equal(*result.investigation.Recovery.Since)))
 			}
 			if result.err == nil && !current() {
 				result.err = errors.New("AI investigation superseded by changed or incomplete evidence")
@@ -248,20 +304,43 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 			c.next = now.Add(r.Config.ReviewInterval)
 
-			open, err = r.loadOpen(ctx)
-			if err != nil {
-				return r.fail("INCIDENT", err)
+			if result.investigation.RecoveryEligible && result.decision.Outcome == "no_action" {
+				if err := r.Output.Log("info", "GO", "RECOVERY", fmt.Sprintf("%s AI chose no-action; open incidents retained; next review eligible at=%s (not guaranteed)",
+					output.Scope(result.ctx), c.next.UTC().Format(time.RFC3339))); err != nil {
+					return 1
+				}
+			}
+
+			if len(changes) > 0 {
+				open = applyOpenChanges(open, changes)
+				indexRevision++
+				nextIndex = time.Time{}
 			}
 		}
 
 		now := time.Now()
 
+		if !indexBusy && !now.Before(nextIndex) {
+			indexBusy = true
+			nextIndex = now.Add(r.Config.CheckInterval)
+			revision := indexRevision
+
+			workers.Go(func() {
+				records, err := r.loadOpen(ctx)
+				if err != nil {
+					indexFresh.Store(false)
+				}
+
+				select {
+				case indexResults <- indexResult{records: records, revision: revision, err: err}:
+				case <-ctx.Done():
+				}
+			})
+		}
+
 		snapshot, err := r.Source.Snapshot(now)
 		if err != nil {
-			for _, c := range states {
-				c.recoverySince = time.Time{}
-				c.recoveryToken = ""
-			}
+			resetRecovery(states)
 
 			if lastError != err.Error() {
 				if e := r.Output.Diagnostic("COLLECT", "collection_unknown: "+err.Error()); e != nil {
@@ -282,12 +361,18 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			lastError = ""
 		}
 
+		if !indexFresh.Load() {
+			continue
+		}
+
 		investigations, err := incident.BuildInvestigationContexts(snapshot, r.Config.Policy, open, r.Config.MaxObjects)
 		if err != nil {
 			return r.fail("CHECK", err)
 		}
 
-		updateCandidates(states, investigations, open, now, r.Config)
+		if err := r.refreshCandidates(states, investigations, open, now); err != nil {
+			return 1
+		}
 
 		changed := len(revisions) != len(investigations)
 		for key, in := range investigations {
@@ -323,7 +408,7 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 			in := c.investigation
 
-			in.RecoveryEligible = !c.recoverySince.IsZero() && !now.Before(c.recoverySince.Add(r.Config.RecoveryWindow))
+			in.RecoveryEligible = c.open && recoveryEligible(c, now, r.Config.RecoveryWindow)
 			if c.open && !incident.Active(in) && !in.RecoveryEligible {
 				continue
 			}
@@ -331,8 +416,23 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			in.Reason = "new or changed evidence"
 			if in.RecoveryEligible {
 				in.Reason = "stable recovery review"
+				if in.Recovery != nil && in.Recovery.AnchorState == "absent" {
+					in.Reason = "stable recovery review: assess original incident obsolescence after continuous anchor absence"
+				}
 			} else if in.Revision == c.lastRevision {
 				in.Reason = "scheduled incident review"
+			}
+
+			if in.Recovery != nil {
+				recovery := *in.Recovery
+				recovery.WindowSeconds = r.Config.RecoveryWindow.Seconds()
+
+				if !c.recoverySince.IsZero() {
+					since := c.recoverySince
+					recovery.Since = &since
+				}
+
+				in.Recovery = &recovery
 			}
 
 			in.Incidents, err = r.Incidents.Existing(ctx, in.Identities[in.Anchor])
@@ -462,10 +562,12 @@ func (r *Runner) current(in incident.InvestigationContext, open []incident.Recor
 
 	current, ok := investigations[in.Anchor]
 
-	return ok && current.Revision == in.Revision && toolsCurrent(in, snapshot) && (!in.RecoveryEligible || !incident.Active(current))
+	return ok && current.Continuity == in.Continuity && current.Revision == in.Revision && toolsCurrent(in, snapshot) &&
+		(!in.RecoveryEligible || !incident.Active(current) && recoveryToken(current) == recoveryToken(in))
 }
 
-// toolsCurrent checks inspected versions and absence, rejecting same-name resource recreation.
+// toolsCurrent checks inspected versions and original-incarnation absence.
+// Unreviewed recreation invalidates negative reads; supplied replacements must still match.
 func toolsCurrent(in incident.InvestigationContext, snapshot health.Snapshot) bool {
 	if len(in.ToolVersions) == 0 {
 		return true
@@ -481,7 +583,20 @@ func toolsCurrent(in incident.InvestigationContext, snapshot health.Snapshot) bo
 			identity := in.Identities[ref]
 			for _, object := range snapshot.Objects {
 				if object.Kind == identity.Kind && object.Namespace == identity.Namespace && object.Name == identity.Name {
-					return false
+					if object.UID == identity.UID {
+						return false
+					}
+
+					known, ok := in.Objects[incident.Ref(object.Resource)]
+
+					expected := known.Version
+					if inspected, read := in.ToolVersions[incident.Ref(object.Resource)]; read {
+						expected = inspected
+					}
+
+					if !ok || known.Resource != object.Resource || expected != object.Version {
+						return false
+					}
 				}
 			}
 
@@ -497,7 +612,7 @@ func toolsCurrent(in incident.InvestigationContext, snapshot health.Snapshot) bo
 }
 
 // updateCandidates refreshes review schedules and continuous-recovery tracking from current evidence.
-// It applies batching, cooldowns, and urgency changes, and removes disappeared candidates.
+// Continuity and semantic markers reset recovery; batching, cooldowns and no-action scheduling remain bounded.
 func updateCandidates(states map[string]*candidate, investigations map[string]incident.InvestigationContext, open []incident.Record, now time.Time, cfg config.Config) {
 	active := map[string]bool{}
 	for _, i := range open {
@@ -513,13 +628,20 @@ func updateCandidates(states map[string]*candidate, investigations map[string]in
 
 		changed := c.investigation.Revision != "" && c.investigation.Revision != in.Revision
 		urgent := urgency(in) > urgency(c.investigation)
+		discontinuous := c.investigation.Continuity != in.Continuity || !c.open && active[key]
 		c.investigation, c.open = in, active[key]
+
+		since := c.recoverySince
 
 		token := recoveryToken(in)
 		if incident.Active(in) {
 			c.recoverySince = time.Time{}
-		} else if c.recoverySince.IsZero() || token != c.recoveryToken {
+		} else if c.recoverySince.IsZero() || token != c.recoveryToken || discontinuous {
 			c.recoverySince = now
+		}
+
+		if !since.Equal(c.recoverySince) {
+			c.recoveryAnnounced = false
 		}
 
 		c.recoveryToken = token
@@ -545,6 +667,98 @@ func updateCandidates(states map[string]*candidate, investigations map[string]in
 	}
 }
 
+// resetRecovery discards continuous recovery after unknown observation or an unavailable Incident index.
+func resetRecovery(states map[string]*candidate) {
+	for _, c := range states {
+		c.recoverySince = time.Time{}
+		c.recoveryToken = ""
+		c.recoveryAnnounced = false
+	}
+}
+
+// recoveryEligible includes the exact window boundary and requires uninterrupted tracking.
+func recoveryEligible(c *candidate, now time.Time, window time.Duration) bool {
+	return !c.recoverySince.IsZero() && !now.Before(c.recoverySince.Add(window))
+}
+
+// refreshCandidates logs recovery transitions once while preserving pure candidate scheduling.
+func (r *Runner) refreshCandidates(states map[string]*candidate, investigations map[string]incident.InvestigationContext, open []incident.Record, now time.Time) error {
+	previous := map[string]time.Time{}
+	for key, c := range states {
+		previous[key] = c.recoverySince
+	}
+
+	updateCandidates(states, investigations, open, now, r.Config)
+
+	for _, key := range sortedKeys(states) {
+		c := states[key]
+		if !c.open {
+			continue
+		}
+
+		a := c.investigation.Identities[key]
+
+		resource := a.Kind + " " + a.Name
+		if a.Namespace != "" {
+			resource = a.Kind + " " + a.Namespace + "/" + a.Name
+		}
+
+		if !previous[key].Equal(c.recoverySince) {
+			message := resource + ": recovery tracking reset; active problem signals returned"
+
+			if !c.recoverySince.IsZero() {
+				state := "cleared signals"
+				if c.investigation.Recovery != nil {
+					state = "anchor " + c.investigation.Recovery.AnchorState + ", no active problem signals"
+				}
+
+				message = fmt.Sprintf("%s: recovery tracking started/reset (%s); continuous window=%s", resource, state, r.Config.RecoveryWindow)
+			}
+
+			if err := r.Output.Log("info", "GO", "RECOVERY", message); err != nil {
+				return err
+			}
+		}
+
+		if recoveryEligible(c, now, r.Config.RecoveryWindow) && !c.recoveryAnnounced {
+			if err := r.Output.Log("info", "GO", "RECOVERY", resource+": recovery review eligible; an AI resolution decision is still required"); err != nil {
+				return err
+			}
+
+			c.recoveryAnnounced = true
+		}
+	}
+
+	return nil
+}
+
+// applyOpenChanges updates the private index from confirmed writes without accepting an older concurrent list.
+// Record metadata is refreshed by later complete reads and is never used here as a write precondition.
+func applyOpenChanges(open []incident.Record, changes []incident.Change) []incident.Record {
+	records := map[string]incident.Record{}
+	for _, record := range open {
+		records[record.Name] = record
+	}
+
+	for _, change := range changes {
+		if change.Incident.Lifecycle.State == "resolved" {
+			delete(records, change.Name)
+			continue
+		}
+
+		record := records[change.Name]
+		record.Name, record.Value = change.Name, change.Incident
+		records[change.Name] = record
+	}
+
+	out := make([]incident.Record, 0, len(records))
+	for _, name := range sortedKeys(records) {
+		out = append(out, records[name])
+	}
+
+	return out
+}
+
 // urgency ranks the strongest deterministic hint for scheduling, not incident severity.
 func urgency(in incident.InvestigationContext) int {
 	value := 0
@@ -562,6 +776,9 @@ func urgency(in incident.InvestigationContext) int {
 
 // loadOpen loads unresolved incidents and rejects stored resources outside the configured scope.
 func (r *Runner) loadOpen(ctx context.Context) ([]incident.Record, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.Config.RequestTimeout)
+	defer cancel()
+
 	open, err := r.Incidents.Repository.ListOpen(ctx)
 	if err != nil {
 		return nil, err
@@ -587,24 +804,26 @@ func (r *Runner) loadOpen(ctx context.Context) ([]incident.Record, error) {
 	return open, nil
 }
 
-// recoveryToken encodes observed identities, Pod phases, and restart counts to detect recovery resets.
+// recoveryToken detects semantic transitions, replacement, and batched changes in relevant resources.
+// Generic non-anchor Node context and informational heartbeat churn do not reset recovery.
 func recoveryToken(in incident.InvestigationContext) string {
 	type observed struct {
-		Ref, Phase string
-		Restarts   []int32
+		Ref, State string
+		Change     uint64
 	}
 
 	values := []observed{}
 
 	for _, resource := range in.Resources {
 		o, ok := in.Objects[resource.Ref]
-		if !ok {
+		if resource.Kind == "Node" && resource.Ref != in.Anchor &&
+			(in.Recovery == nil || resource.Ref != in.Recovery.ReplacementRef) {
 			continue
 		}
 
-		v := observed{Ref: resource.Ref, Phase: o.Phase}
-		for _, c := range o.Containers {
-			v.Restarts = append(v.Restarts, c.Restarts)
+		v := observed{Ref: resource.Ref, Change: in.RecoveryChanges[resource.Ref]}
+		if ok {
+			v.State = health.RecoveryFingerprint(o)
 		}
 
 		values = append(values, v)

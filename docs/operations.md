@@ -399,6 +399,12 @@ revision. Each resource has one native text panel, one coverage status, one
 observation time and one citation. Display and Copy preserve the same stored
 text, without compacting or reformatting it. Partial and unavailable coverage
 remain visible even while collapsed.
+Use **Full screen** beside a resource's output for a full-window reading view
+with larger text, Copy, coverage and capture details. **Back to incident** or
+Escape closes only that view and restores focus to the resource. Refreshes of
+the same revision preserve its scroll position and keyboard focus, including
+explicit stale warnings on failure. A new revision or missing incident closes
+the full-screen view rather than displaying an old description as current.
 Captured text starts directly with native output, without added policy or
 partial-read preambles. Coverage remains in `output.status`, with unavailable
 sections identified inline.
@@ -421,6 +427,9 @@ Warning events must match the resource incarnation. No Secrets, ConfigMaps,
 logs, commands, Node Leases or other unapproved API reads are added. No RBAC
 expansion is needed. An unsupported native kind (currently VolumeAttachment)
 is explicitly unavailable, never a typed or generic raw-object fallback.
+Kubernetes list items may omit `kind`; describe derives that missing field only
+from an approved list endpoint. Explicit kinds, names, namespaces, UIDs and
+resource versions still undergo the same identity and freshness checks.
 
 Native output no longer uses a section allowlist. Labels, addresses, selectors,
 commands, probes, storage details and non-UID identifiers remain visible as emitted
@@ -486,23 +495,75 @@ hourly quota as noted above.
 | Tool calls per investigation | 64 shared across both tools; `--max-tool-calls` |
 | New-evidence batching | 5s; `--batch-window` |
 | Ordinary same-case cooldown | 2m; `--incident-cooldown` |
-| Continuous fresh recovery before review | 2m; `--recovery-window` |
+| Continuous cleared signals or confirmed anchor absence before review | 5m; `--recovery-window` |
 | Unchanged unresolved/no-action review | 15m; `--review-interval` |
 | Time-based evidence re-evaluation | 15s; `--check-interval`; watch ticks at the smaller of this and the batch window |
 | API/model request timeout | 10s; `--request-timeout` |
 | Investigation deadline | 120s; `--investigation-timeout` |
 | Once / initial informer synchronization deadline | 120s; `--run-timeout` |
-| Watch connection lifetime | 5m; `--watch-timeout` |
+| Watch connection lifetime | 10m; `--watch-timeout`; must exceed recovery window plus investigation deadline in watch mode |
 | Initial evidence budget | 20,000 bytes; `--max-input-chars` |
 | Automatic resource descriptions | At most 4 resources, 16 KiB serialized total within remaining initial budget; explicit omissions |
 | Native kubectl describe reads | 8 KiB text per resource; 16 API HTTP attempts / 128 KiB per raw response / 1 MiB cumulative |
 | Tool result / cumulative evidence output | 8 KiB per AI tool result / 32 KiB including prepared descriptions |
 | Model output per request | 2,000 tokens; `--max-output-tokens`, plus cumulative byte checks |
 | Retained objects / pending cases / open index | Bounded by `--max-objects`, default 5,000 |
+| Complete open Incident index refresh | `--check-interval`, default 15s; one in flight, overall `--request-timeout` deadline |
 
 Numeric budget flags have no environment aliases. Use local `ARGS` or edit the
 agent Deployment's `args`. Raising one limit does not raise independent request,
 byte or deadline ceilings. Run `./build/bin/kubescout --help` for the full flag list.
+
+### Incident recovery
+
+There is one configurable recovery window, not separate healthy-resource and
+resource-absence timers. For example, local watch runs can use
+`ARGS='--recovery-window=2m'`; in-cluster runs configure the same flag in the
+agent Deployment's `args`. A longer window may also need a larger
+`--watch-timeout`, such as `--recovery-window=10m --watch-timeout=13m`.
+
+Open Incidents remain candidates after their findings disappear. Complete scoped
+resource observations start the window when active problem signals clear or the
+Incident's anchor is confirmed absent. Incident age and historical timestamps do
+not count. After five continuous minutes by default, AI reviews current evidence
+and decides whether to resolve or leave the Incident open. Clearing signals is
+not proof of application health; deletion may end the old condition without
+restoring the workload.
+
+For a confirmed absent anchor, the AI policy normally resolves an obsolete
+resource-specific Incident when supplied evidence does not establish continuing
+related impact. This does not require a replacement workload, successful
+replacement Job, missing owner discovery or proof of broader health. The
+resolution explains that the triggering resource was removed, not that the
+workload or cluster is healthy. AI may still retain an Incident when continuing
+related impact is supported; an unavailable read is never proof of absence.
+
+The timer resets on renewed failure, relevant semantic transitions, resource
+reappearance/replacement, cache rebuilding, Incident-index failure or process
+restart. Bounded absent-resource history eviction also resets continuity.
+Heartbeat-only updates and informational counter churn do not establish or
+defeat recovery. A same-name replacement has a different identity and is reviewed
+as current context; an unhealthy replacement cannot masquerade as absence.
+Deleting a child Pod does not resolve its still-failing controller.
+
+The agent refreshes this observer's cluster-scoped open Incident index separately
+from resource notifications and AI work. New records can therefore be reviewed
+without a current finding. Failed/incomplete refreshes retain the last-known
+records, log `incident_index_unknown` and pause investigations. A complete refresh
+logs `incident_index_recovered` and restarts recovery tracking. Out-of-scope
+records are rejected, not treated as recovered.
+
+`[GO][RECOVERY]` logs tracking starts/resets and review eligibility. Eligibility
+is not a guaranteed resolution time: serial work, budgets, tool/model failures
+and AI no-action can delay or prevent closure. Once mode never establishes the
+continuous window. No recovery timer or ordinary check writes an Incident;
+only a validated AI action may do so.
+
+When AI returns no-action during recovery review, `[GO][RECOVERY]` explicitly
+logs that open Incidents were retained and the next review eligibility time.
+The default unchanged-case interval is 15 minutes, not an immediate retry.
+Embedded policy changes require rebuilding and restarting the agent; a running
+process keeps the instructions it started with.
 
 ## Logs and AI transcripts
 

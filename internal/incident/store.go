@@ -5,6 +5,7 @@ cluster-scoped Incident writes; offline tests use a memory fixture repository. R
 reconcile ambiguous writes, preserve identity and leave human triage status untouched.
 Material revisions retain the exact host-captured descriptions reviewed by AI;
 write responses must confirm retention rather than silently accept schema pruning.
+Complete open-index reads require stored lifecycle state to match the indexing selector.
 */
 package incident
 
@@ -111,6 +112,10 @@ func (s Kubernetes) ListOpen(ctx context.Context) ([]Record, error) {
 			r, err := s.decode(&page.Items[i])
 			if err != nil {
 				return nil, err
+			}
+
+			if r.Value.Lifecycle.State != "open" {
+				return nil, errors.New("incident index lifecycle does not match the open-state selector")
 			}
 
 			if names[r.Name] {

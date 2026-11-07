@@ -116,5 +116,18 @@
         </div>
       </footer>
     </dialog>
+    <dialog id="description-view" class="detail-modal description-modal" aria-labelledby="description-view-title" aria-describedby="description-view-resource description-view-capture">
+      <header class="detail-header">
+        <div class="detail-topline">
+          <h2 id="description-view-title">Resource description</h2>
+          <button id="close-description-view" type="button" class="secondary" autofocus>Back to incident</button>
+        </div>
+        <p id="description-view-resource" class="resource"></p>
+        <p id="description-view-capture" class="muted"></p>
+        <p id="description-view-freshness" class="muted" role="status"></p>
+        <div id="description-view-error" class="notice error" role="alert" hidden></div>
+      </header>
+      <div id="description-view-content" class="description-view-content"></div>
+    </dialog>
   </body>
 </html>

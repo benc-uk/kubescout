@@ -10,6 +10,7 @@ let listRequest;
 let selected = null;
 let detailRequest;
 let detailData = null;
+let selectedDescription = null;
 let opener;
 let triageRequest;
 const detailTabs = ["overview", "resources", "record"];
@@ -338,6 +339,45 @@ function descriptionPanel(title, section, evidenceID, resourceRef) {
   return panel;
 }
 
+function updateDescriptionStatus() {
+  $("description-view-freshness").textContent = $("detail-freshness").textContent;
+  $("description-view-error").textContent = $("detail-error").textContent;
+  $("description-view-error").hidden = $("detail-error").hidden;
+}
+
+function renderDescriptionView(data) {
+  if (!selectedDescription || !$("description-view").open) return;
+  const incident = data.incident;
+  const description = incident.evidence?.descriptions.find((entry) => entry.resource.ref === selectedDescription.resourceRef);
+  if (selectedDescription.revisionKey !== `${incident.name}:${incident.lifecycle.revision}` || !description) {
+    $("description-view").close();
+    return;
+  }
+  const previous = $("description-view-content").querySelector(".native-describe");
+  const scrollTop = previous?.scrollTop || 0;
+  const scrollLeft = previous?.scrollLeft || 0;
+  const focusedOutput = document.activeElement === previous;
+  const focusedCopy = $("description-view-content").contains(document.activeElement)
+    && !!document.activeElement.closest(".copy-button");
+  const panel = descriptionPanel("kubectl describe", description.output, description.evidence_id, description.resource.ref);
+  $("description-view-content").replaceChildren(panel);
+  $("description-view-resource").textContent = resourceText(description.resource);
+  $("description-view-capture").textContent = `Captured during investigation, not live status · Revision: ${incident.lifecycle.revision} · Observed: ${date(description.observed_at)} · Evidence: ${description.evidence_id}`;
+  updateDescriptionStatus();
+  const output = panel.querySelector(".native-describe");
+  if (focusedOutput) output.focus({ preventScroll: true });
+  if (focusedCopy) panel.querySelector(".copy-button").focus({ preventScroll: true });
+  output.scrollTop = scrollTop;
+  output.scrollLeft = scrollLeft;
+}
+
+function openDescriptionView(description, revisionKey) {
+  selectedDescription = { resourceRef: description.resource.ref, revisionKey };
+  $("description-view-content").replaceChildren();
+  $("description-view").showModal();
+  renderDescriptionView(detailData);
+}
+
 function resourceDescriptions(evidence, revisionKey) {
   const previous = $("detail-resources").querySelector(".resource-descriptions");
   const expanded = new Set(previous?.dataset.revisionKey === revisionKey
@@ -379,8 +419,31 @@ function resourceDescriptions(evidence, revisionKey) {
     statuses.append(descriptionStatus("Describe", description.output));
     summary.append(identity, statuses);
     const body = element("div", undefined, "description-body");
+    const panel = descriptionPanel("kubectl describe", description.output, description.evidence_id, description.resource.ref);
+    const expand = element("button", undefined, "secondary description-expand");
+    expand.type = "button";
+    expand.setAttribute("aria-label", `View ${resourceText(description.resource)} kubectl describe full screen`);
+    expand.setAttribute("aria-haspopup", "dialog");
+    expand.dataset.descriptionFocus = `fullscreen:${description.resource.ref}`;
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("width", "16");
+    icon.setAttribute("height", "16");
+    icon.setAttribute("aria-hidden", "true");
+    icon.setAttribute("focusable", "false");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M3 3l6 6m12-6-6 6M3 21l6-6m12 6-6-6");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.8");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    icon.append(path);
+    expand.append(icon, element("span", "Full screen"));
+    expand.addEventListener("click", () => openDescriptionView(description, revisionKey));
+    panel.querySelector(".description-panel-heading").append(expand);
     body.append(element("p", `${description.source} · Observed: ${date(description.observed_at)} · Evidence: ${description.evidence_id}`, "muted description-metadata"),
-      descriptionPanel("kubectl describe", description.output, description.evidence_id, description.resource.ref));
+      panel);
     entry.append(summary, body);
     block.append(entry);
   }
@@ -399,6 +462,7 @@ function selectDetailTab(name) {
 }
 
 function clearDetail() {
+  $("description-view").close();
   if ($("detail-content").contains(document.activeElement) || $("detail-tabs").contains(document.activeElement)) {
     $("close-detail").focus();
   }
@@ -480,6 +544,7 @@ function renderDetail(data) {
       node.scrollLeft = position.left;
     }
   }
+  renderDescriptionView(data);
   updateTriageAction();
 }
 
@@ -561,6 +626,7 @@ async function loadDetail(name) {
     $("detail-freshness").textContent = detailData
       ? `Stale · last success: ${date(detailData.fetched_at)}`
       : missing ? "Incident unavailable" : "No successful detail refresh";
+    updateDescriptionStatus();
     updateTriageAction();
   }
 }
@@ -582,6 +648,17 @@ function openDetail(incident, trigger) {
 
 $("close-detail").addEventListener("click", () => $("detail").close());
 $("close-detail-footer").addEventListener("click", () => $("detail").close());
+$("close-description-view").addEventListener("click", () => $("description-view").close());
+$("description-view").addEventListener("close", () => {
+  if ($("description-view").open) return;
+  const resourceRef = selectedDescription?.resourceRef;
+  selectedDescription = null;
+  $("description-view-content").replaceChildren();
+  if (!$("detail").open) return;
+  const entry = [...$("detail-resources").querySelectorAll(".description-entry")].find((node) =>
+    node.dataset.resourceRef === resourceRef);
+  (entry?.open ? entry.querySelector(".description-expand") : entry?.querySelector("summary") || $("close-detail")).focus({ preventScroll: true });
+});
 $("detail").addEventListener("click", (event) => {
   const dialog = event.currentTarget;
   if (event.target !== dialog) return;
@@ -593,6 +670,7 @@ $("detail").addEventListener("click", (event) => {
 });
 $("detail").addEventListener("close", () => {
   if ($("detail").open) return;
+  $("description-view").close();
   const name = selected;
   selected = null;
   detailData = null;

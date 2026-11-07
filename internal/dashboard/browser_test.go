@@ -4,7 +4,8 @@ Flow: In-memory cluster-scoped incidents supply desktop modal checks with worklo
 empty detail lists, rendering, error, latency and revision-scoped triage scenarios. The harness
 serves until signalled and never contacts a live cluster or model.
 Stored native descriptions exercise collapsible resources, one exact-copy text block,
-independent long-output scrolling, partial coverage and unavailable output without live resource reads.
+independent long-output scrolling, full-screen reading with refresh/focus restoration,
+partial coverage and unavailable output without live resource reads.
 */
 package dashboard
 

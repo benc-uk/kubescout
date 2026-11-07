@@ -8,6 +8,7 @@ CronJob scheduling/status facts support interpretation of owned Job evidence.
 HPA facts exclude metric selectors and expose only approved scaling context.
 Ingress facts describe bounded routes without annotations, TLS Secrets or raw load-balancer addresses.
 VolumeAttachment facts retain status/error metadata, never attachment metadata or inline volume specifications.
+Host-only continuity and bounded change markers prevent batched transitions from faking stable recovery.
 */
 package health
 
@@ -165,8 +166,10 @@ type Object struct {
 }
 
 type Snapshot struct {
-	At      time.Time
-	Objects []Object
+	At              time.Time
+	Objects         []Object
+	Continuity      uint64              `json:"-"`
+	RecoveryChanges map[Resource]uint64 `json:"-"`
 }
 
 type Policy struct {
@@ -212,6 +215,32 @@ func (f Finding) Actionable() bool { return f.Severity == "warning" || f.Severit
 // Fingerprint hashes the full serialized finding to detect changes beyond its stable identity.
 func Fingerprint(f Finding) string {
 	data, _ := json.Marshal(f)
+	sum := sha256.Sum256(data)
+
+	return hex.EncodeToString(sum[:])
+}
+
+// RecoveryFingerprint compares projected recovery-sensitive state, including restarts and condition transitions.
+// Heartbeats, Warning counts and current metric samples do not reset continuous recovery.
+func RecoveryFingerprint(o Object) string {
+	o.Conditions = slices.Clone(o.Conditions)
+	for i := range o.Conditions {
+		o.Conditions[i].Updated = time.Time{}
+	}
+
+	slices.SortFunc(o.Conditions, func(a, b Condition) int {
+		return slices.Compare([]byte(a.Type), []byte(b.Type))
+	})
+
+	o.EventTime, o.EventCount = time.Time{}, 0
+	o.HPA = o.HPA.Clone()
+	o.HPA.CurrentMetrics, o.HPA.LastScale = nil, nil
+	o.Attachment.AttachError.At, o.Attachment.DetachError.At = time.Time{}, time.Time{}
+
+	data, _ := json.Marshal(struct {
+		Object
+		Labels, Selector map[string]string
+	}{o, o.Labels, o.Selector})
 	sum := sha256.Sum256(data)
 
 	return hex.EncodeToString(sum[:])

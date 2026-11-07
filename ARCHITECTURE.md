@@ -27,12 +27,17 @@ deterministic-only incident publisher.
 activity, not an incident capture API. AI transcript files are diagnostic
 exchanges, not incident storage; the dashboard reads CRDs only.
 
+The optional local [alert-test watcher](cmd/kubescout-alerts/main.go) is a separate
+consumer of newly created Incidents. It skips existing records, POSTs six analysis
+fields to an explicitly configured endpoint and never calls AI or writes
+Kubernetes objects. It is not a controller or a durable delivery service.
+
 ## 1. Getting Kubernetes changes into the agent
 
 | Step | What happens | Code responsible | Decisions made | Deterministic or AI? |
 |---|---|---|---|---|
 | **1. Start the process** | Loads configuration, authenticates to Kubernetes and wires together the collector, analyzer, incident store and runner. | [`runWithClient`](cmd/kubescout/main.go) | Which namespaces to observe, which model to use, watch versus once and where to persist incidents. | **Deterministic** |
-| **2. Recover existing incidents** | Loads this observer's open Incidents so restarting does not forget unresolved problems. | [`Runner.loadOpen`](internal/runner/runner.go), [`Kubernetes.ListOpen`](internal/incident/store.go) | Rejects stored incidents outside the configured observation scope. | **Deterministic** |
+| **2. Recover existing incidents** | Loads this observer's open Incidents at startup and refreshes the complete index independently on the check interval. | [`Runner.loadOpen` and `Runner.Watch`](internal/runner/runner.go), [`Kubernetes.ListOpen`](internal/incident/store.go) | Rejects stored incidents outside the configured observation scope; failed refreshes retain records and pause investigations. | **Deterministic** |
 | **3. Subscribe to Kubernetes** | Creates client-go informers. Each performs an initial paginated **LIST**, then a **WATCH** for added, modified and deleted objects. | [`resources` and `Source.runEpoch`](internal/kube/source.go) | Watches supported resource types within the configured scope. Only Warning-type Kubernetes Events are collected. | **Deterministic** |
 | **4. Filter and simplify objects** | Converts API objects into a limited internal representation before storing them in the cache. | [`project`](internal/kube/project.go), [`Source.project` and `Source.watch`](internal/kube/source.go) | Rejects invalid identities, filters ignored namespaces and enforces object limits. Retains approved facts, not entire raw objects. | **Deterministic** |
 | **5. Wake the runner** | Informer add/update/delete callbacks send a notification. The runner reads the **current cached snapshot**, rather than passing each raw change directly to AI. A timer also wakes it. | [`Source.notify` and informer callbacks](internal/kube/source.go), [`Runner.Watch`](internal/runner/runner.go) | Coalesces notifications. Refuses incomplete collection; a broken watch triggers cache rebuilding, not a healthy result. | **Deterministic** |
@@ -50,6 +55,15 @@ not need a Warning Event to trigger processing.
 
 **A Kubernetes change does not automatically produce a model call.** It first
 causes the next steps to re-evaluate the current state.
+
+Snapshots carry host-only collection continuity generations and bounded per-name
+semantic change markers. Meaningful watch transitions advance markers through
+verified owner links before notifications are coalesced, so a brief unhealthy
+phase or temporary failed replica cannot disappear between runner reads. Cache
+rebuilding changes the generation even if the runner never sampled its failure.
+Absent history slots are bounded by the object limit; evicting one breaks recovery
+continuity without discarding live resource caches. Heartbeats and current metric
+samples alone do not reset recovery.
 
 ## 2. Deciding what needs investigation
 
@@ -167,6 +181,14 @@ The runner copies this context and fetches current incident details into its
 The candidate's other fields track the last review, next due time, failures and
 continuous recovery. Its evidence fingerprint detects relevant observation
 changes; it is not the incident's persistent identity.
+
+Open-incident contexts distinguish an anchor that is `present`, `absent` or
+`replaced`. A same-name resource with a different UID gets a separate approved
+handle and relevant current controller evidence; the original Incident identity
+is never rewritten or merged. Superseded anchors have an explicitly unavailable
+native description because kubectl addresses objects by name; the replacement
+is prioritized for description. Typed inspection can confirm original-incarnation
+absence only against that supplied replacement, tracking both observations.
 
 ## 3. Where AI actually enters
 
@@ -326,8 +348,12 @@ or compatibility layer is provided.
 The indexing label is `kubescout.benc-uk.github.com/state`, matching
 `spec.lifecycle.state`; Pod `status.phase` is unrelated.
 
-The agent reloads its open index and looks up known families, including resolved
-incidents, before investigation. Reconciliation rereads ambiguous writes under
+The agent refreshes its bounded open index at the check interval (15 seconds by
+default), with at most one refresh in flight and an overall request deadline.
+Only complete, validated reads replace the index. Confirmed local writes update
+the private index immediately; older concurrent refreshes cannot overwrite them.
+Known families, including resolved incidents, are looked up before investigation.
+Reconciliation rereads ambiguous writes under
 the same name and uses UID/resourceVersion preconditions instead of creating a
 second record or repeating a model investigation. Unreconcilable writes fail
 explicitly. There is no automatic deletion, Pod owner reference or historical
@@ -363,9 +389,33 @@ defeat no-action suppression. Failed investigations receive bounded backoff,
 eventually waiting for scheduled review rather than being cached as no-action.
 
 Collection continues while AI runs. Before applying decisions, the runner checks
-current evidence and inspected resource versions. Recovery stays under review
-even after the initial signals disappear; short healthy phases in a crash loop
-and incomplete collection cannot satisfy continuous recovery.
+current evidence, inspected resource versions, collection continuity and
+recovery-sensitive change markers. One `--recovery-window` (default **5 minutes**)
+covers both cleared signals on an existing resource and confirmed anchor absence.
+The timer starts with fresh observations, not the Incident's age, and resets on
+renewed problems, replacement/reappearance, lost collection continuity, index
+failure or process restart. An unavailable index pauses investigations and
+recovery until a complete read succeeds.
+
+Deleting one replica does not recover its still-failing controller. Even after
+continuous absence, AI must consider remaining workload impact and may choose
+no-action when supplied evidence supports continuing related impact. The AI
+policy normally resolves an obsolete resource-specific Incident after confirmed
+continuous anchor absence without requiring a replacement workload or broader
+health proof. Missing owner/replacement context alone is not a reason to retain
+such an Incident. Resolution may mean the original condition ended with resource
+removal, not that the workload or cluster became healthy.
+
+Recovery review requires one AI decision; timing alone never closes an Incident.
+Coalesced GO recovery messages explain tracking starts/resets and review eligibility,
+separately from model proposals and confirmed CRD writes. AI no-action explicitly
+logs retained open Incidents and the next scheduled review eligibility.
+
+Watch expiry rebuilds caches and breaks recovery continuity. The default
+`--watch-timeout` is **10 minutes**, leaving room for the five-minute window and
+the investigation deadline. Watch configuration must exceed the recovery window
+plus investigation deadline; once mode is exempt because it cannot establish
+continuous recovery. Other delays and actual outages can still prevent review.
 
 [Scheduling settings](docs/operations.md#limits-and-scheduling) are eligibility
 controls, **not guaranteed resolution times**. Budgets, investigation duration,

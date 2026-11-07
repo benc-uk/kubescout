@@ -9,6 +9,7 @@ CronJob inspection includes approved schedule/status facts and template containe
 HPA inspection shares credential protection and excludes metric selectors and metrics API calls.
 Ingress inspection returns configuration, not TLS validity or network reachability.
 Attachment inspection returns bounded driver errors without metadata or inline volume configuration.
+Superseded anchors may report absence only against an exact supplied replacement, tracking both observations.
 */
 package investigation
 
@@ -49,7 +50,7 @@ func (t InspectResource) Call(ctx context.Context, args string) (any, error) {
 }
 
 // inspect reads one resource incarnation and projects approved state with credential values removed.
-// Successful reads track resource versions or absence for later stale-result rejection.
+// Successful reads track resource versions or original-incarnation absence against a known replacement.
 func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resource, result map[string]any) error {
 	s := t.Session
 
@@ -73,6 +74,18 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 	}
 
 	if string(obj.GetUID()) != r.UID || obj.GetName() != r.Name || obj.GetNamespace() != r.Namespace || obj.GetKind() != r.Kind {
+		replacement, known, err := s.replacementAbsence(ref, obj)
+		if err != nil {
+			return err
+		}
+
+		if known {
+			result["exists"] = false
+			result["replacement_ref"] = replacement
+
+			return nil
+		}
+
 		return errors.New("resource incarnation changed during investigation")
 	}
 

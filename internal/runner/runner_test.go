@@ -3,6 +3,7 @@ Purpose: Test runner scope, no-action handling and review scheduling offline.
 Flow: Fake collection and AI sources feed once/watch execution and candidate
 updates, checking failure output, nonblocking collection, counter-noise
 suppression and recovery timing without live model or Kubernetes calls.
+Fixture index reads have explicit deadlines for the independent refresh worker.
 */
 package runner
 
@@ -11,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,10 +26,12 @@ import (
 )
 
 type fakeSource struct {
-	mu      sync.Mutex
-	objects []health.Object
-	err     error
-	events  chan struct{}
+	mu              sync.Mutex
+	objects         []health.Object
+	err             error
+	events          chan struct{}
+	continuity      uint64
+	recoveryChanges map[health.Resource]uint64
 }
 
 type fakeAI struct {
@@ -51,7 +55,8 @@ func (s *fakeSource) Snapshot(at time.Time) (health.Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return health.Snapshot{At: at, Objects: append([]health.Object{}, s.objects...)}, s.err
+	return health.Snapshot{At: at, Objects: append([]health.Object{}, s.objects...), Continuity: s.continuity,
+		RecoveryChanges: maps.Clone(s.recoveryChanges)}, s.err
 }
 
 // Collect supplies the same in-memory snapshot for bounded once assessments.
@@ -97,7 +102,7 @@ func (a *fakeAI) Investigate(ctx context.Context, in incident.InvestigationConte
 // options supplies bounded runner settings with short polling intervals for offline tests.
 func options() config.Config {
 	return config.Config{ObserverID: "fixture", Model: "fixture", NamespaceWatch: []string{"apps"}, MaxObjects: 100, MaxToolCalls: config.DefaultMaxToolCalls, RunTimeout: time.Second,
-		BatchWindow: 5 * time.Millisecond, CheckInterval: 10 * time.Millisecond, Cooldown: 2 * time.Minute, RecoveryWindow: 2 * time.Minute, ReviewInterval: 15 * time.Minute, Policy: health.DefaultPolicy()}
+		RequestTimeout: time.Second, BatchWindow: 5 * time.Millisecond, CheckInterval: 10 * time.Millisecond, Cooldown: 2 * time.Minute, RecoveryWindow: 2 * time.Minute, ReviewInterval: 15 * time.Minute, Policy: health.DefaultPolicy()}
 }
 
 // failedPod builds a stable-identity failed Pod fixture old enough for health evaluation.

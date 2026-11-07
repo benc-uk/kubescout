@@ -19,9 +19,9 @@ printf '%s\n' \
   '2) Crash loop' \
   '3) Unschedulable pod' \
   '4) Failed Job' \
-  '5) All five failures' \
-  '6) Remove all injected failures' \
-  '7) OOM-killed container (64 MiB limit)' \
+  '5) OOM-killed container (64 MiB limit)' \
+  '6) All five failures' \
+  '7) Remove all injected failures' \
   '0) Cancel'
 if ! read -r -p 'Choose failures, separated by spaces (e.g. 1 3): ' -a choices; then
   printf 'Error: no selection received.\n' >&2
@@ -40,7 +40,7 @@ for choice in "${choices[@]}"; do
 done
 selection=" ${choices[*]} "
 printf 'Namespace: %s\n' "$NS"
-if [[ "$selection" == *" 6 "* ]]; then
+if [[ "$selection" == *" 7 "* ]]; then
   if ((${#choices[@]} != 1)); then
     printf 'Error: choose removal on its own, without injection options.\n' >&2
     exit 2
@@ -80,8 +80,8 @@ EOF
   printf 'Removed %s injected failure fixture(s).\n' "$removed"
   exit 0
 fi
-if [[ "$selection" == *" 5 "* ]]; then
-  selection=" 1 2 3 4 7 "
+if [[ "$selection" == *" 6 "* ]]; then
+  selection=" 1 2 3 4 5 "
 fi
 
 printf 'Fixture prefix: %s\n' "$TEST"
@@ -141,7 +141,7 @@ EOF
 fi
 
 # OOM kill retained in the terminated state rather than hidden by a quick restart.
-if [[ "$selection" == *" 7 "* ]]; then
+if [[ "$selection" == *" 5 "* ]]; then
   printf 'Cleanup when finished: kubectl -n %q delete pod %q\n' "$NS" "$TEST-oom"
   kubectl -n "$NS" create -f - <<EOF
 apiVersion: v1

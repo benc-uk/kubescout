@@ -4,6 +4,9 @@ Flow: Model-visible contexts keep host identities separate; decision validation
 checks actions, resource handles, citations and recovery eligibility before
 reconciliation, while allowing explicit AI no-action.
 Host-owned descriptions accompany decisions outside the model's JSON contract.
+Recovery observations expose presence and review timing while collection continuity
+and per-name change markers remain private host-side validation data.
+AI may resolve an absent resource's obsolete condition without certifying broader workload health.
 */
 package incident
 
@@ -80,6 +83,14 @@ type Existing struct {
 	Lifecycle Lifecycle `json:"lifecycle"`
 }
 
+// Recovery describes host-observed anchor presence and the single continuous review window.
+type Recovery struct {
+	AnchorState    string     `json:"anchor_state"`
+	ReplacementRef string     `json:"replacement_ref,omitempty"`
+	Since          *time.Time `json:"since,omitempty"`
+	WindowSeconds  float64    `json:"window_seconds"`
+}
+
 type InvestigationContext struct {
 	Anchor           string     `json:"anchor_ref"`
 	Reason           string     `json:"reason"`
@@ -89,11 +100,14 @@ type InvestigationContext struct {
 	Signals          []Signal   `json:"signals"`
 	Incidents        []Existing `json:"incidents"`
 	Evidence         *Evidence  `json:"evidence,omitempty"`
+	Recovery         *Recovery  `json:"recovery,omitempty"`
 	// Identities and objects are host-side only. UIDs are never model evidence.
-	Identities   map[string]health.Resource `json:"-"`
-	Objects      map[string]health.Object   `json:"-"`
-	Revision     string                     `json:"-"`
-	ToolVersions map[string]string          `json:"-"`
+	Identities      map[string]health.Resource `json:"-"`
+	Objects         map[string]health.Object   `json:"-"`
+	Revision        string                     `json:"-"`
+	ToolVersions    map[string]string          `json:"-"`
+	Continuity      uint64                     `json:"-"`
+	RecoveryChanges map[string]uint64          `json:"-"`
 }
 
 type Action struct {
@@ -126,7 +140,7 @@ type Change struct {
 }
 
 const APIVersion = "kubescout.benc-uk.github.com/v1alpha1"
-const PromptVersion = "incident-v4"
+const PromptVersion = "incident-v6"
 
 // Name derives a stable Incident name from observer, anchor identity and incident family.
 func Name(identity Identity) string {

@@ -5,6 +5,7 @@ snapshots or informer caches with change notifications. Broken or expired
 watches invalidate and rebuild caches; labelled progress describes collection only.
 Collection errors remain unknown
 observations for the runner, never healthy evidence or synthetic incidents.
+Epoch generations and bounded per-name change history preserve recovery resets across coalesced notifications.
 */
 package kube
 
@@ -13,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/benc-uk/kubescout/internal/config"
@@ -40,24 +42,29 @@ type budget struct {
 }
 
 type Source struct {
-	Log     *output.Writer
-	client  dynamic.Interface
-	config  config.Config
-	mu      sync.RWMutex
-	current *epoch
-	err     error
-	changes chan struct{}
+	Log        *output.Writer
+	client     dynamic.Interface
+	config     config.Config
+	mu         sync.RWMutex
+	current    *epoch
+	err        error
+	changes    chan struct{}
+	generation atomic.Uint64
 }
 
 type epoch struct {
-	mu        sync.RWMutex
-	err       error
-	ready     bool
-	informers []cache.SharedIndexInformer
-	failed    chan struct{}
-	once      sync.Once
-	budget    *budget
-	wg        sync.WaitGroup
+	mu               sync.RWMutex
+	err              error
+	ready            bool
+	informers        []cache.SharedIndexInformer
+	failed           chan struct{}
+	once             sync.Once
+	budget           *budget
+	wg               sync.WaitGroup
+	generation       uint64
+	recoverySequence uint64
+	recovery         map[health.Resource]recoveryEntry
+	generations      *atomic.Uint64
 }
 
 type boundedListWatch struct{ *cache.ListWatch }
@@ -184,7 +191,11 @@ func (s *Source) Snapshot(now time.Time) (health.Snapshot, error) {
 		return health.Snapshot{}, errors.New("cache synchronisation pending")
 	}
 
-	snapshot := health.Snapshot{At: now}
+	snapshot := health.Snapshot{At: now, Continuity: e.generation, RecoveryChanges: map[health.Resource]uint64{}}
+	for name, entry := range e.recovery {
+		snapshot.RecoveryChanges[name] = entry.Change
+	}
+
 	nodes := 0
 
 	for _, informer := range e.informers {
@@ -239,7 +250,8 @@ func (s *Source) Run(ctx context.Context) {
 func (s *Source) runEpoch(parent context.Context) bool {
 	_ = s.Log.Log("info", "GO", "COLLECT", "Synchronising scoped resource caches")
 	ctx, cancel := context.WithCancel(parent)
-	e := &epoch{failed: make(chan struct{}), budget: &budget{keys: map[string]struct{}{}, max: s.config.MaxObjects}}
+	e := &epoch{failed: make(chan struct{}), budget: &budget{keys: map[string]struct{}{}, max: s.config.MaxObjects},
+		recovery: map[health.Resource]recoveryEntry{}, generations: &s.generation}
 	fail := func(err error) {
 		e.once.Do(func() {
 			e.mu.Lock()
@@ -256,6 +268,14 @@ func (s *Source) runEpoch(parent context.Context) bool {
 			DisableChunking: true,
 			ListWithContextFunc: func(callCtx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
 				list, err := s.list(callCtx, r, e.budget)
+				if err == nil {
+					for _, obj := range list.Items {
+						if err = e.observeRecovery(obj.Value, false, true, s.config.MaxObjects); err != nil {
+							break
+						}
+					}
+				}
+
 				if err != nil {
 					fail(err)
 				}
@@ -288,6 +308,7 @@ func (s *Source) runEpoch(parent context.Context) bool {
 	}
 
 	s.mu.Lock()
+	e.generation = s.generation.Add(1)
 	s.current, s.err = e, nil
 	s.mu.Unlock()
 
@@ -515,6 +536,11 @@ func (s *Source) watch(ctx context.Context, r resource, opts metav1.ListOptions,
 					e.budget.remove(objectKey(obj))
 				default:
 					fail(errors.New("unexpected watch event type"))
+					return
+				}
+
+				if err := e.observeRecovery(obj.Value, event.Type == watch.Deleted, false, s.config.MaxObjects); err != nil {
+					fail(err)
 					return
 				}
 

@@ -2,6 +2,7 @@
 Purpose: Verify native kubectl describe retains operational details within its scope and limits.
 Flow: Offline HTTP fixtures exercise the real library's resource/event reads,
 scope guards, deadlines, byte/request ceilings, credential protection and freshness checks.
+List fixtures omit item TypeMeta while retaining strict identity and version checks.
 Captured and partial text start directly with native output, without prefixed notices.
 No shell, live cluster, model calls or additional workload permissions are used.
 */
@@ -87,6 +88,145 @@ func TestNativeDescribeCapture(t *testing.T) {
 				t.Fatalf("kubectl's swallowed event failure became empty evidence: %s", d.Output.Text)
 			}
 		})
+	}
+}
+
+// TestNativeDescribePodWithNode accepts ordinary Pod list items during related Node capture.
+func TestNativeDescribePodWithNode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/namespaces/apps/pods/pod":
+			fmt.Fprint(w, `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"pod","namespace":"apps","uid":"pod-uid","resourceVersion":"7"},"spec":{"nodeName":"node","containers":[{"name":"api","image":"api:v1"}]}}`)
+		case "/api/v1/nodes/node":
+			fmt.Fprint(w, `{"apiVersion":"v1","kind":"Node","metadata":{"name":"node","uid":"node-uid","resourceVersion":"8"}}`)
+		case "/api/v1/pods":
+			fmt.Fprint(w, `{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"9"},"items":[{"metadata":{"name":"pod","namespace":"apps","uid":"pod-uid","resourceVersion":"7"},"spec":{"nodeName":"node","containers":[{"name":"api","image":"api:v1"}]}}]}`)
+		case "/api/v1/events", "/api/v1/namespaces/apps/events":
+			fmt.Fprint(w, `{"apiVersion":"v1","kind":"EventList","metadata":{"resourceVersion":"10"},"items":[]}`)
+		default:
+			t.Errorf("unexpected describe request: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	s := &Session{DescribeConfig: &rest.Config{Host: server.URL}, Timeout: time.Second, Citations: map[string]bool{},
+		Investigation: incident.InvestigationContext{Anchor: "pod", Identities: map[string]health.Resource{
+			"pod":  {Kind: "Pod", Namespace: "apps", Name: "pod", UID: "pod-uid"},
+			"node": {Kind: "Node", Name: "node", UID: "node-uid"},
+		}, ToolVersions: map[string]string{}}}
+
+	evidence, err := s.CaptureDescriptions(t.Context(), incident.MaxDescriptionBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(evidence.Descriptions) != 2 || evidence.Descriptions[0].Output.Status != "captured" ||
+		evidence.Descriptions[1].Output.Status != "partial" ||
+		!strings.Contains(evidence.Descriptions[1].Output.Text, "(1 in total)") ||
+		!strings.Contains(evidence.Descriptions[1].Output.Text, "apps") ||
+		s.Investigation.ToolVersions["pod"] != "7" || s.Investigation.ToolVersions["node"] != "8" ||
+		len(s.Citations) != 2 {
+		t.Fatalf("ordinary Pod list prevented native evidence capture: %+v", evidence)
+	}
+}
+
+// TestDescribeListItemTypeMeta accepts omitted list kinds without relaxing identity, scope or GET checks.
+func TestDescribeListItemTypeMeta(t *testing.T) {
+	for _, kind := range []string{"Pod", "ReplicaSet"} {
+		for _, mode := range []string{"omitted", "explicit", "wrong-kind", "empty-kind", "invalid-kind", "null-kind", "recreated", "missing-uid", "missing-version", "changed-version", "wrong-namespace", "get-without-kind"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				resource := health.Resource{Kind: kind, Name: "target", Namespace: "apps", UID: "uid"}
+				object := &unstructured.Unstructured{Object: map[string]any{
+					"metadata": map[string]any{"name": resource.Name, "namespace": resource.Namespace, "uid": resource.UID, "resourceVersion": "7"},
+				}}
+
+				switch mode {
+				case "explicit":
+					object.SetKind(kind)
+				case "wrong-kind":
+					object.SetKind("Node")
+				case "empty-kind":
+					object.SetKind("")
+				case "invalid-kind":
+					object.Object["kind"] = true
+				case "null-kind":
+					object.Object["kind"] = nil
+				case "recreated":
+					object.SetUID("replacement")
+				case "missing-uid":
+					object.SetUID("")
+				case "missing-version":
+					object.SetResourceVersion("")
+				case "changed-version":
+					object.SetResourceVersion("8")
+				case "wrong-namespace":
+					object.SetNamespace("other")
+				}
+
+				gvr := resources[kind]
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+
+					if mode == "get-without-kind" {
+						json.NewEncoder(w).Encode(object)
+						return
+					}
+
+					json.NewEncoder(w).Encode(map[string]any{
+						"apiVersion": gvr.GroupVersion().String(), "kind": kind + "List",
+						"metadata": map[string]any{"resourceVersion": "9"}, "items": []any{object.Object},
+					})
+				}))
+				defer server.Close()
+
+				s := &Session{Investigation: incident.InvestigationContext{
+					Identities: map[string]health.Resource{"ref": resource}, ToolVersions: map[string]string{"ref": "7"},
+				}}
+				guard := &describeTransport{ctx: t.Context(), session: s, root: resource, next: http.DefaultTransport,
+					host: strings.TrimPrefix(server.URL, "http://"), budget: &describeBudget{}, privateIDs: map[string]bool{}}
+
+				path := guard.resourcePath(describePath{gvr: gvr, kind: kind}, "apps")
+				if mode == "get-without-kind" {
+					path += "/target"
+				}
+
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+path, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				response, err := guard.RoundTrip(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer response.Body.Close()
+
+				if mode != "omitted" && mode != "explicit" {
+					if guard.failure == nil || response.StatusCode == http.StatusOK {
+						t.Fatalf("invalid identity, scope or version accepted: status=%d failure=%v", response.StatusCode, guard.failure)
+					}
+
+					return
+				}
+
+				if guard.failure != nil || guard.partial || response.StatusCode != http.StatusOK {
+					t.Fatalf("valid list item rejected: status=%d failure=%v", response.StatusCode, guard.failure)
+				}
+
+				var list unstructured.UnstructuredList
+				if err := json.NewDecoder(response.Body).Decode(&list); err != nil {
+					t.Fatal(err)
+				}
+
+				if len(list.Items) != 1 || list.Items[0].GetKind() != kind || s.Investigation.ToolVersions["ref"] != "7" {
+					t.Fatalf("list item kind or freshness tracking missing: %+v", list)
+				}
+			})
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ Purpose: Define and validate runtime options, namespace selection and model sett
 Flow: Combine CLI flags and environment values into collection, evidence-policy,
 logging/console colour and AI limits; repository-root dotenv loading preserves existing values.
 Configuration requires AI settings; cluster-scoped Incidents have no storage namespace option.
+One recovery window covers cleared signals and confirmed absence; watch lifetimes must allow review.
 */
 package config
 
@@ -121,13 +122,13 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	f.StringVar(&c.ObserverID, "observer-id", "", "Required stable unique identity for this cluster and observation scope")
 	f.DurationVar(&c.InvestigationTimeout, "investigation-timeout", 120*time.Second, "Whole AI investigation deadline")
 	f.DurationVar(&c.Cooldown, "incident-cooldown", 2*time.Minute, "Coalesce ordinary changes in the same incident")
-	f.DurationVar(&c.RecoveryWindow, "recovery-window", 2*time.Minute, "Continuous fresh recovery before AI resolution review")
+	f.DurationVar(&c.RecoveryWindow, "recovery-window", 5*time.Minute, "Continuous fresh cleared signals or resource absence before AI resolution review")
 	f.DurationVar(&c.ReviewInterval, "review-interval", 15*time.Minute, "Revisit unresolved or no-action cases")
 	f.DurationVar(&c.RequestTimeout, "request-timeout", 10*time.Second, "API/model request timeout")
 	f.DurationVar(&c.RunTimeout, "run-timeout", 120*time.Second, "Once deadline or initial informer synchronisation deadline")
 	f.DurationVar(&c.BatchWindow, "batch-window", 5*time.Second, "Maximum wait to batch resource changes")
 	f.DurationVar(&c.CheckInterval, "check-interval", 15*time.Second, "Re-evaluate time-based rules")
-	f.DurationVar(&c.WatchTimeout, "watch-timeout", 5*time.Minute, "Bound each watch connection; rebuild caches on renewal")
+	f.DurationVar(&c.WatchTimeout, "watch-timeout", 10*time.Minute, "Bound each watch connection; must exceed recovery window plus investigation deadline")
 	f.IntVar(&c.MaxObjects, "max-objects", 5000, "Shared retained object limit across all resource types")
 	f.IntVar(&c.MaxInputChars, "max-input-chars", 20000, "Maximum model evidence length, never truncated")
 	f.IntVar(&c.MaxOutputTokens, "max-output-tokens", 2000, "Per-request model output token limit")
@@ -213,6 +214,14 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 
 	if c.RequestTimeout <= 0 || c.RunTimeout < c.RequestTimeout || c.BatchWindow <= 0 || c.CheckInterval <= 0 || c.WatchTimeout < time.Second {
 		return c, errors.New("durations must be positive; run timeout must cover request timeout and watch timeout must be at least 1s")
+	}
+
+	if c.RecoveryWindow <= 0 || c.InvestigationTimeout <= 0 {
+		return c, errors.New("recovery and investigation durations must be positive")
+	}
+
+	if !c.Once && (c.RecoveryWindow >= c.WatchTimeout || c.InvestigationTimeout >= c.WatchTimeout-c.RecoveryWindow) {
+		return c, errors.New("--watch-timeout must exceed --recovery-window plus --investigation-timeout so cache renewal permits recovery review")
 	}
 
 	if c.Policy.StartupGrace < 0 || c.Policy.RolloutGrace < 0 || c.Policy.EventLookback <= 0 || restart <= 0 || restart > 1<<31-1 {

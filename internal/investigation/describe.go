@@ -3,6 +3,8 @@ Purpose: Capture native kubectl describe as the sole stored resource-detail evid
 Flow: The pinned library performs guarded reads for the anchor and related resources. Its text is
 credential-protected and byte-bounded before AI input, transcripts and Incident storage.
 Operational sections are retained without prefixed notices; annotations, environment and UIDs stay private.
+Superseded anchors are explicitly unavailable; the supplied current replacement is prioritized for native description.
+Point-in-time absence is distinguished from host-confirmed continuous absence and incident obsolescence.
 Unavailable reads remain explicit; on-demand typed tools are unchanged.
 */
 package investigation
@@ -108,6 +110,10 @@ func (s *Session) CaptureDescriptions(ctx context.Context, budget int) (*inciden
 // descriptionRefs prioritizes the anchor, then signal urgency and stable handles.
 func (s *Session) descriptionRefs() []string {
 	priority := map[string]int{s.Investigation.Anchor: 100}
+	if _, ref, ok := s.knownReplacement(s.Investigation.Anchor); ok {
+		priority[ref] = 99
+	}
+
 	for _, signal := range s.Investigation.Signals {
 		rank := map[string]int{"critical": 4, "warning": 3, "info": 2}[signal.Hint]
 		priority[signal.Resource] = max(priority[signal.Resource], rank)
@@ -124,6 +130,11 @@ func (s *Session) describeResource(ctx context.Context, ref string, budget *desc
 	r, err := s.authorize(ref)
 	if err != nil {
 		return incident.DescriptionOutput{}, err
+	}
+
+	if _, replacementRef, ok := s.knownReplacement(ref); ok {
+		return incident.DescriptionOutput{Status: "unavailable",
+			Text: "Original resource incarnation was superseded in the collected snapshot. Native describe addresses resources by name; review the supplied current resource handle " + replacementRef + " instead."}, nil
 	}
 
 	unavailable := incident.DescriptionOutput{Status: "unavailable", Text: "kubectl describe unavailable. Use the scoped inspection tools for additional evidence."}
@@ -164,7 +175,8 @@ func (s *Session) describeResource(ctx context.Context, ref string, budget *desc
 	}
 
 	if guard.rootAbsent {
-		return incident.DescriptionOutput{Status: "absent", Text: "Resource not found at describe time. Absence alone does not establish recovery."}, nil
+		return incident.DescriptionOutput{Status: "absent",
+			Text: "Resource not found at describe time. This point-in-time read does not establish continuous recovery; the host recovery context supplies that eligibility. Removal may make the original resource-specific incident obsolete without proving broader workload health."}, nil
 	}
 
 	if describeErr != nil || ctx.Err() != nil {
