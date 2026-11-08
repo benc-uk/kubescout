@@ -1,0 +1,15 @@
+# httpyac automatically loads the repository-root .env file.
+
+# Send test alert to the Logic Apps endpoint
+POST {{ALERT_ENDPOINT_URL}}
+Content-Type: application/json
+
+{
+  "title": "Pod blocked by image pull failure",
+  "severity": "Critical",
+  "impact": "Degraded",
+  "source": "test-pod-123",
+  "diagnosis": "image-pull-failure",
+  "explanation": "This pod is blocked due to an image pull failure, preventing it from starting properly",
+  "recommendations": "Check the image repository and network connectivity, and ensure the image exists and is accessible"
+}

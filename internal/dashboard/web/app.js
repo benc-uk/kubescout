@@ -72,7 +72,7 @@ function badge(value) {
 }
 
 function resourceText(resource) {
-  return `${resource.kind} / ${resource.namespace ? `${resource.namespace}/` : ""}${resource.name}`;
+  return `${resource.kind}${resource.api_group ? ` (${resource.api_group})` : ""} / ${resource.namespace ? `${resource.namespace}/` : ""}${resource.name}`;
 }
 
 function copyable(value, description, displayValue = value) {
@@ -412,7 +412,7 @@ function resourceDescriptions(evidence, revisionKey) {
     const summary = element("summary", undefined, "description-summary");
     summary.dataset.descriptionFocus = `resource:${description.resource.ref}`;
     const identity = element("span", undefined, "description-identity");
-    identity.append(element("span", description.resource.kind, "description-kind"),
+    identity.append(element("span", `${description.resource.kind}${description.resource.api_group ? ` (${description.resource.api_group})` : ""}`, "description-kind"),
       element("strong", description.resource.name, "description-name"),
       element("span", description.resource.namespace ? `Namespace: ${description.resource.namespace}` : "Cluster-scoped", "description-namespace"));
     const statuses = element("span", undefined, "description-statuses");

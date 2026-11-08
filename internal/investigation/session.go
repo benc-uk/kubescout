@@ -6,6 +6,7 @@ registers operation-named citations only for accepted evidence. Logs distinguish
 AI requests from Go execution without publishing incidents or raw objects.
 Automatic native descriptions share authorization and evidence-byte limits with tools,
 using private authentication and their own bounded transport.
+Extra-resource tools resolve configured API groups and use the same namespace authorization and budgets.
 */
 package investigation
 
@@ -195,20 +196,31 @@ func (s *Session) call(ctx context.Context, name, args string, read func(context
 func (s *Session) authorize(ref string) (health.Resource, error) {
 	r, ok := s.Investigation.Identities[ref]
 
-	_, known := resources[r.Kind]
+	_, known := s.resourceAPI(r)
 	if !ok || !known {
 		return health.Resource{}, errors.New("unauthorised tool resource")
 	}
 
-	if health.ClusterScoped(r.Kind) {
-		if r.Namespace != "" {
-			return health.Resource{}, errors.New("unauthorised cluster resource namespace")
-		}
-	} else if !s.Scope.WatchesNamespace(r.Namespace) {
+	if !s.Scope.ResourceInScope(r) {
 		return health.Resource{}, errors.New("tool resource outside namespace scope")
 	}
 
 	return r, nil
+}
+
+// resourceAPI resolves built-in or explicitly configured resources, never model-supplied API paths.
+func (s *Session) resourceAPI(r health.Resource) (schema.GroupVersionResource, bool) {
+	if definition, ok := s.Scope.ExtraResource(r.APIGroup, r.Kind); ok {
+		return schema.GroupVersionResource{Group: definition.Group, Version: definition.Version, Resource: definition.Resource}, true
+	}
+
+	if r.APIGroup != "" {
+		return schema.GroupVersionResource{}, false
+	}
+
+	gvr, known := resources[r.Kind]
+
+	return gvr, known
 }
 
 // redactValue removes credential values and bounds strings without filtering operational keywords.

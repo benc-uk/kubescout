@@ -11,6 +11,10 @@ Periodic bounded Incident reads refresh candidates independently of AI work.
 One continuous recovery window uses collection generations and semantic change
 markers; index outages pause review and AI alone approves lifecycle changes.
 Absent-anchor reviews assess obsolescence; AI no-action explicitly retains open Incidents and reports next eligibility.
+Extra-resource scope and API-group identity participate in restart and stale-result checks.
+Unavailable CEL assessments pause investigations and reset recovery without stopping watch or creating incidents.
+One process-local pending application pauses new AI work on persistence failures;
+bounded retries retain exact desired revisions while collection and index refresh continue.
 */
 package runner
 
@@ -28,6 +32,7 @@ import (
 	"github.com/benc-uk/kubescout/internal/health"
 	"github.com/benc-uk/kubescout/internal/incident"
 	"github.com/benc-uk/kubescout/internal/output"
+	"github.com/benc-uk/kubescout/internal/resourcepolicy"
 )
 
 type Analyzer interface {
@@ -74,6 +79,13 @@ type indexResult struct {
 	records  []incident.Record
 	revision uint64
 	err      error
+}
+
+type pendingWrite struct {
+	result      completion
+	application *incident.Application
+	next        time.Time
+	failures    int
 }
 
 // Once runs a bounded AI assessment with readable progress and a completion summary.
@@ -167,11 +179,19 @@ func (r *Runner) Once(ctx context.Context) (code int) {
 func (r *Runner) Watch(ctx context.Context) (code int) {
 	ctx, cancel := context.WithCancel(ctx)
 
-	var workers sync.WaitGroup
+	var (
+		workers sync.WaitGroup
+		pending *pendingWrite
+	)
 
 	defer func() {
 		cancel()
 		workers.Wait()
+
+		if pending != nil {
+			r.disposition(pending.result.ctx, "Process stopped with an unfinished application; no unconfirmed write is reported as persisted. The pending decision is process-local.")
+			_ = r.Output.Log("warn", "GO", "INCIDENT", "Stopped with pending incident persistence; reviewed decisions are not retained across process restarts")
+		}
 
 		_ = r.Output.Log("info", "GO", "SHUTDOWN", "Watch stopped")
 		if r.Output.Error() != nil {
@@ -203,6 +223,7 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 	nextIndex := time.Now().Add(r.Config.CheckInterval)
 	indexError := ""
 	lastError := ""
+	lastCheckError := ""
 	lastSummary := time.Time{}
 	revisions := map[string]string{}
 
@@ -267,9 +288,8 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			now := time.Now()
 
 			current := func() bool {
-				return indexFresh.Load() && r.current(result.investigation, open) && (!result.investigation.RecoveryEligible ||
-					(recoveryEligible(c, time.Now(), r.Config.RecoveryWindow) && result.investigation.Recovery != nil &&
-						result.investigation.Recovery.Since != nil && c.recoverySince.Equal(*result.investigation.Recovery.Since)))
+				return indexFresh.Load() && r.current(result.investigation, open) &&
+					reviewRecoveryCurrent(result.investigation, c, time.Now(), r.Config.RecoveryWindow)
 			}
 			if result.err == nil && !current() {
 				result.err = errors.New("AI investigation superseded by changed or incomplete evidence")
@@ -286,36 +306,19 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			}
 
 			r.decision(result.ctx, result.decision)
-			changes, err := r.Incidents.Apply(ctx, result.investigation, result.decision, current)
-			r.persisted(result.ctx, changes)
 
+			application, err := r.Incidents.NewApplication(result.investigation, result.decision)
 			if err != nil {
-				r.disposition(result.ctx, "Persistence failed: "+err.Error())
+				r.disposition(result.ctx, "Rejected application: "+err.Error())
 
-				if e := r.Output.Log("error", "GO", "INCIDENT", "incident_persistence_failed: "+err.Error()); e != nil {
+				if e := r.deferInvestigation(c, err, now); e != nil {
 					return 1
 				}
-				// The reconciler has already retried the same decision, without
-				// another model call. Do not loop into duplicate AI investigations.
-				return 1
+
+				continue
 			}
 
-			c.lastReview, c.lastRevision, c.failures = now, result.investigation.Revision, 0
-
-			c.next = now.Add(r.Config.ReviewInterval)
-
-			if result.investigation.RecoveryEligible && result.decision.Outcome == "no_action" {
-				if err := r.Output.Log("info", "GO", "RECOVERY", fmt.Sprintf("%s AI chose no-action; open incidents retained; next review eligible at=%s (not guaranteed)",
-					output.Scope(result.ctx), c.next.UTC().Format(time.RFC3339))); err != nil {
-					return 1
-				}
-			}
-
-			if len(changes) > 0 {
-				open = applyOpenChanges(open, changes)
-				indexRevision++
-				nextIndex = time.Time{}
-			}
+			pending = &pendingWrite{result: result, application: application}
 		}
 
 		now := time.Now()
@@ -367,7 +370,30 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 		investigations, err := incident.BuildInvestigationContexts(snapshot, r.Config.Policy, open, r.Config.MaxObjects)
 		if err != nil {
+			var evaluation *resourcepolicy.EvaluationError
+			if errors.As(err, &evaluation) {
+				resetRecovery(states)
+
+				if lastCheckError != err.Error() {
+					if e := r.Output.Diagnostic("CHECK", err.Error()+"; investigations paused until complete assessment"); e != nil {
+						return 1
+					}
+
+					lastCheckError = err.Error()
+				}
+
+				continue
+			}
+
 			return r.fail("CHECK", err)
+		}
+
+		if lastCheckError != "" {
+			if err := r.Output.Log("info", "GO", "CHECK", "checks_recovered: complete extra-resource assessment resumed"); err != nil {
+				return 1
+			}
+
+			lastCheckError = ""
 		}
 
 		if err := r.refreshCandidates(states, investigations, open, now); err != nil {
@@ -389,8 +415,74 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 		}
 
 		if lastSummary.IsZero() || now.Sub(lastSummary) >= time.Minute {
-			_ = r.Output.Log("info", "GO", "COLLECT", fmt.Sprintf("Watching: %d scoped objects, %d candidates, AI busy=%t", len(snapshot.Objects), len(states), busy))
+			_ = r.Output.Log("info", "GO", "COLLECT", fmt.Sprintf("Watching: %d scoped objects, %d candidates, AI busy=%t pending_application=%t", len(snapshot.Objects), len(states), busy, pending != nil))
 			lastSummary = now
+		}
+
+		if pending != nil {
+			result := pending.result
+			c := states[result.investigation.Anchor]
+
+			unchanged := c != nil && c.investigation.Revision == result.investigation.Revision &&
+				c.investigation.Continuity == result.investigation.Continuity && toolsCurrent(result.investigation, snapshot) &&
+				reviewRecoveryCurrent(result.investigation, c, now, r.Config.RecoveryWindow)
+			if unchanged && now.Before(pending.next) {
+				continue
+			}
+
+			changes, err := r.applyPending(ctx, pending, c, open, indexFresh.Load)
+			r.persisted(result.ctx, changes)
+
+			if len(changes) > 0 {
+				open = applyOpenChanges(open, changes)
+				indexRevision++
+				nextIndex = time.Time{}
+			}
+
+			if err != nil {
+				var persistence *incident.PersistenceError
+				if errors.As(err, &persistence) {
+					if e := r.deferPersistence(pending, err, time.Now()); e != nil {
+						return 1
+					}
+
+					continue
+				}
+
+				r.disposition(result.ctx, "Application discarded: "+err.Error())
+
+				if c != nil {
+					if e := r.deferInvestigation(c, err, time.Now()); e != nil {
+						return 1
+					}
+				} else if e := r.Output.Diagnostic("VALIDATE", "pending application superseded: "+err.Error()); e != nil {
+					return 1
+				}
+
+				pending = nil
+
+				continue
+			}
+
+			c.lastReview, c.lastRevision, c.failures = time.Now(), result.investigation.Revision, 0
+			c.next = c.lastReview.Add(r.Config.ReviewInterval)
+
+			if result.investigation.RecoveryEligible && result.decision.Outcome == "no_action" {
+				if err := r.Output.Log("info", "GO", "RECOVERY", fmt.Sprintf("%s AI chose no-action; open incidents retained; next review eligible at=%s (not guaranteed)",
+					output.Scope(result.ctx), c.next.UTC().Format(time.RFC3339))); err != nil {
+					return 1
+				}
+			}
+
+			if pending.failures > 0 {
+				if err := r.Output.Log("info", "GO", "INCIDENT", output.Scope(result.ctx)+" incident_persistence_recovered: pending application completed without another AI call"); err != nil {
+					return 1
+				}
+			}
+
+			pending = nil
+
+			continue
 		}
 
 		if busy {
@@ -437,7 +529,13 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 			in.Incidents, err = r.Incidents.Existing(ctx, in.Identities[in.Anchor])
 			if err != nil {
-				return r.fail("INCIDENT", err)
+				r.disposition(ctx, "Incident lookup deferred before AI: "+err.Error())
+
+				if e := r.deferInvestigation(c, err, now); e != nil {
+					return 1
+				}
+
+				break
 			}
 
 			busy = true
@@ -462,13 +560,57 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 func (r *Runner) deferInvestigation(c *candidate, failure error, now time.Time) error {
 	c.failures++
 
-	c.next = now.Add(min(time.Duration(1<<min(c.failures, 6))*time.Second, r.Config.ReviewInterval))
-	if c.failures >= 3 {
-		c.next = now.Add(r.Config.ReviewInterval)
-	}
+	c.next = now.Add(retryDelay(c.failures, r.Config.ReviewInterval))
 
 	return r.Output.Diagnostic("SCHEDULE", fmt.Sprintf("%s investigation_deferred: %s; consecutive_failures=%d retry_after_seconds=%.0f next_retry_at=%s (eligibility, not a guaranteed request)",
 		c.scope, failure.Error(), c.failures, c.next.Sub(now).Seconds(), c.next.UTC().Format(time.RFC3339)))
+}
+
+// applyPending retries an exact proposal only while observation, index and continuous recovery remain current.
+func (r *Runner) applyPending(ctx context.Context, pending *pendingWrite, c *candidate, open []incident.Record, indexFresh func() bool) ([]incident.Change, error) {
+	if c == nil {
+		return []incident.Change{}, errors.New("candidate disappeared before pending persistence")
+	}
+
+	result := pending.result
+
+	current := func() bool {
+		return indexFresh() && r.current(result.investigation, open) &&
+			reviewRecoveryCurrent(result.investigation, c, time.Now(), r.Config.RecoveryWindow)
+	}
+	if !current() {
+		return []incident.Change{}, errors.New("pending AI conclusion superseded by changed or incomplete evidence")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, r.Config.RequestTimeout)
+	defer cancel()
+
+	return pending.application.Apply(ctx, current)
+}
+
+// deferPersistence reports bounded storage backoff while retaining one proposal and pausing new AI work.
+func (r *Runner) deferPersistence(pending *pendingWrite, failure error, now time.Time) error {
+	pending.failures++
+	pending.next = now.Add(retryDelay(pending.failures, r.Config.ReviewInterval))
+	r.disposition(pending.result.ctx, "Persistence deferred; exact desired revisions retained: "+failure.Error())
+
+	return r.Output.Log("error", "GO", "INCIDENT", fmt.Sprintf("%s incident_persistence_deferred: %s; consecutive_failures=%d retry_after_seconds=%.0f next_retry_at=%s; collection continues, new AI calls paused",
+		output.Scope(pending.result.ctx), failure.Error(), pending.failures, pending.next.Sub(now).Seconds(), pending.next.UTC().Format(time.RFC3339)))
+}
+
+// retryDelay shares the existing two-second, four-second, then review-interval backoff across failures.
+func retryDelay(failures int, reviewInterval time.Duration) time.Duration {
+	if failures >= 3 {
+		return reviewInterval
+	}
+
+	return min(time.Duration(1<<min(failures, 6))*time.Second, reviewInterval)
+}
+
+// reviewRecoveryCurrent prevents a reviewed resolution from outliving its exact continuous observation window.
+func reviewRecoveryCurrent(in incident.InvestigationContext, c *candidate, now time.Time, window time.Duration) bool {
+	return !in.RecoveryEligible || c != nil && recoveryEligible(c, now, window) &&
+		in.Recovery != nil && in.Recovery.Since != nil && c.recoverySince.Equal(*in.Recovery.Since)
 }
 
 // fail reports a Go execution failure without manufacturing an incident.
@@ -582,7 +724,8 @@ func toolsCurrent(in incident.InvestigationContext, snapshot health.Snapshot) bo
 		if version == "" {
 			identity := in.Identities[ref]
 			for _, object := range snapshot.Objects {
-				if object.Kind == identity.Kind && object.Namespace == identity.Namespace && object.Name == identity.Name {
+				if object.Kind == identity.Kind && object.APIGroup == identity.APIGroup &&
+					object.Namespace == identity.Namespace && object.Name == identity.Name {
 					if object.UID == identity.UID {
 						return false
 					}
@@ -787,15 +930,7 @@ func (r *Runner) loadOpen(ctx context.Context) ([]incident.Record, error) {
 	for _, record := range open {
 		resources := append([]health.Resource{record.Value.Identity.Anchor}, record.Value.Resources...)
 		for _, resource := range resources {
-			if health.ClusterScoped(resource.Kind) {
-				if resource.Namespace != "" {
-					return nil, errors.New("stored cluster-scoped resource has a namespace")
-				}
-
-				continue
-			}
-
-			if !r.Config.WatchesNamespace(resource.Namespace) {
+			if !r.Config.ResourceInScope(resource) {
 				return nil, errors.New("stored incident belongs to a different observation scope; use a unique observer-id")
 			}
 		}

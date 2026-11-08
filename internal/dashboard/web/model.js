@@ -15,7 +15,7 @@ export function selectIncidents(incidents, filters) {
     if (filters.family && incident.family !== filters.family) return false;
     if (filters.namespace && !namespaces(incident).includes(filters.namespace)) return false;
     const text = [incident.name, incident.title, incident.observer,
-      ...[incident.anchor, ...incident.resources].flatMap((r) => [r.kind, r.name, r.namespace || "cluster-scoped"])]
+      ...[incident.anchor, ...incident.resources].flatMap((r) => [r.kind, r.api_group || "", r.name, r.namespace || "cluster-scoped"])]
       .join(" ").toLowerCase();
     return !search || text.includes(search);
   }).sort((a, b) => {
@@ -48,7 +48,8 @@ export function severityCounts(items) {
 
 function isResource(resource) {
   return resource && typeof resource.kind === "string" && typeof resource.name === "string"
-    && (resource.namespace === undefined || typeof resource.namespace === "string");
+    && (resource.namespace === undefined || typeof resource.namespace === "string")
+    && (resource.api_group === undefined || typeof resource.api_group === "string");
 }
 
 function isSummary(item) {

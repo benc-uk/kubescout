@@ -9,6 +9,8 @@ HPA scale targets add workload context without becoming ownership or changing an
 Ingress routes share Service/backend context without duplicating endpoint evidence or changing anchors.
 VolumeAttachments share named current PV/Node and scoped claim context without changing incident ownership.
 Recovery retains original anchors and adds same-name replacement evidence without merging identities.
+Configured status facts join private signals and semantic fingerprints; failed CEL checks abort assessment.
+Anchor-presence fingerprints do not change merely because an approved Incident was persisted.
 */
 package incident
 
@@ -104,7 +106,7 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 
 		in.Identities[key] = r
 
-		in.Resources = append(in.Resources, Resource{key, r.Kind, r.Namespace, r.Name})
+		in.Resources = append(in.Resources, Resource{Ref: key, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name, APIGroup: r.APIGroup})
 		name := r
 		name.UID = ""
 		in.RecoveryChanges[key] = snapshot.RecoveryChanges[name]
@@ -116,12 +118,19 @@ func BuildInvestigationContexts(snapshot health.Snapshot, policy health.Policy, 
 
 	signals := map[string][]Signal{}
 
-	for _, f := range health.Evaluate(snapshot, policy) {
+	extra, err := health.ExtraResources(snapshot, policy)
+	if err != nil {
+		return nil, err
+	}
+
+	findings := append(health.Evaluate(snapshot, policy), extra...)
+	for _, f := range findings {
 		o, ok := objects[Ref(f.Resource)]
 		if !ok && f.Resource.UID == "" {
 			// An Event target without UID cannot establish a resource incarnation.
 			for _, candidate := range snapshot.Objects {
-				if candidate.Kind == f.Resource.Kind && candidate.Namespace == f.Resource.Namespace && candidate.Name == f.Resource.Name {
+				if candidate.Kind == f.Resource.Kind && candidate.APIGroup == f.Resource.APIGroup &&
+					candidate.Namespace == f.Resource.Namespace && candidate.Name == f.Resource.Name {
 					o, ok = candidate, true
 					break
 				}
@@ -425,6 +434,7 @@ func Fingerprint(in InvestigationContext) string {
 		HPAConditions                                     []health.Condition
 		Ingress                                           health.IngressState
 		Attachment                                        health.AttachmentState
+		Extra                                             map[string]any
 	}
 
 	states := []state{}
@@ -440,6 +450,12 @@ func Fingerprint(in InvestigationContext) string {
 		value.UpdateStrategy, value.ServiceType, value.AddressType = o.UpdateStrategy, o.ServiceType, o.AddressType
 		value.Selector, value.PublishNotReady = o.Selector, o.PublishNotReady
 		value.CronJob = o.CronJob
+
+		value.Extra = o.Extra
+		if o.Extra != nil {
+			value.Deleting = o.Deleting
+		}
+
 		value.Attachment = o.Attachment
 		value.Attachment.AttachError.At = time.Time{}
 		value.Attachment.DetachError.At = time.Time{}
@@ -548,10 +564,18 @@ func Fingerprint(in InvestigationContext) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// recoveryState returns the stable host-observed anchor state without timing or eligibility churn.
+// recoveryState normalizes known anchor presence independently of an existing Incident's recovery envelope.
 func recoveryState(in InvestigationContext) string {
 	if in.Recovery == nil {
-		return ""
+		if in.Identities[in.Anchor].UID == "" {
+			return ""
+		}
+
+		if _, present := in.Objects[in.Anchor]; present {
+			return "present"
+		}
+
+		return "absent"
 	}
 
 	return in.Recovery.AnchorState

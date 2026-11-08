@@ -1,0 +1,37 @@
+version: 1
+resources:
+  - id: certificates
+    group: cert-manager.io
+    version: v1
+    resource: certificates
+    kind: Certificate
+    scope: Namespaced
+    fields:
+      - name: conditions
+        path: [status, conditions]
+        type: conditions
+        optional: true
+      - name: notAfter
+        path: [status, notAfter]
+        type: timestamp
+        optional: true
+    rules:
+      - id: not-ready
+        expression: >-
+          !deleting && now - created >= duration("300s") &&
+          (!("conditions" in fields) ||
+           !fields.conditions.exists(c, c.type == "Ready" && c.status == "True"))
+        severity: warning
+        summary: Certificate is not reporting Ready after its startup grace.
+      - id: expires-soon
+        expression: >-
+          !deleting && "notAfter" in fields &&
+          timestamp(fields.notAfter) > now &&
+          timestamp(fields.notAfter) <= now + duration("168h")
+        severity: warning
+        summary: Certificate reports expiry within seven days; check renewal progress.
+      - id: expired
+        expression: >-
+          !deleting && "notAfter" in fields && timestamp(fields.notAfter) <= now
+        severity: critical
+        summary: Certificate reports an expiry time in the past.

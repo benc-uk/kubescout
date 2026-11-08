@@ -5,7 +5,7 @@
 This is the reference for the Kubernetes resources KubeScout gathers, the facts
 it retains, and the health checks it runs on those facts. It describes the
 current implementation, including StatefulSet, DaemonSet, PVC/PV, CronJob, HPA,
-Ingress and VolumeAttachment support.
+Ingress and VolumeAttachment support, plus opt-in configured extra resources.
 
 ## How to interpret a check
 
@@ -26,7 +26,7 @@ For scheduling, correlation and lifecycle details, see the
 
 ## Collection inventory
 
-The [collector](../internal/kube/source.go) gathers the following sixteen resource
+The [collector](../internal/kube/source.go) gathers the following sixteen built-in resource
 kinds. Watch mode uses initial paginated lists followed by watches; once mode
 uses bounded lists. A watch notification is an API change notification, not a
 Kubernetes Event object.
@@ -56,7 +56,110 @@ retained for correlation. The table lists additional facts from the
 | Ingress | `networking.k8s.io/v1` | Namespace | Generation, explicit class name; default/HTTP routes with host/path/path type and Service name/port; custom-backend presence; TLS-entry and load-balancer-address counts only | Missing backend Service/Service-port evidence and related Service/workload context, not reachability |
 | Event, Warning only | `v1` | Namespace | Involved resource identity, reason, count and selected occurrence time | Recent supporting evidence, not proof of an active failure |
 
-### Scope, bounds and freshness
+## Configured extra resources
+
+Use `--extra-resources=examples/extra-resources.yaml`, or set
+`EXTRA_RESOURCES_FILE`, to add explicitly selected API resources and custom
+resources. The [cert-manager example](../examples/extra-resources.yaml) defines
+Certificate readiness after five minutes, expiry within seven days and expiry
+at/past the reported deadline. It is **not enabled by default**.
+Adding other supported status-based policies requires YAML changes, not Go changes.
+
+Each resource declares a unique `id`, explicit `group`, `version`, plural
+`resource`, `kind`, and `scope` (`Namespaced` or `Cluster`). An empty group selects
+a core API. Discovery, wildcards, subresources and overriding built-in kinds
+are not supported. Secrets, ConfigMaps, ServiceAccounts, authentication,
+authorization, RBAC and KubeScout Incident APIs are excluded.
+
+### Selecting facts
+
+Each field has a CEL `name`, explicit path such as `[status, notAfter]`, and
+one of these types:
+
+| Type | Retained value |
+|---|---|
+| `string` | UTF-8 text, at most 512 bytes, credential-protected |
+| `timestamp` | Valid RFC3339 timestamp string; use CEL `timestamp(fields.name)` |
+| `boolean` | Boolean only |
+| `integer` | Signed 64-bit integer only |
+| `number` | Finite floating-point value (integer inputs convert to floating point) |
+| `strings` | At most 32 bounded strings |
+| `conditions` | At most 32 records containing only `type`, `status`, optional `reason` and `lastTransitionTime`; messages and other fields are excluded |
+
+Paths must start with `status` and select a typed value, not the entire status
+or an arbitrary object map. Spec, metadata, annotations, environment, UIDs and
+credential fields cannot be selected. Resource names and host-only identity are
+retained separately; raw objects do not reach CEL or AI. Text redaction reduces
+risk but cannot prove arbitrary custom status text is secret-free: select only
+facts you approve for model disclosure.
+
+Fields are **required by default**. Missing/null required fields, wrong types,
+invalid timestamps and exceeded projection limits make collection incomplete.
+`optional: true` deliberately permits absence and omits the map key; no default
+value is invented. Rules must guard optional access with `"name" in fields` and
+explicitly decide what missing facts mean. The certificate readiness rule treats
+missing Ready status after startup grace as private evidence, not healthy status.
+An optional missing expiry timestamp alone does not prove certificate validity.
+
+### Writing CEL rules
+
+Rules have a resource-local unique `id`, boolean `expression`, `severity`
+(`info`, `warning` or `critical`) and static `summary`. **True produces a private
+evidence hint**, not an Incident or a health verdict. False produces no hint.
+Rules see only:
+
+- `fields`: the selected, projected fact map.
+- `now`: snapshot observation time, re-evaluated on the existing check timer.
+- `created`: resource creation time.
+- `deleting`: whether Kubernetes marked the resource for deletion.
+
+For example:
+
+```yaml
+- id: expires-soon
+  expression: >-
+    !deleting && "notAfter" in fields &&
+    timestamp(fields.notAfter) > now &&
+    timestamp(fields.notAfter) <= now + duration("168h")
+  severity: warning
+  summary: Certificate reports expiry within seven days; check renewal progress.
+```
+
+No shell, kubectl execution, network requests, raw object access or remediation
+functions are available to CEL. YAML/schema/compilation errors fail startup with
+exit 2. Runtime expression errors (including unguarded missing facts or invalid
+conversions) produce explicit diagnostics, skip AI and cannot establish recovery.
+Once exits 1 for incomplete assessment; watch remains active, coalesces errors
+and resumes only after complete evaluation.
+
+Limits are shared with built-ins for retained objects, API pagination, model input,
+tool bytes and continuing freshness. Additional fixed bounds are: one YAML
+document of at most 64 KiB, 16 resources, 32 fields and 16 rules per resource,
+4 KiB projected facts per object, 4,096 code points per expression, parser
+recursion depth 64, 10,000 CEL cost units per rule, and 1,000,000 cost units plus
+a one-second deadline per snapshot evaluation. Limits fail explicitly, not by
+silently truncating configured facts.
+
+### AI investigation and lifecycle
+
+Matching rules become `extra.<resource-id>.<rule-id>` signals with approved
+facts as evidence. Related rules coalesce under the same standalone resource
+anchor; API groups distinguish same-named kinds from different APIs.
+Extra-resource owner/controller correlation is not inferred. AI may inspect only
+the configured resource handles and their scoped Warning events; native/generic
+describe is disabled for extra resources.
+
+AI may choose no-action, including for expired-certificate hints. Only validated
+AI conclusions create/update/reopen/resolve `custom-resource-health` Incidents.
+Selected fact changes reset recovery continuity and invalidate stale AI results.
+Disappearing rules, resources, missing permissions and evaluation errors never
+automatically resolve an Incident or prove an application is healthy. Reported
+certificate readiness/expiry is controller evidence, **not active TLS probing**.
+
+See [operational setup](operations.md#extra-resource-policies) for permissions,
+CRD updates, local commands and configuration mounts.
+
+## Scope, bounds and freshness
 
 - Nodes, PVs and VolumeAttachments are always observed cluster-wide, including
   unclaimed PVs and attachments related to out-of-scope workloads. Other kinds follow the same namespace watch/ignore

@@ -9,6 +9,7 @@ HPA facts exclude metric selectors and expose only approved scaling context.
 Ingress facts describe bounded routes without annotations, TLS Secrets or raw load-balancer addresses.
 VolumeAttachment facts retain status/error metadata, never attachment metadata or inline volume specifications.
 Host-only continuity and bounded change markers prevent batched transitions from faking stable recovery.
+Configured extra resources retain API-group identity and selected status facts, never raw objects.
 */
 package health
 
@@ -18,6 +19,8 @@ import (
 	"encoding/json"
 	"slices"
 	"time"
+
+	"github.com/benc-uk/kubescout/internal/resourcepolicy"
 )
 
 type Resource struct {
@@ -25,6 +28,7 @@ type Resource struct {
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
 	UID       string `json:"uid"`
+	APIGroup  string `json:"api_group,omitempty"`
 }
 
 type Condition struct {
@@ -163,6 +167,7 @@ type Object struct {
 	HPA                          HPAState
 	Ingress                      IngressState
 	Attachment                   AttachmentState
+	Extra                        map[string]any `json:"extra,omitempty"`
 }
 
 type Snapshot struct {
@@ -175,6 +180,7 @@ type Snapshot struct {
 type Policy struct {
 	StartupGrace, RolloutGrace, EventLookback time.Duration
 	RestartThreshold                          int32
+	ExtraResources                            []resourcepolicy.Resource
 }
 
 type Finding struct {
@@ -193,13 +199,18 @@ func ClusterScoped(kind string) bool {
 
 // DefaultPolicy supplies grace periods, event lookback and a cumulative restart threshold for evidence checks.
 func DefaultPolicy() Policy {
-	return Policy{120 * time.Second, 300 * time.Second, time.Hour, 3}
+	return Policy{StartupGrace: 120 * time.Second, RolloutGrace: 300 * time.Second, EventLookback: time.Hour, RestartThreshold: 3}
 }
 
 // NewFinding derives stable evidence identity from the rule, resource incarnation and subject,
 // independent of severity or wording, and normalizes absent evidence to an empty slice.
 func NewFinding(rule, severity string, r Resource, subject, summary string, evidence ...string) Finding {
-	key, _ := json.Marshal([]string{rule, r.Kind, r.Namespace, r.Name, r.UID, subject})
+	parts := []string{rule, r.Kind, r.Namespace, r.Name, r.UID, subject}
+	if r.APIGroup != "" {
+		parts = append(parts, r.APIGroup)
+	}
+
+	key, _ := json.Marshal(parts)
 	sum := sha256.Sum256(key)
 
 	if evidence == nil {

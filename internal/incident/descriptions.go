@@ -4,6 +4,7 @@ Flow: Go captures bounded native text before AI review; the same envelope is
 stored with material conclusions and validated again for dashboard display.
 These descriptions contain neither raw Kubernetes objects nor model-authored text.
 Each resource has one describe output, not duplicate typed state or event sections.
+Description resource identities preserve optional API groups, including unavailable custom-resource descriptions.
 */
 package incident
 
@@ -65,6 +66,7 @@ func ValidateEvidence(e *Evidence) error {
 			len(s.EvidenceID) == 0 || len(s.EvidenceID) > 128 || ids[s.EvidenceID] ||
 			s.Source != DescribeSource || s.ObservedAt.IsZero() || len(r.Kind) == 0 || len(r.Kind) > 63 ||
 			len(validation.IsDNS1123Subdomain(r.Name)) != 0 ||
+			(r.APIGroup != "" && len(validation.IsDNS1123Subdomain(r.APIGroup)) != 0) ||
 			(r.Namespace != "" && len(validation.IsDNS1123Label(r.Namespace)) != 0) {
 			return invalid
 		}

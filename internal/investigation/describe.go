@@ -6,6 +6,7 @@ Operational sections are retained without prefixed notices; annotations, environ
 Superseded anchors are explicitly unavailable; the supplied current replacement is prioritized for native description.
 Point-in-time absence is distinguished from host-confirmed continuous absence and incident obsolescence.
 Unavailable reads remain explicit; on-demand typed tools are unchanged.
+Extra resources never use native/generic describe; their configured status tool is the approved evidence surface.
 */
 package investigation
 
@@ -47,7 +48,7 @@ func (s *Session) CaptureDescriptions(ctx context.Context, budget int) (*inciden
 		}
 
 		evidence.Descriptions = append(evidence.Descriptions, incident.ResourceDescription{
-			Resource: incident.Resource{Ref: ref, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name},
+			Resource: incident.Resource{Ref: ref, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name, APIGroup: r.APIGroup},
 			Source:   incident.DescribeSource, EvidenceID: fmt.Sprintf("kubectl-describe-%d", i+1), ObservedAt: time.Now().UTC(),
 			Output: incident.DescriptionOutput{Status: "unavailable", Text: "Describe unavailable."},
 		})
@@ -138,6 +139,11 @@ func (s *Session) describeResource(ctx context.Context, ref string, budget *desc
 	}
 
 	unavailable := incident.DescriptionOutput{Status: "unavailable", Text: "kubectl describe unavailable. Use the scoped inspection tools for additional evidence."}
+	if _, extra := s.Scope.ExtraResource(r.APIGroup, r.Kind); extra {
+		unavailable.Text = "Native describe is disabled for configured extra resources. Use the supplied wellness signals and inspect_resource for selected status facts only."
+		return unavailable, nil
+	}
+
 	if s.DescribeConfig == nil {
 		unavailable.Text = "kubectl describe unavailable: no authenticated describe client configured."
 		return unavailable, nil

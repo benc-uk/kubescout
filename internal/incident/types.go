@@ -7,6 +7,7 @@ Host-owned descriptions accompany decisions outside the model's JSON contract.
 Recovery observations expose presence and review timing while collection continuity
 and per-name change markers remain private host-side validation data.
 AI may resolve an absent resource's obsolete condition without certifying broader workload health.
+Extra-resource handles preserve API groups; custom-resource-health remains an AI-decided incident family.
 */
 package incident
 
@@ -65,6 +66,7 @@ type Resource struct {
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
+	APIGroup  string `json:"api_group,omitempty"`
 }
 
 type Signal struct {
@@ -140,7 +142,7 @@ type Change struct {
 }
 
 const APIVersion = "kubescout.benc-uk.github.com/v1alpha1"
-const PromptVersion = "incident-v6"
+const PromptVersion = "incident-v7"
 
 // Name derives a stable Incident name from observer, anchor identity and incident family.
 func Name(identity Identity) string {
@@ -150,7 +152,7 @@ func Name(identity Identity) string {
 	return "inc-" + hex.EncodeToString(sum[:8])
 }
 
-var Families = []string{"scheduling", "container-failure", "rollout", "job-failure", "node-health", "service-availability", "storage-availability", "autoscaling"}
+var Families = []string{"scheduling", "container-failure", "rollout", "job-failure", "node-health", "service-availability", "storage-availability", "autoscaling", "custom-resource-health"}
 var diagnosisKey = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 // Validate permits explicit no-action or checks action bounds, known identities and citations.

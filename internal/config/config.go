@@ -4,6 +4,7 @@ Flow: Combine CLI flags and environment values into collection, evidence-policy,
 logging/console colour and AI limits; repository-root dotenv loading preserves existing values.
 Configuration requires AI settings; cluster-scoped Incidents have no storage namespace option.
 One recovery window covers cleared signals and confirmed absence; watch lifetimes must allow review.
+Optional startup YAML compiles extra-resource CEL policies before collection or AI work.
 */
 package config
 
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/benc-uk/kubescout/internal/health"
+	"github.com/benc-uk/kubescout/internal/resourcepolicy"
 	"github.com/joho/godotenv"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -28,6 +30,7 @@ type Config struct {
 	Once, AILog                                                          bool
 	Auth, Context, Kubeconfig, ObserverID                                string
 	LogLevel, LogColor, AILogDir                                         string
+	ExtraResourcesFile                                                   string
 	NamespaceWatch, NamespaceIgnore                                      []string
 	RequestTimeout, RunTimeout, BatchWindow, CheckInterval, WatchTimeout time.Duration
 	MaxObjects, MaxInputChars, MaxOutputTokens, CallsPerHour             int
@@ -67,6 +70,39 @@ func (n *namespaces) Set(s string) error {
 // WatchesNamespace checks namespace admission against the watch and ignore lists, rejecting empty names.
 func (c Config) WatchesNamespace(name string) bool {
 	return name != "" && (len(c.NamespaceWatch) == 0 || slices.Contains(c.NamespaceWatch, name)) && !slices.Contains(c.NamespaceIgnore, name)
+}
+
+// ExtraResource resolves one configured API-group/kind without discovering arbitrary API resources.
+func (c Config) ExtraResource(group, kind string) (*resourcepolicy.Resource, bool) {
+	for i := range c.Policy.ExtraResources {
+		r := &c.Policy.ExtraResources[i]
+		if r.Group == group && r.Kind == kind {
+			return r, true
+		}
+	}
+
+	return nil, false
+}
+
+// ResourceInScope admits configured extra resources and legacy built-ins under the same namespace boundary.
+func (c Config) ResourceInScope(r health.Resource) bool {
+	if definition, ok := c.ExtraResource(r.APIGroup, r.Kind); ok {
+		if definition.Scope == "Cluster" {
+			return r.Namespace == ""
+		}
+
+		return c.WatchesNamespace(r.Namespace)
+	}
+
+	if r.APIGroup != "" || !resourcepolicy.BuiltinKind(r.Kind) {
+		return false
+	}
+
+	if health.ClusterScoped(r.Kind) {
+		return r.Namespace == ""
+	}
+
+	return c.WatchesNamespace(r.Namespace)
 }
 
 // NamespaceScope describes the configured namespace selection for operator diagnostics.
@@ -113,6 +149,7 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	f.StringVar(&c.Auth, "auth-mode", "", "Required: kubeconfig or in-cluster")
 	f.StringVar(&c.Context, "context", "", "Kubeconfig context override (defaults to the current context)")
 	f.StringVar(&c.Kubeconfig, "kubeconfig", "", "Optional kubeconfig path")
+	f.StringVar(&c.ExtraResourcesFile, "extra-resources", getenv("EXTRA_RESOURCES_FILE"), "Startup YAML file defining extra resources and bounded CEL wellness rules (EXTRA_RESOURCES_FILE)")
 	f.Var(&watch, "namespace-watch", "Comma-separated namespaces to watch (NAMESPACE_WATCH); default is all")
 	f.Var(&ignore, "namespace-ignore", "Comma-separated namespaces to ignore (NAMESPACE_IGNORE); mutually exclusive with namespace-watch")
 	f.StringVar(&c.LogLevel, "log-level", "info", "Console verbosity: debug, info, warn or error")
@@ -239,6 +276,15 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 
 	if err := c.LoadModel(getenv); err != nil {
 		return c, err
+	}
+
+	if c.ExtraResourcesFile != "" {
+		resources, err := resourcepolicy.Load(c.ExtraResourcesFile)
+		if err != nil {
+			return c, err
+		}
+
+		c.Policy.ExtraResources = resources
 	}
 
 	return c, nil

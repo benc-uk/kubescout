@@ -4,6 +4,7 @@ Flow: Shared session validation authorizes paginated Kubernetes Warning reads;
 namespace and target checks filter scoped events before bounded, credential-protected
 projection. Invalid or incomplete reads return errors, not accepted evidence.
 Failed reads remain errors, never accepted empty events or healthy evidence.
+Configured cluster-scoped resources use the same event namespace filters and API-group target checks.
 */
 package investigation
 
@@ -51,6 +52,10 @@ func (t RelatedWarningEvents) readEvents(ctx context.Context, _ string, r health
 	selector := "type=Warning,involvedObject.uid=" + r.UID
 
 	clusterScoped := health.ClusterScoped(r.Kind)
+	if definition, ok := s.Scope.ExtraResource(r.APIGroup, r.Kind); ok {
+		clusterScoped = definition.Scope == "Cluster"
+	}
+
 	if clusterScoped {
 		namespaces = s.Scope.NamespaceWatch
 		if len(namespaces) == 0 {
@@ -107,6 +112,15 @@ func (t RelatedWarningEvents) readEvents(ctx context.Context, _ string, r health
 				kind, _, _ := unstructured.NestedString(obj.Object, "involvedObject", "kind")
 				if (!clusterScoped && target != r.UID) || (clusterScoped && (name != r.Name || kind != r.Kind || target != "" && target != r.UID)) {
 					return errors.New("event response outside authorised resource")
+				}
+
+				if _, extra := s.Scope.ExtraResource(r.APIGroup, r.Kind); extra {
+					apiVersion, _, err := unstructured.NestedString(obj.Object, "involvedObject", "apiVersion")
+
+					version, parseErr := schema.ParseGroupVersion(apiVersion)
+					if err != nil || parseErr != nil || version.Group != r.APIGroup || name != r.Name || kind != r.Kind {
+						return errors.New("event response outside authorised extra-resource API")
+					}
 				}
 
 				eventType, _, _ := unstructured.NestedString(obj.Object, "type")

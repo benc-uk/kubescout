@@ -9,6 +9,7 @@ Ingresses retain bounded routes and counts, never annotations, Secret names or r
 VolumeAttachments retain operation/error metadata but exclude inline sources, attachment metadata and error messages.
 Cache wrappers retain projected data, not raw objects; model-facing filtering
 and redaction occur downstream.
+Extra-resource projections validate the configured API identity and retain only selected status facts.
 */
 package kube
 
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/benc-uk/kubescout/internal/health"
+	"github.com/benc-uk/kubescout/internal/resourcepolicy"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
@@ -30,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type cachedObject struct {
@@ -56,7 +59,12 @@ func (o *cachedObject) DeepCopyObject() runtime.Object {
 	copy.Value.Endpoints = slices.Clone(o.Value.Endpoints)
 	copy.Value.Claims = slices.Clone(o.Value.Claims)
 	copy.Value.Storage.AccessModes = slices.Clone(o.Value.Storage.AccessModes)
+
 	copy.Value.HPA = o.Value.HPA.Clone()
+	if o.Value.Extra != nil {
+		copy.Value.Extra = runtime.DeepCopyJSON(o.Value.Extra)
+	}
+
 	copy.Value.Ingress.Routes = slices.Clone(o.Value.Ingress.Routes)
 
 	if o.Value.CronJob.StartingDeadline != nil {
@@ -82,6 +90,25 @@ func ProjectResource(u *unstructured.Unstructured, kind, namespace string) (heal
 	}
 
 	return projected.Value, nil
+}
+
+// ProjectExtraResource validates explicit API identity and projects bounded status facts without native describe.
+func ProjectExtraResource(u *unstructured.Unstructured, definition resourcepolicy.Resource, namespace string, secrets ...string) (health.Object, error) {
+	version := schema.GroupVersion{Group: definition.Group, Version: definition.Version}.String()
+	if u.GetKind() != definition.Kind || u.GetAPIVersion() != version || u.GetName() == "" ||
+		u.GetUID() == "" || u.GetResourceVersion() == "" || u.GetNamespace() != namespace {
+		return health.Object{}, errors.New("extra resource has invalid API identity or namespace")
+	}
+
+	facts, err := definition.Project(u.Object, secrets...)
+	if err != nil {
+		return health.Object{}, err
+	}
+
+	return health.Object{Resource: health.Resource{Kind: definition.Kind, APIGroup: definition.Group,
+		Namespace: namespace, Name: u.GetName(), UID: string(u.GetUID())},
+		Version: u.GetResourceVersion(), Created: u.GetCreationTimestamp().Time,
+		Deleting: u.GetDeletionTimestamp() != nil, Extra: facts}, nil
 }
 
 // DeepCopyObject copies the cached list and each item's metadata and projected collections.
@@ -449,6 +476,15 @@ func project(u *unstructured.Unstructured, kind, namespace string) (*cachedObjec
 		}
 
 		o.Target = health.Resource{Kind: event.InvolvedObject.Kind, Name: event.InvolvedObject.Name, Namespace: event.InvolvedObject.Namespace, UID: string(event.InvolvedObject.UID)}
+		if !resourcepolicy.BuiltinKind(o.Target.Kind) {
+			version, err := schema.ParseGroupVersion(event.InvolvedObject.APIVersion)
+			if err != nil {
+				return nil, errors.New("invalid event target API version")
+			}
+
+			o.Target.APIGroup = version.Group
+		}
+
 		if o.Target.Name == "" || o.Target.Kind == "" {
 			return nil, errors.New("event has no target identity")
 		}

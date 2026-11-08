@@ -55,7 +55,7 @@ spec:
                       maxLength: 63
                     family:
                       type: string
-                      enum: [scheduling, container-failure, rollout, job-failure, node-health, service-availability, storage-availability, autoscaling]
+                      enum: [scheduling, container-failure, rollout, job-failure, node-health, service-availability, storage-availability, autoscaling, custom-resource-health]
                     anchor:
                       type: object
                       required: [kind, name, uid]
@@ -68,6 +68,9 @@ spec:
                           type: string
                         uid:
                           type: string
+                        api_group:
+                          type: string
+                          maxLength: 253
                 resources:
                   type: array
                   maxItems: 50
@@ -83,6 +86,9 @@ spec:
                         type: string
                       uid:
                         type: string
+                      api_group:
+                        type: string
+                        maxLength: 253
                 analysis:
                   type: object
                   required: [title, severity, impact, diagnosis, explanation, evidence_ids, recommendations, uncertainty, model, prompt_version, analysis_id]
@@ -159,6 +165,9 @@ spec:
                                 type: string
                                 minLength: 1
                                 maxLength: 63
+                              api_group:
+                                type: string
+                                maxLength: 253
                               namespace:
                                 type: string
                                 maxLength: 63

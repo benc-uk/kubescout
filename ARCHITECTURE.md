@@ -49,6 +49,13 @@ namespace watch list uses namespace-scoped requests. All/ignore mode uses
 cluster-wide requests and filters ignored namespaces locally. Nodes, PVs and
 VolumeAttachments are always observed cluster-wide; PVCs follow namespace filters.
 
+Opt-in `--extra-resources` startup YAML adds explicit group/version/resource
+lists and watches through the same dynamic client. Configured scopes share
+namespace selection, pagination, admission and freshness limits; there is no
+API discovery or wildcard resource tool. Extra resources retain their API group
+in stable identities, selected typed status facts and no raw object or spec.
+Built-in kind semantics cannot be overridden by these policies.
+
 A Kubernetes **watch notification** is not the same as a Kubernetes **Event
 object**. A Pod status update, for example, arrives through the Pod watch; it does
 not need a Warning Event to trigger processing.
@@ -87,6 +94,23 @@ consistently by resource category:
 
 See [Resources and health checks](docs/resources-and-checks.md) for the complete
 collection inventory, retained facts, rule IDs, thresholds and exclusions.
+
+Configured extra-resource checks compile bounded boolean CEL expressions once
+at startup and evaluate locally against selected facts and the snapshot clock.
+The additional pure [extra-resource evaluator](internal/health/extra_resources.go)
+merges these hints into investigation contexts, coalescing rules under each
+standalone resource anchor. Selected fact changes participate in no-action,
+stale-result and continuous-recovery fingerprints. Runtime evaluation failures
+pause assessments and reset recovery with coalesced diagnostics; they never
+become healthy evidence or incidents. Only AI may choose the
+`custom-resource-health` incident family and its lifecycle actions.
+
+For extra resources, `inspect_resource` resolves only the configured API and
+returns the same projected status facts under the existing tool budgets.
+Native/generic describe is disabled: its unavailable placeholder is explicit,
+not a raw custom-resource dump. Handle-scoped Warning-event reads remain available
+with namespace and API-group checks. The dashboard preserves API groups when
+displaying/searching stored Incident identities, without reading extra resources.
 
 ### Resource semantics
 
@@ -298,7 +322,7 @@ memory. See [limits](docs/operations.md#limits-and-scheduling) for values and fl
 |---|---|---|---|---|
 | **12. Validate the response** | Parses strict JSON and checks the proposed actions. | [`analysis.Validate`](internal/analysis/analysis.go), [`incident.Validate`](internal/incident/types.go) | Rejects malformed output, unknown citations/handles, duplicate incidents, invalid values and resolution without recovery eligibility. This validates the contract, not the truth of the diagnosis. | **Deterministic** |
 | **13. Reject stale decisions** | Compares current observations with the investigation's evidence fingerprint and inspected resource versions. | [`Runner.current` and `toolsCurrent`](internal/runner/runner.go) | If relevant evidence changed or collection became incomplete while AI was working, discards the result rather than publishing stale conclusions. | **Deterministic** |
-| **14. Reconcile and save** | Converts accepted actions into incident changes, using stable identity and concurrency preconditions. | [`Reconciler.Apply`, `next` and `Kubernetes.Save`](internal/incident/store.go) | Suppresses wording-only/nonmaterial updates; advances revision for accepted changes; preserves identity across recurrence. Both authentication modes create/patch Incidents; there is no runtime simulation mode. | **Deterministic execution of an AI decision** |
+| **14. Reconcile and save** | Converts accepted actions into incident changes, using stable identity and concurrency preconditions; watch retains one exact pending application across storage failures. | [`Reconciler.Apply`, `next` and `Kubernetes.Save`](internal/incident/store.go), [`Application.Apply`](internal/incident/application.go) | Suppresses wording-only/nonmaterial updates; advances revision for accepted changes; preserves identity across recurrence. Both authentication modes create/patch Incidents; there is no runtime simulation mode. | **Deterministic execution of an AI decision** |
 | **15. Explain and display persisted results** | Agent logs readable activity, identifying AI conclusions separately from Go validation and confirmed CRD writes. The dashboard reads stored Incidents. | [`Writer.Log`](internal/output/writer.go), [`Runner.persisted`](internal/runner/runner.go), [`Reader.List`](internal/dashboard/incidents.go), [browser `refresh`](internal/dashboard/web/app.js) | Normal activity goes to stdout; warnings/errors go to stderr. Neither records incidents. Dashboard polls approximately every 15 seconds while visible; it reads CRDs, not logs, and does not call AI. | **Deterministic rendering with explicitly labelled AI-authored content** |
 
 ### Identity and lifecycle
@@ -356,7 +380,23 @@ Known families, including resolved incidents, are looked up before investigation
 Reconciliation rereads ambiguous writes under
 the same name and uses UID/resourceVersion preconditions instead of creating a
 second record or repeating a model investigation. Unreconcilable writes fail
-explicitly. There is no automatic deletion, Pod owner reference or historical
+explicitly. In watch mode, storage failures retain one process-local application
+with exact desired revisions, expected UID/content and unfinished action position.
+New AI calls pause while collection and complete index refreshes continue.
+Bounded retry batches use the existing 2s, 4s, then review-interval backoff;
+every batch rechecks resource freshness, inspected versions and the original
+continuous recovery window. Changed observations discard the old application
+without waiting for the storage backoff. Partial confirmed writes update the
+index immediately and are not replayed; lost acknowledgements are reconciled
+against exact retained values. Adding an Incident alone does not change the
+anchor-presence fingerprint.
+
+Incident create/patch requests use strict API field validation so an old CRD
+cannot silently prune identity or evidence fields. Validation and RBAC failures
+have explicit safe diagnostics. After bootstrap, a write failure does not stop
+watch; graceful shutdown warns about unfinished applications, which are not
+retained across process restarts. Once remains bounded and exits incomplete on
+a failed write. There is no automatic deletion, Pod owner reference or historical
 version archive.
 
 Both authentication modes persist accepted changes. Incident state is

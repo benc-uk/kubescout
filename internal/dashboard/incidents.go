@@ -6,6 +6,7 @@ UID/resourceVersion checks to patch status.triage only; it neither calls AI
 nor writes incident specs, and reports upstream failures as explicit errors.
 Details include validated stored native descriptions; list summaries omit
 their text and the dashboard never fetches live workload evidence.
+Resource summaries preserve optional API groups for unambiguous custom-resource display.
 */
 package dashboard
 
@@ -39,6 +40,7 @@ type Resource struct {
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
+	APIGroup  string `json:"api_group,omitempty"`
 }
 
 type Summary struct {
@@ -242,7 +244,7 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 			return Detail{}, invalidSnapshot("Stored incident has an invalid resource reference.")
 		}
 
-		refs = append(refs, Resource{ref.Kind, ref.Namespace, ref.Name})
+		refs = append(refs, Resource{Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name, APIGroup: ref.APIGroup})
 	}
 
 	anchor := value.Identity.Anchor
@@ -255,7 +257,7 @@ func (r *Reader) decode(obj *unstructured.Unstructured) (Detail, error) {
 	return Detail{
 		Summary: Summary{
 			Name: obj.GetName(), Observer: value.Identity.Observer,
-			Family: value.Identity.Family, Anchor: Resource{anchor.Kind, anchor.Namespace, anchor.Name},
+			Family: value.Identity.Family, Anchor: Resource{Kind: anchor.Kind, Namespace: anchor.Namespace, Name: anchor.Name, APIGroup: anchor.APIGroup},
 			Resources: refs, Title: value.Analysis.Title, Severity: value.Analysis.Severity,
 			Impact: value.Analysis.Impact, Lifecycle: value.Lifecycle,
 			Dismissed: dismissedRevision == value.Lifecycle.Revision, Version: incidentVersion(obj),

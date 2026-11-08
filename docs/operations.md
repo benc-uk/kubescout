@@ -141,6 +141,67 @@ Changing it creates separate incident identities; it does not adopt old records.
 Use a new ID when changing scope, and do not run competing replicas with one ID.
 Out-of-scope stored incidents are not treated as recovered.
 
+### Extra-resource policies
+
+Additional API/CRD monitoring is opt-in through a startup YAML file:
+`--extra-resources=PATH` or `EXTRA_RESOURCES_FILE=PATH`. The flag overrides the
+environment setting; `--extra-resources=` explicitly disables an environment
+default. No file means the existing built-in inventory only. Policy files are
+local operator configuration, not discovered cluster objects, model-authored
+instructions or dynamically executed scripts.
+
+Start with the [cert-manager example](../examples/extra-resources.yaml) and
+[policy reference](resources-and-checks.md#configured-extra-resources).
+Before enabling it:
+
+1. Install/update the Incident CRD to the checked-in schema, including
+   `api_group` resource identity and the `custom-resource-health` family.
+   `make incidents-setup` applies the CRD without deploying an agent or calling AI;
+   it still requires your authorization to mutate the selected cluster.
+2. Ensure the configured API version is served. Explicitly grant `get`, `list`
+   and `watch` only on the selected resources, for example:
+
+   ```yaml
+   - apiGroups: ["cert-manager.io"]
+     resources: ["certificates"]
+     verbs: ["get", "list", "watch"]
+   ```
+
+   Add this rule to the agent's appropriate Role/ClusterRole, not the dashboard
+   role. Explicit namespace watch lists can use namespaced Roles; all/ignore
+   mode and cluster-scoped resource types require corresponding cluster-wide
+   list/watch access. No Secret/ConfigMap API permissions, workload writes or
+   wildcard resources are needed.
+3. Select status fields suitable for AI disclosure, review CEL rules and budgets,
+   and choose a new observer ID when changing the monitored resource set or
+   materially changing wellness-policy semantics. Removed/out-of-scope stored
+   Incidents are not resolved as recovered.
+
+For a deliberately authorized local assessment:
+
+```bash
+make once ALLOW_MODEL=yes OBSERVER_ID=local-with-certificates \
+  ARGS='--extra-resources=examples/extra-resources.yaml'
+```
+
+`make run` uses the same `ARGS` in watch mode and authorizes ongoing AI calls.
+Both persist accepted AI decisions; this configuration adds no simulation mode.
+
+For in-cluster operation, mount the policy file read-only (for example from an
+operator-managed ConfigMap volume) and add `--extra-resources=/etc/kubescout/extra-resources.yaml`
+to the Deployment arguments, or set `EXTRA_RESOURCES_FILE` explicitly there.
+The agent reads the mounted local file, not the ConfigMap API. Keep this mount
+separate from model credentials and diagnostic transcripts. The checked-in
+Deployment, RBAC and dashboard are unchanged and do not automatically enable the
+example. Policy changes require an agent restart; files are not hot-reloaded.
+
+Missing APIs/permissions or malformed required status fields mean incomplete
+collection, not an empty healthy inventory. Runtime CEL errors pause AI reviews
+and reset recovery with explicit diagnostics while watch continues. Large
+projected evidence can still exceed the shared model input budget: reduce
+selected fields/rules or review the existing budgets rather than assuming truncation.
+An empty Incident list is not proof of cluster health or of policy execution.
+
 Incidents are cluster-scoped and have no `metadata.namespace`. The agent's
 `--incident-namespace` and dashboard's `--namespace` options have been removed.
 The dashboard reads all observers and lifecycle states; its workload-namespace
@@ -509,6 +570,8 @@ hourly quota as noted above.
 | Model output per request | 2,000 tokens; `--max-output-tokens`, plus cumulative byte checks |
 | Retained objects / pending cases / open index | Bounded by `--max-objects`, default 5,000 |
 | Complete open Incident index refresh | `--check-interval`, default 15s; one in flight, overall `--request-timeout` deadline |
+| Extra-resource policy | Disabled; `--extra-resources` / `EXTRA_RESOURCES_FILE`; startup YAML only |
+| Extra-resource CEL | 10,000 cost units per rule; 1,000,000 plus 1s per snapshot; [additional projection/configuration bounds](resources-and-checks.md#configured-extra-resources) |
 
 Numeric budget flags have no environment aliases. Use local `ARGS` or edit the
 agent Deployment's `args`. Raising one limit does not raise independent request,
@@ -637,6 +700,7 @@ permissions and exposes no log HTTP endpoint.
 | Bootstrap or collection failure | Selected context, namespace/CRD, supported API access and RBAC; missing observations are not healthy evidence |
 | No incidents | Agent logs, scope, model availability and AI no-action; an empty CRD list is not a health check |
 | Investigation deferred | Safe failure category, counters and next eligibility time in `[GO][SCHEDULE]` diagnostics |
+| Incident persistence deferred | Updated Incident CRD (including `api_group` and required families), cluster-scoped create/patch RBAC and API availability; collection continues and new AI calls pause |
 | Local quota exhausted | Actual HTTP attempts, including tool rounds; `retry_not_before` indicates earliest request-slot expiry |
 | Provider HTTP failure | Authentication (401/403), rate limit (429) or HTTP category; provider bodies are intentionally excluded |
 | Tool limit reached | `local_tool_call_limit`, other `local_tool_*` or `local_cumulative_tool_bytes` categories; examine observed/allowed amounts |
@@ -657,6 +721,34 @@ request at that time; fresh evidence, serial work and budgets still matter.
 Valid provider retry headers supply `retry_not_before`, with the latest hint
 winning; invalid/missing hints are omitted. These hints do not change scheduler
 backoff, and HTTP 429 alone does not identify which provider quota was exhausted.
+
+### Incident write failures in watch mode
+
+After successful bootstrap, a failed Incident create/patch **does not stop watch**.
+`[GO][INCIDENT] incident_persistence_deferred` logs the safe error and next retry
+eligibility. The agent retains one exact AI-approved application in process
+memory, pauses new model calls, and keeps collecting resources and refreshing
+the Incident index. Storage retry batches use the same 2s, 4s, then configured
+review-interval backoff and an overall request-timeout deadline.
+
+Fix the schema/RBAC/API issue while watch stays running. The next eligible retry
+rereads ambiguous writes and applies only unfinished actions without regenerating
+AI conclusions, timestamps, analysis IDs or names. Strict API field validation
+rejects unknown fields instead of silently dropping identity/evidence.
+`incident_persistence_recovered` confirms that the retained application finished.
+Confirmed partial changes remain authoritative Incidents and are never replayed.
+
+This is not an unconditional retry: changed evidence, inspected versions,
+resource incarnations, Incident revisions/UIDs or recovery continuity reject the
+old application. Missing observations/index reads pause persistence, not certify
+health. Stale applications are discarded even before the storage backoff expires;
+later AI reviews still obey normal scope, recovery and budget gates.
+
+Ctrl+C still exits gracefully, warning if an application is unfinished. Pending
+applications are not durable model memory and do not survive process restart;
+persisted Incidents do. A bootstrap index failure remains exit 1, and `--once`
+remains bounded with exit 1 when persistence is incomplete. No schema reset,
+Incident deletion or workload write is performed automatically.
 
 | Exit | Once | Watch |
 |---|---|---|

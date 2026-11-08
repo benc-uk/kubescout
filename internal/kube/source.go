@@ -6,6 +6,7 @@ watches invalidate and rebuild caches; labelled progress describes collection on
 Collection errors remain unknown
 observations for the runner, never healthy evidence or synthetic incidents.
 Epoch generations and bounded per-name change history preserve recovery resets across coalesced notifications.
+Configured extra resources use the same scoped dynamic lists/watches and admission/freshness boundaries.
 */
 package kube
 
@@ -74,8 +75,8 @@ type projectedWatch struct {
 	events chan watch.Event
 }
 
-// resources selects cluster-scoped Nodes/PVs/attachments and namespaced requests per watched namespace,
-// using all-namespace endpoints when no explicit watch list is configured.
+// resources selects built-in and configured resource scopes, sharing namespace filters.
+// All/ignore mode uses all-namespace endpoints without resource discovery.
 func resources(c config.Config) []resource {
 	out := []resource{
 		{schema.GroupVersionResource{Version: "v1", Resource: "nodes"}, "Node", ""},
@@ -103,6 +104,19 @@ func resources(c config.Config) []resource {
 			resource{schema.GroupVersionResource{Group: "autoscaling", Version: "v2", Resource: "horizontalpodautoscalers"}, "HorizontalPodAutoscaler", ns},
 			resource{schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"}, "Ingress", ns},
 			resource{schema.GroupVersionResource{Version: "v1", Resource: "events"}, "Event", ns})
+	}
+
+	for i := range c.Policy.ExtraResources {
+		r := &c.Policy.ExtraResources[i]
+
+		scopes := namespaces
+		if r.Scope == "Cluster" {
+			scopes = []string{""}
+		}
+
+		for _, ns := range scopes {
+			out = append(out, resource{schema.GroupVersionResource{Group: r.Group, Version: r.Version, Resource: r.Resource}, r.Kind, ns})
+		}
 	}
 
 	return out
@@ -368,7 +382,7 @@ func (s *Source) list(ctx context.Context, r resource, b *budget) (*cachedList, 
 		cancel()
 
 		if err != nil {
-			return nil, fmt.Errorf("%s list failed in scope %q", r.kind, r.namespace)
+			return nil, fmt.Errorf("%s (%s) list failed in scope %q", r.kind, r.gvr.String(), r.namespace)
 		}
 
 		if page.GetResourceVersion() == "" {
@@ -425,6 +439,31 @@ func (s *Source) list(ctx context.Context, r resource, b *budget) (*cachedList, 
 // project enforces cluster or requested namespace scope and filters excluded namespaces before projection.
 // A nil object without an error means the namespace was intentionally skipped.
 func (s *Source) project(u *unstructured.Unstructured, r resource) (*cachedObject, error) {
+	if extra, ok := s.config.ExtraResource(r.gvr.Group, r.kind); ok {
+		namespace := u.GetNamespace()
+		if extra.Scope == "Cluster" {
+			if namespace != "" {
+				return nil, errors.New("cluster-scoped extra resource has a namespace")
+			}
+		} else {
+			if len(validation.IsDNS1123Label(namespace)) != 0 || r.namespace != "" && namespace != r.namespace {
+				return nil, errors.New("extra resource outside requested namespace scope")
+			}
+
+			if !s.config.WatchesNamespace(namespace) {
+				return nil, nil
+			}
+		}
+
+		value, err := ProjectExtraResource(u, *extra, namespace, s.config.APIKey)
+		if err != nil {
+			return nil, err
+		}
+
+		return &cachedObject{ObjectMeta: metav1.ObjectMeta{Name: value.Name, Namespace: namespace,
+			UID: u.GetUID(), ResourceVersion: value.Version}, Value: value}, nil
+	}
+
 	if health.ClusterScoped(r.kind) {
 		return project(u, r.kind, "")
 	}
@@ -443,7 +482,7 @@ func (s *Source) project(u *unstructured.Unstructured, r resource) (*cachedObjec
 
 // objectKey identifies a kind/namespace/name slot for duplicate detection and shared admission accounting.
 func objectKey(obj *cachedObject) string {
-	return obj.Value.Kind + "/" + obj.Namespace + "/" + obj.Name
+	return obj.Value.APIGroup + "/" + obj.Value.Kind + "/" + obj.Namespace + "/" + obj.Name
 }
 
 // watch opens a deadline-bound stream and forwards only scoped, projected resource events.
@@ -465,7 +504,7 @@ func (s *Source) watch(ctx context.Context, r resource, opts metav1.ListOptions,
 	if err != nil {
 		cancel()
 
-		err = fmt.Errorf("%s watch could not start in scope %q", r.kind, r.namespace)
+		err = fmt.Errorf("%s (%s) watch could not start in scope %q", r.kind, r.gvr.String(), r.namespace)
 		fail(err)
 
 		return nil, err

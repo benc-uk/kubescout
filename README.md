@@ -18,6 +18,10 @@ It investigates and recommends; it does not remediate workloads.
 - **Investigate common Kubernetes problems:** container failures, unschedulable
   Pods, unhealthy nodes, rollout and replica shortfalls, failed Jobs, and Services
   without ready backends or matching backend ports.
+- **Configure checks for additional APIs and CRDs:** select status facts and write
+  bounded CEL wellness rules in YAML, without resource-specific Go changes. See
+  [extra-resource configuration](docs/resources-and-checks.md#configured-extra-resources)
+  and the [cert-manager example](examples/extra-resources.yaml).
 - **Connect related evidence:** group replica failures under their controller and
   inspect relevant resources and Warning events instead of treating every signal
   as a separate incident.

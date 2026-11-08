@@ -9,6 +9,7 @@ and validation outcome can be captured in a bounded, credential-protected local 
 Native kubectl descriptions enter AI context first and accompany only validated
 decisions as host-owned Incident evidence. On-demand typed tools share evidence
 limits without storing duplicate state or Warning-event snapshots.
+Configured extra-resource scope authorizes only projected status inspection, not generic resource dumps.
 */
 package analysis
 
@@ -164,7 +165,7 @@ func (a *Analyzer) Investigate(ctx context.Context, in incident.InvestigationCon
 	session := &investigation.Session{Client: a.Kubernetes, Investigation: in, Timeout: a.Config.RequestTimeout, Citations: citations,
 		MaxCalls: a.Config.MaxToolCalls, Log: a.Log, Transcript: a.Transcript,
 		DescribeConfig: a.DescribeConfig, SecretValues: []string{a.Config.APIKey},
-		Scope: config.Config{NamespaceWatch: a.Config.NamespaceWatch, NamespaceIgnore: a.Config.NamespaceIgnore}}
+		Scope: config.Config{NamespaceWatch: a.Config.NamespaceWatch, NamespaceIgnore: a.Config.NamespaceIgnore, Policy: a.Config.Policy}}
 
 	evidenceBudget := min(incident.MaxDescriptionBytes, a.Config.MaxInputChars-len(payload)-len(`,"evidence":`))
 

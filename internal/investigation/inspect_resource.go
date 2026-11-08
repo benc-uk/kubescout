@@ -10,6 +10,7 @@ HPA inspection shares credential protection and excludes metric selectors and me
 Ingress inspection returns configuration, not TLS validity or network reachability.
 Attachment inspection returns bounded driver errors without metadata or inline volume configuration.
 Superseded anchors may report absence only against an exact supplied replacement, tracking both observations.
+Configured extra resources return only the same bounded status facts used by local CEL checks.
 */
 package investigation
 
@@ -54,7 +55,12 @@ func (t InspectResource) Call(ctx context.Context, args string) (any, error) {
 func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resource, result map[string]any) error {
 	s := t.Session
 
-	obj, err := s.Client.Resource(resources[r.Kind]).Namespace(r.Namespace).Get(ctx, r.Name, metav1.GetOptions{})
+	gvr, knownAPI := s.resourceAPI(r)
+	if !knownAPI {
+		return errors.New("resource inspection API is not configured")
+	}
+
+	obj, err := s.Client.Resource(gvr).Namespace(r.Namespace).Get(ctx, r.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		result["exists"] = false
 
@@ -71,6 +77,10 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 
 	if err != nil {
 		return &UnavailableError{Operation: "resource inspection"}
+	}
+
+	if _, extra := s.Scope.ExtraResource(r.APIGroup, r.Kind); extra && obj.GetAPIVersion() != gvr.GroupVersion().String() {
+		return errors.New("extra-resource inspection returned a different API version")
 	}
 
 	if string(obj.GetUID()) != r.UID || obj.GetName() != r.Name || obj.GetNamespace() != r.Namespace || obj.GetKind() != r.Kind {
@@ -103,6 +113,17 @@ func (t InspectResource) inspect(ctx context.Context, ref string, r health.Resou
 
 	result["exists"] = true
 	fields := map[string]any{}
+
+	if definition, ok := s.Scope.ExtraResource(r.APIGroup, r.Kind); ok {
+		projected, err := kube.ProjectExtraResource(obj, *definition, r.Namespace, s.SecretValues...)
+		if err != nil {
+			return err
+		}
+
+		result["state"] = projected.Extra
+
+		return nil
+	}
 
 	if r.Kind == "VolumeAttachment" {
 		return inspectAttachment(obj, r, s, result)

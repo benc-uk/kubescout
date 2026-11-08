@@ -4,6 +4,7 @@ Flow: Host context supplies exact same-name current handles for anchors or histo
 Typed reads may confirm original-incarnation absence only against that known
 replacement; both handles' observations remain freshness-checked. Identity
 merging, arbitrary replacement discovery and Incident writes are not allowed.
+API-group checks keep same-named custom resources in different APIs as separate incarnations.
 */
 package investigation
 
@@ -35,7 +36,8 @@ func (s *Session) knownReplacement(ref string) (health.Resource, string, bool) {
 	for candidateRef, object := range in.Objects {
 		current, authorized := in.Identities[candidateRef]
 		if !authorized || current != object.Resource || current.UID == "" || current.UID == original.UID ||
-			current.Kind != original.Kind || current.Namespace != original.Namespace || current.Name != original.Name {
+			current.Kind != original.Kind || current.APIGroup != original.APIGroup ||
+			current.Namespace != original.Namespace || current.Name != original.Name {
 			continue
 		}
 

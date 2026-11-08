@@ -6,6 +6,8 @@ reconcile ambiguous writes, preserve identity and leave human triage status unto
 Material revisions retain the exact host-captured descriptions reviewed by AI;
 write responses must confirm retention rather than silently accept schema pruning.
 Complete open-index reads require stored lifecycle state to match the indexing selector.
+API-group identity is reconciled with stored custom-resource descriptions rather than silently pruned.
+Strict API field validation rejects incompatible schemas; resumable applications retain exact proposed revisions.
 */
 package incident
 
@@ -183,7 +185,7 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 	defer cancel()
 
 	if r.Version == "" {
-		obj, err = s.Client.Resource(GVR).Create(ctx, obj, metav1.CreateOptions{})
+		obj, err = s.Client.Resource(GVR).Create(ctx, obj, metav1.CreateOptions{FieldValidation: metav1.FieldValidationStrict})
 	} else {
 		// Patch only fields owned by this agent. Delivery status and foreign metadata survive.
 		patch, marshalErr := json.Marshal([]map[string]any{
@@ -196,10 +198,18 @@ func (s Kubernetes) Save(ctx context.Context, r Record) error {
 			return errors.New("cannot encode incident update")
 		}
 
-		obj, err = s.Client.Resource(GVR).Patch(ctx, r.Name, "application/json-patch+json", patch, metav1.PatchOptions{})
+		obj, err = s.Client.Resource(GVR).Patch(ctx, r.Name, "application/json-patch+json", patch, metav1.PatchOptions{FieldValidation: metav1.FieldValidationStrict})
 	}
 
 	if err != nil {
+		if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			return errors.New("Incident write rejected by API validation; check the Incident CRD schema and run make incidents-setup for the updated schema")
+		}
+
+		if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+			return errors.New("Incident write denied; check cluster-scoped create/patch RBAC and Kubernetes authentication")
+		}
+
 		return errors.New("incident persistence failed; state will be reconciled before retry")
 	}
 
@@ -270,125 +280,15 @@ func (s Reconciler) Existing(ctx context.Context, anchor health.Resource) ([]Exi
 	return out, nil
 }
 
-// Apply reconciles validated AI actions, rejecting stale evidence or changed incident revisions.
-// Bounded retries reread ambiguous writes under the same name; only material changes are returned.
+// Apply reconciles one validated decision with bounded retries and current-evidence checks.
+// Watch can retain a NewApplication instead to resume exact revisions without another model call.
 func (s Reconciler) Apply(ctx context.Context, in InvestigationContext, d Decision, current func() bool) ([]Change, error) {
-	changes := []Change{}
-
-	if err := ValidateEvidence(d.Evidence); err != nil {
-		return changes, err
+	application, err := s.NewApplication(in, d)
+	if err != nil {
+		return []Change{}, err
 	}
 
-	in.Evidence = d.Evidence
-	if in.Evidence != nil {
-		for _, description := range in.Evidence.Descriptions {
-			resource, ok := in.Identities[description.Resource.Ref]
-			if !ok || resource.Kind != description.Resource.Kind || resource.Name != description.Resource.Name || resource.Namespace != description.Resource.Namespace {
-				return changes, errors.New("description resource outside investigation scope")
-			}
-		}
-	}
-
-	for _, a := range d.Actions {
-		identity := Identity{s.Observer, in.Identities[in.Anchor], a.Family}
-
-		name := Name(identity)
-		if a.IncidentID != "" && a.IncidentID != Name(identity) {
-			return changes, errors.New("incident action identity mismatch")
-		}
-
-		var (
-			expected *Record
-			desired  Record
-		)
-
-		for attempt := 0; attempt < 3; attempt++ {
-			if !current() {
-				return changes, errors.New("AI conclusion superseded before persistence")
-			}
-
-			var (
-				prior *Record
-				err   error
-			)
-			if attempt == 0 {
-				prior, err = s.get(ctx, identity)
-			} else {
-				prior, err = s.Repository.Get(ctx, name)
-			}
-
-			if err != nil {
-				return changes, err
-			}
-
-			if attempt > 0 {
-				if prior != nil && reflect.DeepEqual(prior.Value, desired.Value) {
-					break
-				}
-
-				if !sameValue(prior, expected) {
-					return changes, errors.New("incident changed during persistence reconciliation")
-				}
-			} else {
-				expected = prior
-				if prior != nil && prior.Value.Identity != identity {
-					return changes, errors.New("incident identity conflict")
-				}
-
-				if prior != nil {
-					if a.IncidentID != "" && a.IncidentID != prior.Name {
-						return changes, errors.New("incident action identity mismatch")
-					}
-
-					name = prior.Name
-				}
-
-				if !matchesInput(prior, a, in) {
-					return changes, errors.New("incident revision changed since AI review")
-				}
-
-				desired, err = next(prior, identity, a, in, s.Model, time.Now().UTC())
-				if err != nil {
-					return changes, err
-				}
-
-				if prior != nil && reflect.DeepEqual(prior.Value, desired.Value) {
-					break
-				}
-			}
-
-			if prior != nil {
-				desired.Version, desired.UID = prior.Version, prior.UID
-			}
-
-			if err := s.Repository.Save(ctx, desired); err != nil {
-				if attempt == 2 {
-					return changes, err
-				}
-
-				select {
-				case <-ctx.Done():
-					return changes, ctx.Err()
-				case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
-				}
-
-				continue
-			}
-
-			break
-		}
-
-		if expected == nil || !reflect.DeepEqual(expected.Value, desired.Value) {
-			op := a.Operation
-			if expected != nil && expected.Value.Lifecycle.State == "resolved" && desired.Value.Lifecycle.State == "open" {
-				op = "reopen"
-			}
-
-			changes = append(changes, Change{Operation: op, Name: name, Incident: desired.Value})
-		}
-	}
-
-	return changes, nil
+	return application.Apply(ctx, current)
 }
 
 // sameValue compares record existence, UID and incident content while ignoring resource versions.

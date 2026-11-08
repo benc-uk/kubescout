@@ -6,6 +6,7 @@ transcripts into once or watch execution.
 Supplemental kubectl describe shares the explicit Kubernetes authentication,
 with independent guarded reads rather than replacing collection or AI tools.
 Both authentication modes persist cluster-scoped Incidents; there is no runtime simulation path.
+Opt-in compiled extra-resource policies share collection and AI investigation boundaries.
 */
 package main
 
@@ -106,6 +107,9 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 	_ = sink.Log("info", "GO", "BOOT", fmt.Sprintf("AI investigation for %s, %s (once=%t)", cluster, c.NamespaceScope(), c.Once))
 
 	_ = sink.Log("info", "GO", "BOOT", "Accepted AI decisions persist to cluster-scoped Incident records")
+	if len(c.Policy.ExtraResources) != 0 {
+		_ = sink.Log("info", "GO", "BOOT", fmt.Sprintf("%d configured extra-resource policies loaded; selected status facts and local CEL hints only", len(c.Policy.ExtraResources)))
+	}
 
 	code := 0
 	if c.Once {
