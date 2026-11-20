@@ -7,6 +7,7 @@ Collection errors remain unknown
 observations for the runner, never healthy evidence or synthetic incidents.
 Epoch generations and bounded per-name change history preserve recovery resets across coalesced notifications.
 Configured extra resources use the same scoped dynamic lists/watches and admission/freshness boundaries.
+Startup diagnostics enumerate the configured collection plan without reading cluster objects.
 */
 package kube
 
@@ -14,6 +15,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,6 +149,20 @@ func (b *budget) remove(key string) { b.mu.Lock(); delete(b.keys, key); b.mu.Unl
 // NewSource initializes an unsynchronized collector with a coalescing change channel but starts no API requests.
 func NewSource(client dynamic.Interface, c config.Config) *Source {
 	return &Source{client: client, config: c, err: errors.New("initial cache synchronisation pending"), changes: make(chan struct{}, 1)}
+}
+
+// LogPlan describes the actual configured resource inventory without making Kubernetes requests.
+func (s *Source) LogPlan() {
+	plan := resources(s.config)
+	kinds := []string{}
+
+	for _, resource := range plan {
+		if !slices.Contains(kinds, resource.kind) {
+			kinds = append(kinds, resource.kind)
+		}
+	}
+
+	_ = s.Log.Log("info", "GO", "COLLECT", fmt.Sprintf("Collection plan: %d resource/scope pairs; types=%s; Events restricted to Warning", len(plan), strings.Join(kinds, ", ")))
 }
 
 // Changes exposes coalesced notifications for cache updates, readiness and collection failures.

@@ -3,6 +3,8 @@ Purpose: Define and validate runtime options, namespace selection and model sett
 Flow: Combine CLI flags and environment values into collection, evidence-policy,
 logging/console colour and AI limits; repository-root dotenv loading preserves existing values.
 Configuration requires AI settings; cluster-scoped Incidents have no storage namespace option.
+Explicit read-only assessments keep AI enabled and emit diagnostic proposals without Incident storage.
+Proposal capture defaults on in both modes; read-only assessment requires this primary output.
 One recovery window covers cleared signals and confirmed absence; watch lifetimes must allow review.
 Optional startup YAML compiles extra-resource CEL policies before collection or AI work.
 */
@@ -27,9 +29,10 @@ import (
 )
 
 type Config struct {
-	Once, AILog                                                          bool
+	Once, AILog, ReadOnly, ProposalLog                                   bool
 	Auth, Context, Kubeconfig, ObserverID                                string
 	LogLevel, LogColor, AILogDir                                         string
+	ProposalLogDir                                                       string
 	ExtraResourcesFile                                                   string
 	NamespaceWatch, NamespaceIgnore                                      []string
 	RequestTimeout, RunTimeout, BatchWindow, CheckInterval, WatchTimeout time.Duration
@@ -146,6 +149,9 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 	)
 
 	f.BoolVar(&c.Once, "once", false, "Run one bounded AI assessment instead of watching")
+	f.BoolVar(&c.ReadOnly, "read-only", false, "Assess with AI using read-only Kubernetes access; log proposals without reading or writing Incidents")
+	f.BoolVar(&c.ProposalLog, "proposal-log", true, "Capture rotating AI proposals in either mode; required in read-only mode")
+	f.StringVar(&c.ProposalLogDir, "proposal-log-dir", "logs", "AI proposal diagnostic directory (defaults to ai-log-dir; 10 files of at most 10 MiB)")
 	f.StringVar(&c.Auth, "auth-mode", "", "Required: kubeconfig or in-cluster")
 	f.StringVar(&c.Context, "context", "", "Kubeconfig context override (defaults to the current context)")
 	f.StringVar(&c.Kubeconfig, "kubeconfig", "", "Optional kubeconfig path")
@@ -196,7 +202,11 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 		return c, errors.New("--ai-log-dir must not be empty when AI logging is enabled")
 	}
 
-	watchSet, ignoreSet := false, false
+	if c.ReadOnly && !c.ProposalLog {
+		return c, errors.New("--read-only requires --proposal-log=true for its diagnostic output")
+	}
+
+	watchSet, ignoreSet, proposalDirSet := false, false, false
 
 	f.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -204,8 +214,18 @@ func Parse(args []string, getenv func(string) string, stderr io.Writer) (Config,
 			watchSet = true
 		case "namespace-ignore":
 			ignoreSet = true
+		case "proposal-log-dir":
+			proposalDirSet = true
 		}
 	})
+
+	if !proposalDirSet && strings.TrimSpace(c.AILogDir) != "" {
+		c.ProposalLogDir = c.AILogDir
+	}
+
+	if c.ProposalLog && strings.TrimSpace(c.ProposalLogDir) == "" {
+		return c, errors.New("--proposal-log-dir must not be empty when proposal logging is enabled")
+	}
 
 	for _, setting := range []struct {
 		name string

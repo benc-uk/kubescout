@@ -3,6 +3,7 @@ Purpose: Retain bounded, private, readable AI interaction transcripts locally.
 Flow: Callers supply approved content; fixed-name rotation caps disk retention.
 File failures warn and retry without changing investigations or CRD persistence.
 Transcript files are diagnostic evidence, not incident storage or model memory.
+The confined rotation and nonfatal retry mechanism also supports separately named AI proposal diagnostics.
 */
 package output
 
@@ -19,13 +20,14 @@ import (
 )
 
 type Transcript struct {
-	Dir     string
-	Console *Writer
-	mu      sync.Mutex
-	limit   int
-	files   int
-	failed  bool
-	retryAt time.Time
+	Dir      string
+	Console  *Writer
+	mu       sync.Mutex
+	limit    int
+	files    int
+	failed   bool
+	retryAt  time.Time
+	filename string
 }
 
 const TranscriptFileBytes = 10 * 1024 * 1024
@@ -39,15 +41,20 @@ func NewTranscript(dir string, console *Writer) *Transcript {
 // Record appends approved content with correlation, splitting large sections across bounded files.
 // Failures mark capture incomplete, throttle retries, and never replace the caller's outcome.
 func (t *Transcript) Record(scope, origin, phase, content string) {
+	t.record(scope, origin, phase, content)
+}
+
+// record reports completed capture using the shared rotation, redaction and throttled failure diagnostics.
+func (t *Transcript) record(scope, origin, phase, content string) bool {
 	if t == nil {
-		return
+		return false
 	}
 
 	t.mu.Lock()
 
 	if time.Now().Before(t.retryAt) {
 		t.mu.Unlock()
-		return
+		return false
 	}
 
 	wasFailed := t.failed
@@ -70,11 +77,18 @@ func (t *Transcript) Record(scope, origin, phase, content string) {
 
 	t.mu.Unlock()
 
-	if err != nil {
-		_ = t.Console.Log("warn", "GO", "TRANSCRIPT", "AI capture incomplete: cannot write/rotate/close transcript in "+t.Dir+"; investigations continue; retry in 30s")
-	} else if wasFailed {
-		_ = t.Console.Log("info", "GO", "TRANSCRIPT", "AI capture resumed; earlier exchanges may be missing")
+	label, logPhase, file := "AI capture", "TRANSCRIPT", "transcript"
+	if t.filename != "" {
+		label, logPhase, file = "AI proposal capture", "PROPOSAL", "proposal log"
 	}
+
+	if err != nil {
+		_ = t.Console.Log("warn", "GO", logPhase, label+" incomplete: cannot write/rotate/close "+file+" in "+t.Dir+"; investigations continue; retry in 30s")
+	} else if wasFailed {
+		_ = t.Console.Log("info", "GO", logPhase, label+" resumed; earlier exchanges may be missing")
+	}
+
+	return err == nil
 }
 
 // write opens a confined directory and closes each record before returning, including on failure.
@@ -145,7 +159,7 @@ func transcriptName(index int) string {
 // checkFiles refuses special files and oversized owned files rather than modifying unknown content.
 func (t *Transcript) checkFiles(root *os.Root) error {
 	for i := range t.files {
-		info, err := root.Lstat(transcriptName(i))
+		info, err := root.Lstat(t.ownedName(i))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -168,7 +182,7 @@ func (t *Transcript) checkFiles(root *os.Root) error {
 
 // append rotates before writing, enforces private permissions and detects short writes and close failures.
 func (t *Transcript) append(root *os.Root, record string) error {
-	name := transcriptName(0)
+	name := t.ownedName(0)
 	info, err := root.Stat(name)
 
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -207,12 +221,12 @@ func (t *Transcript) append(root *os.Root, record string) error {
 
 // rotate deletes only the oldest owned file and shifts the remaining bounded siblings.
 func (t *Transcript) rotate(root *os.Root) error {
-	if err := root.Remove(transcriptName(t.files - 1)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := root.Remove(t.ownedName(t.files - 1)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 
 	for i := t.files - 2; i >= 0; i-- {
-		if err := root.Rename(transcriptName(i), transcriptName(i+1)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := root.Rename(t.ownedName(i), t.ownedName(i+1)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -228,4 +242,17 @@ func (t *Transcript) Path() string {
 	}
 
 	return path
+}
+
+// ownedName selects a fixed constructor-owned log family, preserving transcript filenames by default.
+func (t *Transcript) ownedName(index int) string {
+	if t.filename == "" {
+		return transcriptName(index)
+	}
+
+	if index == 0 {
+		return t.filename
+	}
+
+	return fmt.Sprintf("%s.%d", t.filename, index)
 }

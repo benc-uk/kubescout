@@ -2,6 +2,8 @@
 Purpose: Verify private AI transcript rotation, retention and visible capture gaps.
 Flow: Offline temporary files exercise exact production limits, chunking,
 restart, unsafe paths, console-colour isolation and recoverable failures without model or cluster calls.
+Read-only proposal files share private rotation without altering transcripts; required output failures propagate.
+Optional normal-mode proposal capture reports throttled gaps and resumes without stopping persistence.
 */
 package output
 
@@ -192,5 +194,116 @@ func TestTranscriptRotationFailure(t *testing.T) {
 	data, err = os.ReadFile(filepath.Join(dir, transcriptName(0)))
 	if err != nil || trace.failed || !strings.Contains(string(data), "preceding exchanges may be missing") {
 		t.Fatal("resumed transcript omitted its capture gap")
+	}
+}
+
+// TestProposalLogRetentionAndIsolation checks the real private ten-file ceiling,
+// credential redaction and separation from pre-existing AI transcript files.
+func TestProposalLogRetentionAndIsolation(t *testing.T) {
+	dir := t.TempDir()
+
+	transcript := filepath.Join(dir, transcriptName(0))
+	if err := os.WriteFile(transcript, []byte("retain-transcript"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	log := NewProposalLog(dir, &Writer{Secrets: []string{"fixture-credential"}})
+	for range TranscriptFiles + 2 {
+		if err := log.Write("inv=1", "diagnosis: fixture-credential"); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.Truncate(log.Path(), TranscriptFileBytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	log = NewProposalLog(dir, &Writer{Secrets: []string{"fixture-credential"}})
+	if err := log.Write("inv=2", "proposal: fixture-credential"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(transcript)
+	if err != nil || string(data) != "retain-transcript" {
+		t.Fatal("proposal rotation altered the AI transcript")
+	}
+
+	files, err := filepath.Glob(filepath.Join(dir, "ai-proposals.log*"))
+	if err != nil || len(files) != TranscriptFiles {
+		t.Fatal("proposal retention exceeded or lost its bounded file family")
+	}
+
+	var total int64
+
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err != nil || info.Size() > TranscriptFileBytes || info.Mode().Perm() != 0600 {
+			t.Fatal("proposal log is unbounded or not private")
+		}
+
+		total += info.Size()
+	}
+
+	data, err = os.ReadFile(log.Path())
+	if err != nil || bytes.Contains(data, []byte("fixture-credential")) ||
+		!bytes.Contains(data, []byte("[redacted credential]")) || total > TranscriptFiles*TranscriptFileBytes {
+		t.Fatal("proposal diagnostics leaked credentials or exceeded retention")
+	}
+}
+
+// TestProposalCaptureFailureRecovery shares optional capture retry warnings and gap markers
+// while keeping failed or throttled writes distinguishable from completed proposal output.
+func TestProposalCaptureFailureRecovery(t *testing.T) {
+	base := t.TempDir()
+
+	blocked := filepath.Join(base, "blocked")
+	if err := os.WriteFile(blocked, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, diag bytes.Buffer
+
+	log := NewProposalLog(blocked, &Writer{Out: &out, Err: &diag})
+	if log.Capture("inv=1", "first") || log.Capture("inv=2", "throttled") ||
+		strings.Count(diag.String(), "AI proposal capture incomplete") != 1 || log.storage.Console.Error() != nil {
+		t.Fatal("optional proposal capture hid failure, flooded warnings or claimed success")
+	}
+
+	log.storage.Dir = filepath.Join(base, "working")
+
+	log.storage.retryAt = time.Time{}
+	if !log.Capture("inv=3", "recovered") {
+		t.Fatal("optional proposal capture did not resume")
+	}
+
+	data, err := os.ReadFile(log.Path())
+	if err != nil || !bytes.Contains(data, []byte("Capture resumed; preceding exchanges may be missing")) ||
+		!strings.Contains(out.String(), "AI proposal capture resumed") {
+		t.Fatal("proposal capture recovery hid the preceding gap")
+	}
+}
+
+// TestProposalLogUnsafePathFails refuses symlinks and preserves unrelated content
+// while returning a required-output failure rather than silently dropping a proposal.
+func TestProposalLogUnsafePathFails(t *testing.T) {
+	dir := t.TempDir()
+
+	target := filepath.Join(t.TempDir(), "keep")
+	if err := os.WriteFile(target, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	log := NewProposalLog(dir, nil)
+	if err := os.Symlink(target, log.Path()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := log.Write("inv=1", "must-not-write"); err == nil {
+		t.Fatal("proposal log ignored a write failure")
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "keep" {
+		t.Fatal("proposal logging changed an unrelated file")
 	}
 }

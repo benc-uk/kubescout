@@ -46,8 +46,10 @@ and current observations before being applied.
 
 Incidents are cluster-scoped `Incident` custom resources in the
 `kubescout.benc-uk.github.com/v1alpha1` API group. They survive agent restarts and
-can be read with kubectl or the dashboard. Console logs and AI transcripts help
+can be read with kubectl or the dashboard. Console logs, AI proposal logs and transcripts help
 explain agent activity; the Kubernetes resources are the incident record.
+An explicit read-only assessment can instead log diagnostic AI proposals without
+reading or writing Incidents; it does not simulate or persist incident lifecycle.
 
 The agent is a Go process using Azure OpenAI through the Microsoft Agent
 Framework. The dashboard is a separate, optional Go service; it reads incidents
@@ -62,14 +64,15 @@ implementation boundaries.
 
 - Go **1.26+**, Git and Make.
 - kubectl and a kubeconfig for the cluster you want to observe.
-- Permission to install the Incident CRD and namespace, read the observed
-  resources, and create/patch incidents. See [Kubernetes access](docs/operations.md#kubernetes-access).
+- Read permission for observed resources. Normal incident tracking additionally
+  requires Incident CRD/namespace setup and Incident create/patch permissions.
+  See [Kubernetes access](docs/operations.md#kubernetes-access).
 - An Azure OpenAI model deployment supporting the Responses API and function tools,
   with its endpoint, deployment name and API key.
 
 Local runs use your **current kubeconfig context**, make potentially billable
-model calls and **persist real incidents** in the cluster. Workloads remain
-read-only.
+model calls and normally **persist real incidents** in the cluster. Workloads
+remain read-only; explicit read-only assessments log proposals instead.
 
 ### Build and configure
 
@@ -118,6 +121,28 @@ assessment may produce no incidents. Watch mode is needed to establish
 continuous recovery for resolution. One configurable `--recovery-window`
 (default 5 minutes) covers cleared problem signals and confirmed anchor absence;
 AI still decides whether to resolve. See [Incident recovery](docs/operations.md#incident-recovery).
+
+AI proposals are also captured by default in `logs/ai-proposals.log`, separately
+from confirmed Kubernetes writes. Use `--proposal-log=false` to disable this in
+normal mode, or `--proposal-log-dir` to choose another directory. By default it
+follows `--ai-log-dir`. See [proposal capture](docs/operations.md#ai-proposal-capture).
+
+### Assess without Kubernetes writes
+
+For read-only Kubernetes access, skip `make incidents-setup` and select the
+explicit proposal-only mode:
+
+```bash
+make once NAMESPACE_WATCH=default OBSERVER_ID=local-default ARGS="--read-only --proposal-log-dir=logs"
+# Use make run with the same ARGS for continuous read-only assessment.
+```
+
+AI remains required and potentially billable. Validated fresh proposals, including
+diagnosis and recommendations, go to private rotating `logs/ai-proposals.log` files
+instead of Incident CRDs. No Incident API permissions or CRD are needed.
+These are diagnostics, not stored incidents: they do not appear in the dashboard,
+resume lifecycle tracking or resolve previously stored Incidents.
+See [read-only assessment details](docs/operations.md#read-only-ai-assessments).
 
 ### Review incidents
 

@@ -5,6 +5,11 @@ deterministic signals schedule serial AI work. Freshness and recovery checks
 gate reconciliation. Provenance-labelled text explains once/watch activity;
 CRDs alone store incidents. Transcript dispositions and safe failure details
 describe outcomes without changing the existing per-candidate retry schedule.
+Startup milestones distinguish loading stored Incidents from collection readiness.
+Read-only assessments bypass Incident APIs and log only validated fresh AI proposals;
+candidate scheduling remains process-local, without simulated Incident lifecycle.
+Normal mode optionally captures the same approved proposals before reconciliation,
+with throttled nonfatal capture failures and distinct confirmed persistence logs.
 Restart scope permits cluster PVs and attachments while retaining namespace boundaries for claims.
 Snapshot reads share freshness guards, including absence and recreated names.
 Periodic bounded Incident reads refresh candidates independently of AI work.
@@ -24,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +60,7 @@ type Runner struct {
 	Incidents  incident.Reconciler
 	Output     *output.Writer
 	Transcript *output.Transcript
+	Proposals  *output.ProposalLog
 	sequence   uint64
 }
 
@@ -102,18 +109,23 @@ func (r *Runner) Once(ctx context.Context) (code int) {
 			status, level = "incomplete", "error"
 		}
 
-		_ = r.Output.Log(level, "GO", "EXECUTION", fmt.Sprintf("Assessment %s: %d investigations, %d persisted incident changes", status, reviews, writes))
+		if r.Config.ReadOnly {
+			_ = r.Output.Log(level, "GO", "EXECUTION", fmt.Sprintf("Read-only assessment %s: %d investigations, %d logged proposed actions; no Incident records created or updated", status, reviews, writes))
+		} else {
+			_ = r.Output.Log(level, "GO", "EXECUTION", fmt.Sprintf("Assessment %s: %d investigations, %d persisted incident changes", status, reviews, writes))
+		}
+
 		if r.Output.Error() != nil {
 			code = 1
 		}
 	}()
 
-	_ = r.Output.Log("info", "GO", "COLLECT", "Loading incident index and collecting scoped Kubernetes evidence")
-
-	open, err := r.loadOpen(ctx)
+	open, err := r.loadStartupIncidents(ctx)
 	if err != nil {
 		return r.fail("INCIDENT", err)
 	}
+
+	_ = r.Output.Log("info", "GO", "COLLECT", "Collecting scoped Kubernetes evidence for the bounded assessment")
 
 	snapshot, err := r.Source.Collect(ctx, time.Now())
 	if err != nil {
@@ -137,7 +149,7 @@ func (r *Runner) Once(ctx context.Context) (code int) {
 			in.Recovery.WindowSeconds = r.Config.RecoveryWindow.Seconds()
 		}
 
-		in.Incidents, err = r.Incidents.Existing(ctx, in.Identities[in.Anchor])
+		in.Incidents, err = r.existingIncidents(ctx, in.Identities[in.Anchor])
 		if err != nil {
 			return r.fail("INCIDENT", err)
 		}
@@ -152,7 +164,8 @@ func (r *Runner) Once(ctx context.Context) (code int) {
 		}
 
 		r.decision(work, decision)
-		changes, err := r.Incidents.Apply(ctx, in, decision, func() bool {
+
+		current := func() bool {
 			fresh, err := r.Source.Collect(ctx, time.Now())
 			if err != nil {
 				return false
@@ -161,7 +174,34 @@ func (r *Runner) Once(ctx context.Context) (code int) {
 			current, err := incident.BuildInvestigationContexts(fresh, r.Config.Policy, open, r.Config.MaxObjects)
 
 			return err == nil && fresh.Continuity == in.Continuity && current[in.Anchor].Revision == in.Revision && toolsCurrent(in, fresh)
-		})
+		}
+		if r.Config.ReadOnly {
+			if !current() {
+				r.disposition(work, "Read-only proposal rejected: changed or incomplete evidence")
+				return r.fail("VALIDATE", errors.New("read-only AI proposal superseded by changed or incomplete evidence"))
+			}
+
+			if err := r.logProposal(work, in, decision); err != nil {
+				r.disposition(work, "Read-only proposal logging failed: "+err.Error())
+				return r.fail("PROPOSAL", err)
+			}
+
+			writes += len(decision.Actions)
+
+			continue
+		}
+
+		if r.Config.ProposalLog {
+			if current() {
+				if err := r.logProposal(work, in, decision); err != nil {
+					return r.fail("PROPOSAL", err)
+				}
+			} else if err := r.Output.Diagnostic("PROPOSAL", output.Scope(work)+" proposal capture skipped: changed or incomplete evidence; normal reconciliation checks still apply"); err != nil {
+				return 1
+			}
+		}
+
+		changes, err := r.Incidents.Apply(ctx, in, decision, current)
 		writes += len(changes)
 		r.persisted(work, changes)
 
@@ -199,10 +239,12 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 		}
 	}()
 
-	open, err := r.loadOpen(ctx)
+	open, err := r.loadStartupIncidents(ctx)
 	if err != nil {
 		return r.fail("INCIDENT", err)
 	}
+
+	_ = r.Output.Log("info", "GO", "COLLECT", "Starting continuous collection; waiting for initial cache synchronisation")
 
 	workers.Go(func() { r.Source.Run(ctx) })
 
@@ -226,6 +268,7 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 	lastCheckError := ""
 	lastSummary := time.Time{}
 	revisions := map[string]string{}
+	collectionReady := false
 
 	wake := make(chan struct{}, 1)
 	wake <- struct{}{}
@@ -307,6 +350,24 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 			r.decision(result.ctx, result.decision)
 
+			if r.Config.ReadOnly {
+				if err := r.logProposal(result.ctx, result.investigation, result.decision); err != nil {
+					r.disposition(result.ctx, "Read-only proposal logging failed: "+err.Error())
+					return r.fail("PROPOSAL", err)
+				}
+
+				c.lastReview, c.lastRevision, c.failures = time.Now(), result.investigation.Revision, 0
+				c.next = c.lastReview.Add(r.Config.ReviewInterval)
+
+				continue
+			}
+
+			if r.Config.ProposalLog {
+				if err := r.logProposal(result.ctx, result.investigation, result.decision); err != nil {
+					return r.fail("PROPOSAL", err)
+				}
+			}
+
 			application, err := r.Incidents.NewApplication(result.investigation, result.decision)
 			if err != nil {
 				r.disposition(result.ctx, "Rejected application: "+err.Error())
@@ -323,7 +384,7 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 
 		now := time.Now()
 
-		if !indexBusy && !now.Before(nextIndex) {
+		if !r.Config.ReadOnly && !indexBusy && !now.Before(nextIndex) {
 			indexBusy = true
 			nextIndex = now.Add(r.Config.CheckInterval)
 			revision := indexRevision
@@ -362,6 +423,11 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 			}
 
 			lastError = ""
+		}
+
+		if !collectionReady {
+			_ = r.Output.Log("info", "GO", "COLLECT", fmt.Sprintf("Initial collection ready: %d scoped objects; continuing watch freshness checks", len(snapshot.Objects)))
+			collectionReady = true
 		}
 
 		if !indexFresh.Load() {
@@ -513,6 +579,9 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 				}
 			} else if in.Revision == c.lastRevision {
 				in.Reason = "scheduled incident review"
+				if r.Config.ReadOnly {
+					in.Reason = "scheduled read-only assessment"
+				}
 			}
 
 			if in.Recovery != nil {
@@ -527,7 +596,7 @@ func (r *Runner) Watch(ctx context.Context) (code int) {
 				in.Recovery = &recovery
 			}
 
-			in.Incidents, err = r.Incidents.Existing(ctx, in.Identities[in.Anchor])
+			in.Incidents, err = r.existingIncidents(ctx, in.Identities[in.Anchor])
 			if err != nil {
 				r.disposition(ctx, "Incident lookup deferred before AI: "+err.Error())
 
@@ -668,7 +737,66 @@ func (r *Runner) decision(ctx context.Context, decision incident.Decision) {
 		_ = r.Output.Log("info", "AI", "DECISION", fmt.Sprintf("%s proposed %s [%s]: %s", output.Scope(ctx), action.Operation, action.Severity, action.Title))
 	}
 
-	_ = r.Output.Log("info", "GO", "VALIDATE", output.Scope(ctx)+" decision contract accepted; freshness and persistence checks still apply")
+	if r.Config.ReadOnly {
+		_ = r.Output.Log("info", "GO", "VALIDATE", output.Scope(ctx)+" decision contract accepted; freshness checks still apply; Incident persistence disabled")
+	} else {
+		_ = r.Output.Log("info", "GO", "VALIDATE", output.Scope(ctx)+" decision contract accepted; freshness and persistence checks still apply")
+	}
+}
+
+// logProposal writes approved decision details and model-visible resource names, never raw objects or UIDs.
+// Successful diagnostic output is explicitly distinguished from persisted Incident lifecycle.
+func (r *Runner) logProposal(ctx context.Context, in incident.InvestigationContext, decision incident.Decision) error {
+	if r.Proposals == nil {
+		return errors.New("AI proposal logging is not configured")
+	}
+
+	var text strings.Builder
+
+	mode := "CRD-backed; proposal capture does not confirm persistence"
+	if r.Config.ReadOnly {
+		mode = "read-only; no Incident API access or persistence"
+	}
+
+	fmt.Fprintf(&text, "Validated AI proposals; not confirmation of persisted Incident records.\nMode: %s\nObserver: %s\nModel: %s\nPrompt: %s\nOutcome: %s\nReason: %s\n",
+		mode, r.Config.ObserverID, r.Config.Model, incident.PromptVersion, decision.Outcome, decision.Reason)
+
+	for _, action := range decision.Actions {
+		fmt.Fprintf(&text, "\nProposed %s [%s] family=%s\nTitle: %s\nImpact: %s\nDiagnosis: %s\nExplanation: %s\nUncertainty: %s\nEvidence citations: %s\n",
+			action.Operation, action.Severity, action.Family, action.Title, action.Impact, action.Diagnosis,
+			action.Explanation, action.Uncertainty, strings.Join(action.EvidenceIDs, ", "))
+
+		if action.IncidentID != "" {
+			fmt.Fprintf(&text, "Referenced Incident: %s\n", action.IncidentID)
+		}
+
+		for _, ref := range action.ResourceRefs {
+			for _, resource := range in.Resources {
+				if resource.Ref == ref {
+					fmt.Fprintf(&text, "Affected resource: group=%q %s %s/%s\n", resource.APIGroup, resource.Kind, resource.Namespace, resource.Name)
+				}
+			}
+		}
+
+		for _, recommendation := range action.Recommendations {
+			fmt.Fprintf(&text, "Recommendation: %s\n", recommendation)
+		}
+	}
+
+	message := fmt.Sprintf("%s logged AI %s (%d proposed actions); this does not confirm CRD persistence", output.Scope(ctx), decision.Outcome, len(decision.Actions))
+	if r.Config.ReadOnly {
+		if err := r.Proposals.Write(output.Scope(ctx), text.String()); err != nil {
+			return err
+		}
+
+		message = fmt.Sprintf("%s logged read-only %s (%d proposed actions); no Incident records created or updated", output.Scope(ctx), decision.Outcome, len(decision.Actions))
+	} else if !r.Proposals.Capture(output.Scope(ctx), text.String()) {
+		return r.Output.Error()
+	}
+
+	r.disposition(ctx, message)
+
+	return r.Output.Log("info", "GO", "PROPOSAL", message)
 }
 
 // persisted reports only changes returned by reconciliation, never speculative model actions.
@@ -917,8 +1045,31 @@ func urgency(in incident.InvestigationContext) int {
 	return value
 }
 
+// loadStartupIncidents logs the initial index load without repeating startup messages on refreshes.
+func (r *Runner) loadStartupIncidents(ctx context.Context) ([]incident.Record, error) {
+	if r.Config.ReadOnly {
+		_ = r.Output.Log("info", "GO", "BOOT", "Read-only assessment: Incident API access disabled; no stored incidents or lifecycle state loaded")
+		return []incident.Record{}, nil
+	}
+
+	_ = r.Output.Log("info", "GO", "BOOT", "Loading open Incident records for observer "+r.Config.ObserverID)
+
+	open, err := r.loadOpen(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = r.Output.Log("info", "GO", "BOOT", fmt.Sprintf("Incident index ready: %d open records loaded; existing incidents retained for AI review", len(open)))
+
+	return open, nil
+}
+
 // loadOpen loads unresolved incidents and rejects stored resources outside the configured scope.
 func (r *Runner) loadOpen(ctx context.Context) ([]incident.Record, error) {
+	if r.Config.ReadOnly {
+		return []incident.Record{}, nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, r.Config.RequestTimeout)
 	defer cancel()
 
@@ -937,6 +1088,15 @@ func (r *Runner) loadOpen(ctx context.Context) ([]incident.Record, error) {
 	}
 
 	return open, nil
+}
+
+// existingIncidents skips Incident lookup in explicit read-only assessments rather than inventing stored state.
+func (r *Runner) existingIncidents(ctx context.Context, resource health.Resource) ([]incident.Existing, error) {
+	if r.Config.ReadOnly {
+		return []incident.Existing{}, nil
+	}
+
+	return r.Incidents.Existing(ctx, resource)
 }
 
 // recoveryToken detects semantic transitions, replacement, and batched changes in relevant resources.

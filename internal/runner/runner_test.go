@@ -4,6 +4,10 @@ Flow: Fake collection and AI sources feed once/watch execution and candidate
 updates, checking failure output, nonblocking collection, counter-noise
 suppression and recovery timing without live model or Kubernetes calls.
 Fixture index reads have explicit deadlines for the independent refresh worker.
+Startup failures must not claim collection or Incident-index readiness.
+Read-only fixtures omit Incident repositories entirely and check proposal/no-action
+coalescing, stale-result rejection and visible collection/model/logging failures.
+Normal proposal capture and its opt-out never replace CRD lifecycle; file failures warn without blocking writes.
 */
 package runner
 
@@ -13,6 +17,8 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +45,19 @@ type fakeAI struct {
 	fail    bool
 	started chan struct{}
 	release chan struct{}
+}
+
+type staleProposalAI struct {
+	source *fakeSource
+	ai     *writeAI
+}
+
+// Investigate returns a fixture proposal after changing its evidence so freshness must reject it.
+func (a staleProposalAI) Investigate(ctx context.Context, in incident.InvestigationContext) (incident.Decision, error) {
+	decision, err := a.ai.Investigate(ctx, in)
+	a.source.set(nil, nil)
+
+	return decision, err
 }
 
 // Run keeps the fixture source alive until the runner cancels collection.
@@ -183,6 +202,44 @@ func TestOnceNoActionAndFailuresNeverCreateIncidents(t *testing.T) {
 			if test.want == 0 && !strings.Contains(out.String(), "[AI][DECISION] inv=1 Pod apps/bad no_action") {
 				t.Fatal("AI no-action provenance missing")
 			}
+
+			if test.collection && strings.Contains(out.String(), "Collection ready:") {
+				t.Fatal("failed collection claimed readiness")
+			}
+		})
+	}
+}
+
+// TestStartupIndexFailureDoesNotClaimReadiness rejects out-of-scope fixture records
+// before once/watch collection or AI work and never logs a successful startup load.
+func TestStartupIndexFailureDoesNotClaimReadiness(t *testing.T) {
+	for _, mode := range []string{"once", "watch"} {
+		t.Run(mode, func(t *testing.T) {
+			resource := failedPod().Resource
+			resource.Namespace = "outside"
+			repo := &incident.Memory{Records: map[string]incident.Record{"existing": {
+				Value: incident.Incident{Identity: incident.Identity{Anchor: resource}, Lifecycle: incident.Lifecycle{State: "open"}},
+			}}}
+			ai := &fakeAI{}
+
+			var out, diag bytes.Buffer
+
+			r := Runner{Config: options(), Source: &fakeSource{objects: []health.Object{failedPod()}}, Analyzer: ai,
+				Incidents: incident.Reconciler{Repository: repo}, Output: &output.Writer{Out: &out, Err: &diag}}
+
+			run := r.Once
+			if mode == "watch" {
+				run = r.Watch
+			}
+
+			if run(t.Context()) != 1 || ai.calls.Load() != 0 || len(repo.Records) != 1 {
+				t.Fatal("failed startup continued AI work or changed stored incidents")
+			}
+
+			if strings.Contains(out.String(), "Incident index ready:") ||
+				strings.Contains(strings.ToLower(out.String()), "collection ready:") || diag.Len() == 0 {
+				t.Fatalf("startup failure milestones were misleading: %s %s", &out, &diag)
+			}
 		})
 	}
 }
@@ -318,5 +375,167 @@ func TestSchedulingBoundariesAndDayOfCounterChurn(t *testing.T) {
 
 	if !c.next.Equal(c.lastReview.Add(cfg.ReviewInterval)) {
 		t.Fatal("AI no-action during recovery caused an immediate re-review loop")
+	}
+}
+
+// TestNormalProposalCapturePreservesPersistence logs normal once/watch proposals
+// while retaining real fixture writes when capture is disabled or its files are unavailable.
+func TestNormalProposalCapturePreservesPersistence(t *testing.T) {
+	for _, mode := range []string{"once", "watch"} {
+		for _, capture := range []string{"enabled", "disabled", "unavailable", "no-action"} {
+			t.Run(mode+"/"+capture, func(t *testing.T) {
+				cfg := options()
+				cfg.ProposalLog = capture != "disabled"
+				source := &fakeSource{objects: []health.Object{failedPod()}}
+				repo := &recoveryRepository{memory: incident.Memory{}}
+
+				var ai Analyzer = &writeAI{}
+
+				if capture == "no-action" {
+					ai = &fakeAI{}
+				}
+
+				dir := t.TempDir()
+				if capture == "unavailable" {
+					dir = filepath.Join(dir, "blocked")
+					if err := os.WriteFile(dir, []byte("retain"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				var out, diag bytes.Buffer
+
+				sink := &output.Writer{Out: &out, Err: &diag}
+
+				r := Runner{Config: cfg, Source: source, Analyzer: ai, Output: sink,
+					Incidents: incident.Reconciler{Repository: repo, Observer: "fixture"}}
+				if cfg.ProposalLog {
+					r.Proposals = output.NewProposalLog(dir, sink)
+				}
+
+				ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+				defer cancel()
+
+				run := r.Once
+				if mode == "watch" {
+					run = r.Watch
+				}
+
+				if run(ctx) != 0 {
+					t.Fatalf("proposal capture changed normal execution outcome: %s", &diag)
+				}
+
+				wantRecords := 1
+				if capture == "no-action" {
+					wantRecords = 0
+				}
+
+				if len(repo.memory.Records) != wantRecords {
+					t.Fatal("proposal capture replaced or blocked normal incident persistence")
+				}
+
+				data, err := os.ReadFile(filepath.Join(dir, "ai-proposals.log"))
+				if capture == "enabled" || capture == "no-action" {
+					if err != nil || !bytes.Contains(data, []byte("Mode: CRD-backed; proposal capture does not confirm persistence")) ||
+						bytes.Contains(data, []byte("no Incident API access")) {
+						t.Fatal("normal proposals were omitted or falsely labelled read-only")
+					}
+				} else if err == nil {
+					t.Fatal("disabled or failed capture pretended to write proposals")
+				}
+
+				if capture == "unavailable" && !strings.Contains(diag.String(), "AI proposal capture incomplete") {
+					t.Fatal("normal proposal log failure was silent")
+				}
+			})
+		}
+	}
+}
+
+// TestReadOnlyAssessmentsBypassIncidentStorage exercises once/watch without any
+// repository, retaining no-action suppression and rejecting stale or failed diagnostic output.
+func TestReadOnlyAssessmentsBypassIncidentStorage(t *testing.T) {
+	for _, mode := range []string{"once", "watch"} {
+		for _, outcome := range []string{"proposal", "no-action", "stale", "log failure", "collection failure", "model failure"} {
+			t.Run(mode+"/"+outcome, func(t *testing.T) {
+				cfg := options()
+				cfg.ReadOnly = true
+				source := &fakeSource{objects: []health.Object{failedPod()}}
+				source.objects[0].UID = "host-uid-must-not-be-logged"
+				proposalAI := &writeAI{}
+				noActionAI := &fakeAI{fail: outcome == "model failure"}
+
+				var ai Analyzer = proposalAI
+
+				if outcome == "no-action" || outcome == "model failure" {
+					ai = noActionAI
+				} else if outcome == "stale" {
+					ai = staleProposalAI{source: source, ai: proposalAI}
+				}
+
+				if outcome == "collection failure" {
+					source.err = errors.New("fixture collection unavailable")
+				}
+
+				dir := t.TempDir()
+				if outcome == "log failure" {
+					dir = filepath.Join(dir, "blocked")
+					if err := os.WriteFile(dir, []byte("retain"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				var out, diag bytes.Buffer
+
+				log := output.NewProposalLog(dir, nil)
+				r := Runner{Config: cfg, Source: source, Analyzer: ai, Proposals: log,
+					Output: &output.Writer{Out: &out, Err: &diag}}
+
+				ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+				defer cancel()
+
+				run := r.Once
+				if mode == "watch" {
+					run = r.Watch
+				}
+
+				code := run(ctx)
+				success := outcome == "proposal" || outcome == "no-action"
+
+				wantCode := 1
+				if success || mode == "watch" && outcome != "log failure" {
+					wantCode = 0
+				}
+
+				if code != wantCode || proposalAI.calls.Load()+noActionAI.calls.Load() > 1 {
+					t.Fatalf("read-only failure or unchanged evidence retriggered AI: code=%d stderr=%s", code, &diag)
+				}
+
+				data, err := os.ReadFile(log.Path())
+				if success && (err != nil || len(data) == 0) || !success && err == nil {
+					t.Fatalf("read-only diagnostic outcome incorrect: success=%t file error=%v", success, err)
+				}
+
+				if outcome == "proposal" {
+					for _, detail := range []string{"Title: Workload failed", "Diagnosis: workload-failed",
+						"Recommendation: Inspect the workload.", `Affected resource: group="" Pod apps/bad`} {
+						if !bytes.Contains(data, []byte(detail)) {
+							t.Fatalf("proposal log omitted approved incident detail %q", detail)
+						}
+					}
+				} else if outcome == "no-action" && !bytes.Contains(data, []byte("Outcome: no_action")) {
+					t.Fatal("read-only no-action was not recorded as a model conclusion")
+				}
+
+				if bytes.Contains(data, []byte("host-uid-must-not-be-logged")) ||
+					strings.Contains(out.String(), "persisted raise") || strings.Contains(out.String(), "Incident index ready:") {
+					t.Fatal("read-only assessment exposed a UID or pretended to persist/load Incidents")
+				}
+
+				if !success && diag.Len() == 0 {
+					t.Fatal("failed read-only assessment was silent")
+				}
+			})
+		}
 	}
 }

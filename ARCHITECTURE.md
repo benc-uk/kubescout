@@ -27,6 +27,30 @@ deterministic-only incident publisher.
 activity, not an incident capture API. AI transcript files are diagnostic
 exchanges, not incident storage; the dashboard reads CRDs only.
 
+Validated fresh AI proposals are also captured by default in a separate private
+rotating log in either mode. Normal mode records proposals before reconciliation;
+they do not confirm successful CRD writes. `--proposal-log=false` disables this
+normal-mode diagnostic capture. File failures use the existing throttled capture
+warnings and do not prevent normal incident persistence.
+
+### Explicit read-only assessment
+
+`--read-only` retains the same scoped collection, AI/tool budgets, decision
+validation and stale-result rejection, but skips all Incident API access and
+reconciliation. Both Kubernetes authentication modes install a shared transport
+guard rejecting non-GET requests, including supplemental describe reads.
+
+The runner writes approved fresh **proposals**, including no-action, to a separate
+private rotating diagnostic log through [`ProposalLog`](internal/output/proposals.go).
+It never substitutes an in-memory Incident repository or marks proposals as
+persisted. There are no stored incidents to adopt, reopen, update or resolve;
+review/coalescing state is process-local and is not replayed from the log.
+Required proposal-log failures stop read-only execution explicitly. Ordinary AI transcript
+capture retains its existing optional, nonfatal behavior.
+
+This branch ends at proposal diagnostics, not the Incident CRD/dashboard steps
+below. The default flow and authoritative incident-storage contract are unchanged.
+
 The optional local [alert-test watcher](cmd/kubescout-alerts/main.go) is a separate
 consumer of newly created Incidents. It skips existing records, POSTs six analysis
 fields to an explicitly configured endpoint and never calls AI or writes

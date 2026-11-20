@@ -4,11 +4,13 @@ Flow: Validated configuration selects in-cluster credentials or a kubeconfig
 context without cross-mode fallback, returning a client and cluster identifier.
 The same private REST configuration supplies independent guarded describe reads.
 This bootstrap performs no AI assessment or workload operation.
+Read-only assessments reject non-GET Kubernetes requests at the shared transport boundary.
 */
 package kube
 
 import (
 	"errors"
+	"net/http"
 	"net/url"
 	"os"
 
@@ -22,6 +24,19 @@ import (
 type Connection struct {
 	dynamic.Interface
 	DescribeConfig *rest.Config
+}
+
+type readOnlyTransport struct {
+	base http.RoundTripper
+}
+
+// RoundTrip rejects Kubernetes writes before sending them while retaining GET/list/watch access.
+func (t readOnlyTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method != http.MethodGet {
+		return nil, errors.New("read-only Kubernetes access rejects non-GET requests")
+	}
+
+	return t.base.RoundTrip(request)
 }
 
 // Client builds a rate-limited dynamic client and cluster identifier for the selected auth mode,
@@ -69,6 +84,12 @@ func Client(c config.Config) (dynamic.Interface, string, error) {
 	// Long-lived watches have their own context deadline; lists use request-timeout.
 	rc.Timeout = 0
 	rc.QPS, rc.Burst = 10, 20
+
+	if c.ReadOnly {
+		rc.Wrap(func(base http.RoundTripper) http.RoundTripper {
+			return readOnlyTransport{base: base}
+		})
+	}
 
 	client, err := dynamic.NewForConfig(rc)
 	if err != nil {

@@ -3,6 +3,7 @@ Purpose: Test kubeconfig context selection and client initialization failures.
 Flow: Offline generated kubeconfigs and a local HTTP fixture verify explicit
 and current-context selection, request identity, sanitized errors and rejection
 without auth fallback; no live cluster or model credentials are used.
+Read-only dynamic and describe clients reject write attempts before reaching the HTTP fixture.
 */
 package kube
 
@@ -13,11 +14,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/benc-uk/kubescout/internal/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -125,5 +130,77 @@ func TestClientContextFailures(t *testing.T) {
 		if strings.Contains(err.Error(), "private-fixture") {
 			t.Fatal("authentication error exposed kubeconfig contents")
 		}
+	}
+}
+
+// TestReadOnlyClientRejectsWrites preserves actual GET access and blocks dynamic
+// writes and supplemental describe transport writes before any request reaches the fixture.
+func TestReadOnlyClientRejectsWrites(t *testing.T) {
+	var requests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+
+		if r.Method != http.MethodGet {
+			t.Errorf("read-only client sent %s", r.Method)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","kind":"NodeList","items":[]}`)
+	}))
+	defer server.Close()
+
+	client, _, err := Client(config.Config{Auth: "kubeconfig", ReadOnly: true,
+		Kubeconfig: clientKubeconfig(t, server.URL, "selected")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nodes := client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "nodes"})
+	if _, err := nodes.List(t.Context(), metav1.ListOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Node", "metadata": map[string]any{"name": "fixture"},
+	}}
+	if _, err := nodes.Create(t.Context(), object, metav1.CreateOptions{}); err == nil {
+		t.Fatal("read-only client accepted create")
+	}
+
+	if _, err := nodes.Update(t.Context(), object, metav1.UpdateOptions{}); err == nil {
+		t.Fatal("read-only client accepted update")
+	}
+
+	if _, err := nodes.Patch(t.Context(), "fixture", types.MergePatchType, []byte(`{}`), metav1.PatchOptions{}); err == nil {
+		t.Fatal("read-only client accepted patch")
+	}
+
+	if err := nodes.Delete(t.Context(), "fixture", metav1.DeleteOptions{}); err == nil {
+		t.Fatal("read-only client accepted delete")
+	}
+
+	connection, ok := client.(*Connection)
+	if !ok {
+		t.Fatal("missing shared Kubernetes connection")
+	}
+
+	describe, err := rest.HTTPClientFor(connection.DescribeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/api/v1/nodes", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := describe.Do(request)
+	if response != nil {
+		response.Body.Close()
+	}
+
+	if err == nil || requests.Load() != 1 {
+		t.Fatal("read-only boundary failed or a write reached Kubernetes")
 	}
 }

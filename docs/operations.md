@@ -46,6 +46,10 @@ Authentication is explicit and never falls back between modes:
 | `kubeconfig` | Uses current context; persists incidents | Binds `127.0.0.1:8000`; reads incidents and permits human triage |
 | `in-cluster` | Uses its ServiceAccount; persists incidents | Binds `:8000`; uses its separate ServiceAccount |
 
+The agent persistence entries describe normal execution. Explicit `--read-only`
+assessments in either mode log diagnostic proposals instead, with no Incident API
+access; see [read-only assessments](#read-only-ai-assessments).
+
 Direct executable runs support `--context` and `--kubeconfig` in kubeconfig mode,
 otherwise standard `KUBECONFIG`/default-file loading applies. In-cluster mode
 rejects kubeconfig flags. Local Make run/deploy/dashboard targets use the current
@@ -139,6 +143,51 @@ unique to this cluster and observation scope and retain it across restarts.
 Changing it creates separate incident identities; it does not adopt old records.
 Use a new ID when changing scope, and do not run competing replicas with one ID.
 Out-of-scope stored incidents are not treated as recovered.
+
+### Read-only AI assessments
+
+Use `--read-only` when Kubernetes credentials must have read access only.
+This is an explicit AI assessment mode, not a deterministic observer or simulated
+Incident store. The default remains CRD-backed incident tracking.
+
+```bash
+make once NAMESPACE_WATCH=apps OBSERVER_ID=local-apps ARGS="--read-only --proposal-log-dir=logs"
+make run NAMESPACE_WATCH=apps OBSERVER_ID=local-apps ARGS="--read-only --proposal-log-dir=logs"
+```
+
+The collector and approved investigation tools retain their usual scope,
+freshness checks, redaction and AI budgets. The shared Kubernetes transport rejects
+non-GET requests before sending them. Only workload `get`/`list`/`watch` access is
+needed, including the existing cluster-scoped Node/PV/VolumeAttachment reads and
+any explicitly configured extra resources. Incident reads, writes and index
+refreshes are skipped entirely: no Incident CRD or Incident RBAC is required.
+Do not run `make incidents-setup` merely for this mode.
+
+Proposal capture is required in read-only mode; `--proposal-log=false` is rejected.
+Its directory follows `--ai-log-dir` (normally `logs`) unless explicitly selected
+with `--proposal-log-dir`. Fresh validated AI proposals include
+title, severity, impact, diagnosis, explanation, affected resource names,
+citations, recommendations and uncertainty in `ai-proposals.log`, rotating through
+`.1` to `.9` at 10 MiB per file (100 MiB maximum). AI no-action is recorded too;
+collection/model failures and stale conclusions are not logged as accepted proposals.
+The files use the existing private, confined rotation mechanism and credential
+redaction, without dumping UIDs, raw objects or provider errors.
+
+These logs are **diagnostics, not Incident records or an export/replay format**.
+No simulated lifecycle is maintained. Proposals do not appear in the dashboard,
+adopt existing Incidents, or update/reopen/resolve anything previously stored.
+Process-local coalescing and review scheduling suppress unchanged activity but
+reset on restart; repeated proposals across processes are possible.
+An unavailable proposal destination is an explicit bootstrap/assessment failure,
+and a proposal-write failure stops read-only watch rather than claiming success.
+
+AI transcripts remain independently enabled unless `--ai-log=false` is selected.
+Their retention plus proposal retention can total 200 MiB. For containers, select
+a writable log directory and account for shared storage limits;
+the checked-in 128 MiB transcript volume cannot hold both retention maxima.
+The checked-in Deployment/RBAC still runs normal CRD-backed mode. To deploy
+read-only assessment, explicitly set its flag/directory and use appropriately
+restricted credentials; no deployment or permission changes happen automatically.
 
 ### Extra-resource policies
 
@@ -718,6 +767,60 @@ is the default; `debug` adds collection/check details, and `warn`/`error` reduce
 verbosity. Repeated unchanged evidence is coalesced into at most one summary per
 minute. `--log-color=always` is the default even for redirected output; use
 `--log-color=never` for plain text.
+
+### Startup diagnostics
+
+At `info` level, startup reports the effective operation mode and observer ID,
+Kubernetes authentication/context and workload scope, console/transcript settings,
+collection limits, watch/review timing and evidence grace periods. It lists the
+private built-in checks, any loaded extra-resource policy IDs/API scopes and
+field/rule counts, the model endpoint/deployment, embedded prompt version and AI
+budgets. Credentials, kubeconfig contents, raw objects and CEL expressions are
+not dumped.
+
+`[GO][BOOT]` milestones distinguish credential loading, client construction and
+the initial open-Incident index load. `[GO][COLLECT]` lists the configured resource
+inventory, announces collection/cache synchronisation and reports readiness.
+The initial Incident count and watch readiness appear once, not on every refresh.
+A failed stage does not log its successful completion.
+
+“Responses API configured” does **not** mean model connectivity has been tested;
+startup makes no model probe. Likewise, constructing a Kubernetes client does not
+verify API permissions: collection and Incident reads check those next.
+Readiness describes observation, not cluster health or an AI conclusion.
+`warn`/`error` suppress these informational startup messages; `debug` also shows
+the existing per-resource list/watch and check details.
+
+### AI proposal capture
+
+`ai-proposals.log` capture is **on by default in normal and read-only modes**,
+independently of console verbosity and the full AI transcript.
+
+| Setting | Behavior |
+|---|---|
+| `--proposal-log=false` | Disables proposal capture in normal mode; rejected in read-only mode |
+| `--proposal-log-dir=PATH` | Overrides the default shared `--ai-log-dir` directory |
+| Retention | `ai-proposals.log` plus `.1` through `.9`, at most 10 MiB each / 100 MiB total |
+
+Entries include execution mode and approved AI actions, affected resource names,
+diagnosis, recommendations and citations. Update/resolve proposals name the
+referenced Incident. `Proposed raise` means AI proposed an incident; it is **not**
+confirmation that an Incident was created. Normal mode records fresh validated
+proposals before reconciliation, with confirmed writes reported separately in
+`[GO][INCIDENT]` activity and the authoritative Kubernetes records.
+
+In normal mode, proposal-file failures warn and retry at most once per 30 seconds;
+they do not prevent incident persistence. Capture recovery marks the gap. In
+read-only mode, the proposal file is required output and failures stop assessment.
+Neither mode treats the file as Incident storage, a complete audit archive, or
+replayable state.
+
+Both log families append across restarts, retain private file permissions and
+exclude known credential values. Their combined retention may reach 200 MiB,
+which exceeds the checked-in 128 MiB transcript volume. The default proposal
+directory follows the configured transcript directory so the existing container
+mount is reused; select which capture to disable or account for shared capacity.
+No volume size, mount or deployment permission changes are made automatically.
 
 ### Transcript capture
 

@@ -54,7 +54,11 @@ guide aligned; do not hide findings with blanket exclusions.
 
 Build `build/bin/kubescout` with `make build`. For actual execution, follow
 [local operation](operations.md#local-operation): running the agent uses AI and
-persists accepted Incidents, including when running from a developer machine.
+normally persists accepted Incidents, including from a developer machine.
+Explicit [read-only assessments](operations.md#read-only-ai-assessments) keep AI
+enabled but write diagnostic proposals without Incident API access or simulated state.
+Both modes capture [AI proposals](operations.md#ai-proposal-capture) by default;
+normal mode can disable this with `--proposal-log=false` without changing CRD persistence.
 
 The AI instructions are embedded from
 [instructions.txt](../internal/analysis/instructions.txt); rebuild the binary/image

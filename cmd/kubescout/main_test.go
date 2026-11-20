@@ -3,6 +3,10 @@ Purpose: Check agent CLI output, configuration failures and local Make contracts
 Flow: Offline HTTP fixtures, injected clients, command stubs and dry runs verify
 readable execution summaries, colour controls, workload/PV/attachment scope, cluster-scoped incidents, current-context
 selection, deployment preflights and lint command failures without live services.
+Startup safety fixtures check credential redaction, control escaping and
+bootstrap failures without making service connectivity claims.
+Read-only CLI fixtures require no Incident API/CRD and retain AI configuration in both auth modes.
+Normal proposal capture is default-on, inherits writable log paths, and supports an explicit opt-out.
 Incident setup installs only the namespace and CRD, without deploying or calling AI.
 Isolated command stubs verify agent and live-test targets need configuration, not confirmation flags.
 */
@@ -23,6 +27,7 @@ import (
 
 	"github.com/benc-uk/kubescout/internal/config"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -36,6 +41,7 @@ func cliEnvironment(t *testing.T) {
 	t.Setenv("AZURE_AI_MODEL_DEPLOYMENT_NAME", "fixture")
 	t.Setenv("NAMESPACE_WATCH", "")
 	t.Setenv("NAMESPACE_IGNORE", "")
+	t.Setenv("EXTRA_RESOURCES_FILE", "")
 }
 
 // TestCLIHealthyScopeMakesNoModelOrIncidentWrites uses a local API fixture to check scoped reads
@@ -84,6 +90,64 @@ func TestCLIHealthyScopeMakesNoModelOrIncidentWrites(t *testing.T) {
 
 	if strings.Contains(errOut.String(), "would create") {
 		t.Fatal("healthy baseline published an incident")
+	}
+}
+
+// TestCLIStartupLogsKeepCredentialsPrivate exercises new model diagnostics with
+// sentinel credentials and control text, without contacting Kubernetes or the model.
+func TestCLIStartupLogsKeepCredentialsPrivate(t *testing.T) {
+	cliEnvironment(t)
+
+	key := "startup-key-do-not-print"
+	t.Setenv("AZURE_OPENAI_API_KEY", key)
+	t.Setenv("AZURE_AI_MODEL_DEPLOYMENT_NAME", "fixture-model-"+key+"\nforged-line")
+
+	var out, diag bytes.Buffer
+
+	code := runWithClient(t.Context(), []string{"--auth-mode=in-cluster", "--observer-id=startup", "--ai-log=false", "--log-color=never"}, &out, &diag,
+		func(config.Config) (dynamic.Interface, string, error) {
+			return nil, "", errors.New("fixture bootstrap failure " + key)
+		})
+	if code != 1 || out.Len() == 0 || diag.Len() == 0 {
+		t.Fatal("fixture did not exercise startup diagnostics and bootstrap failure")
+	}
+
+	if strings.Contains(out.String()+diag.String(), key) || strings.Contains(out.String(), "\nforged-line") {
+		t.Fatal("startup diagnostics leaked a credential or forged a log line")
+	}
+
+	if !strings.Contains(out.String(), "fixture-model-[redacted credential]") {
+		t.Fatal("model configuration was omitted instead of safely redacted")
+	}
+
+	if strings.Contains(out.String(), "Kubernetes client ready:") || strings.Contains(out.String(), "[AI]") {
+		t.Fatal("failed bootstrap claimed client readiness or an AI response")
+	}
+}
+
+// TestCLIStartupConsoleFailureStopsBootstrap reports a failed startup stream explicitly
+// before constructing a Kubernetes client or starting the AI loop.
+func TestCLIStartupConsoleFailureStopsBootstrap(t *testing.T) {
+	cliEnvironment(t)
+
+	out, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+
+	var diag bytes.Buffer
+
+	called := false
+
+	code := runWithClient(t.Context(), []string{"--auth-mode=in-cluster", "--observer-id=startup", "--ai-log=false"}, out, &diag,
+		func(config.Config) (dynamic.Interface, string, error) {
+			called = true
+
+			return nil, "", errors.New("must not construct client")
+		})
+	if code != 1 || called || !strings.Contains(diag.String(), "[GO][CONSOLE] console output failed") {
+		t.Fatalf("console failure did not stop bootstrap explicitly: code=%d called=%t stderr=%s", code, called, &diag)
 	}
 }
 
@@ -453,5 +517,89 @@ func TestMakeLocalRunUsesCurrentContext(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestCLIProposalCaptureOptOut exercises normal startup capture and its disable flag
+// using an injected bootstrap failure instead of accessing Kubernetes or AI.
+func TestCLIProposalCaptureOptOut(t *testing.T) {
+	cliEnvironment(t)
+
+	for _, enabled := range []bool{true, false} {
+		dir := t.TempDir()
+
+		args := []string{"--auth-mode=in-cluster", "--observer-id=fixture", "--ai-log=false", "--ai-log-dir=" + dir}
+		if !enabled {
+			args = append(args, "--proposal-log=false")
+		}
+
+		var out, diag bytes.Buffer
+
+		code := runWithClient(t.Context(), args, &out, &diag,
+			func(config.Config) (dynamic.Interface, string, error) {
+				return nil, "", errors.New("fixture bootstrap failure")
+			})
+		if code != 1 {
+			t.Fatal("fixture failed to exercise startup")
+		}
+
+		_, err := os.Stat(filepath.Join(dir, "ai-proposals.log"))
+		if enabled && err != nil || !enabled && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("proposal capture ignored its default directory or explicit opt-out")
+		}
+	}
+}
+
+// TestCLIReadOnlyNeedsNoIncidentAPI checks the configured read-only path against
+// workload-only HTTP fixtures, without a CRD, Incident permissions or live model calls.
+func TestCLIReadOnlyNeedsNoIncidentAPI(t *testing.T) {
+	cliEnvironment(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || strings.Contains(r.URL.Path, "/incidents") {
+			t.Errorf("read-only assessment attempted Incident access or a Kubernetes write: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusForbidden)
+
+			return
+		}
+
+		items := []any{}
+		if strings.HasSuffix(r.URL.Path, "/nodes") {
+			items = append(items, map[string]any{"apiVersion": "v1", "kind": "Node",
+				"metadata": map[string]any{"name": "node", "uid": "id", "resourceVersion": "1"},
+				"status":   map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "List",
+			"metadata": map[string]any{"resourceVersion": "1"}, "items": items})
+	}))
+	defer server.Close()
+
+	for _, auth := range []string{"kubeconfig", "in-cluster"} {
+		t.Run(auth, func(t *testing.T) {
+			dir := t.TempDir()
+
+			var out, diag bytes.Buffer
+
+			code := runWithClient(t.Context(), []string{"--once", "--read-only", "--proposal-log-dir=" + dir,
+				"--ai-log=false", "--auth-mode=" + auth, "--observer-id=fixture"}, &out, &diag,
+				func(c config.Config) (dynamic.Interface, string, error) {
+					if !c.ReadOnly {
+						t.Error("read-only flag did not reach Kubernetes setup")
+					}
+
+					client, err := dynamic.NewForConfig(&rest.Config{Host: server.URL, QPS: 1000, Burst: 1000})
+
+					return client, "fixture", err
+				})
+			if code != 0 || diag.Len() != 0 || strings.Contains(out.String(), "[AI]") {
+				t.Fatalf("healthy read-only assessment failed or contacted a model: code=%d stdout=%s stderr=%s", code, &out, &diag)
+			}
+
+			if _, err := os.Stat(filepath.Join(dir, "ai-proposals.log")); err != nil {
+				t.Fatal("read-only proposal logging was not initialized")
+			}
+		})
 	}
 }

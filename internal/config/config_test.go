@@ -4,6 +4,8 @@ Flow: Offline argument tables, synthetic environment values and filesystem fixtu
 check namespace filters, authentication, logging/colour controls, configurable tool budgets, endpoint and model requirements.
 Removed runtime modes and incident-storage namespace options are rejected without contacting Kubernetes or a model.
 Unified recovery defaults and watch lifetimes reject unreachable or invalid review windows.
+Proposal settings cover default-on capture, opt-out and inherited directories;
+read-only assessment retains required AI configuration and diagnostic output.
 */
 package config
 
@@ -60,16 +62,26 @@ func TestLoggingConfiguration(t *testing.T) {
 	base := []string{"--auth-mode=kubeconfig", "--observer-id=test"}
 
 	c, err := Parse(base, testEnv, io.Discard)
-	if err != nil || !c.AILog || c.AILogDir != "logs" || c.LogLevel != "info" || c.LogColor != "always" {
+	if err != nil || !c.AILog || c.AILogDir != "logs" || !c.ProposalLog || c.ProposalLogDir != "logs" || c.LogLevel != "info" || c.LogColor != "always" {
 		t.Fatal("incorrect logging defaults")
 	}
 
-	c, err = Parse(append(slices.Clone(base), "--ai-log=false", "--ai-log-dir=", "--log-level=debug", "--log-color=never"), testEnv, io.Discard)
-	if err != nil || c.AILog || c.LogLevel != "debug" || c.LogColor != "never" {
+	c, err = Parse(append(slices.Clone(base), "--ai-log=false", "--proposal-log=false", "--ai-log-dir=", "--log-level=debug", "--log-color=never"), testEnv, io.Discard)
+	if err != nil || c.AILog || c.ProposalLog || c.LogLevel != "debug" || c.LogColor != "never" {
 		t.Fatal("explicit capture/colour disable rejected")
 	}
 
-	for _, flag := range []string{"--ai-log-dir=", "--log-level=json", "--log-color=auto", "--log-color=", "--output-file=old.json", "--report-file=old.json"} {
+	c, err = Parse(append(slices.Clone(base), "--ai-log-dir=private-ai"), testEnv, io.Discard)
+	if err != nil || c.ProposalLogDir != "private-ai" {
+		t.Fatal("proposal capture did not inherit the configured writable transcript directory")
+	}
+
+	c, err = Parse(append(slices.Clone(base), "--ai-log-dir=private-ai", "--proposal-log-dir=private-proposals"), testEnv, io.Discard)
+	if err != nil || c.ProposalLogDir != "private-proposals" {
+		t.Fatal("explicit proposal directory was ignored")
+	}
+
+	for _, flag := range []string{"--ai-log-dir=", "--proposal-log-dir=", "--log-level=json", "--log-color=auto", "--log-color=", "--output-file=old.json", "--report-file=old.json"} {
 		if _, err := Parse(append(slices.Clone(base), flag), testEnv, io.Discard); err == nil {
 			t.Fatalf("invalid/obsolete flag accepted: %s", flag)
 		}
@@ -296,5 +308,34 @@ func TestDotEnvOnlyRepositoryRoot(t *testing.T) {
 
 	if err := LoadDotEnv(root, root); err == nil {
 		t.Fatal("invalid dotenv silently ignored")
+	}
+}
+
+// TestReadOnlyConfiguration requires a usable proposal directory and AI settings
+// while retaining CRD-backed execution unless read-only assessment is explicitly selected.
+func TestReadOnlyConfiguration(t *testing.T) {
+	base := []string{"--auth-mode=kubeconfig", "--observer-id=test"}
+
+	for _, test := range []struct {
+		args     []string
+		readOnly bool
+		invalid  bool
+	}{
+		{nil, false, false},
+		{[]string{"--read-only"}, true, false},
+		{[]string{"--read-only=false"}, false, false},
+		{[]string{"--read-only", "--proposal-log-dir=private-proposals"}, true, false},
+		{[]string{"--read-only", "--proposal-log-dir="}, true, true},
+		{[]string{"--read-only", "--proposal-log-dir= "}, true, true},
+		{[]string{"--read-only", "--proposal-log=false"}, true, true},
+	} {
+		c, err := Parse(append(slices.Clone(base), test.args...), testEnv, io.Discard)
+		if (err != nil) != test.invalid || err == nil && c.ReadOnly != test.readOnly {
+			t.Fatalf("read-only settings were ignored or accepted invalid input: args=%v err=%v", test.args, err)
+		}
+	}
+
+	if _, err := Parse(append(slices.Clone(base), "--read-only"), func(string) string { return "" }, io.Discard); err == nil {
+		t.Fatal("read-only assessment bypassed required AI configuration")
 	}
 }
