@@ -62,9 +62,9 @@
   <text x="381" y="189" class="eyebrow" fill="#a2d9d3">02 / INVESTIGATE</text>
   <text x="324" y="238" class="heading" style="fill:#fff">AI investigation</text>
   <text x="324" y="269" class="body" style="fill:#c3d8df">Connect related signals</text>
-  <text x="324" y="294" class="body" style="fill:#c3d8df">Gather supporting evidence</text>
+  <text x="324" y="294" class="body" style="fill:#c3d8df">Gather more evidence</text>
   <path d="M324 310H528" stroke="#34535e"/>
-  <text x="324" y="336" class="detail" style="fill:#a2d9d3">Azure OpenAI + Agent Framework</text>
+  <text x="324" y="336" class="detail" style="fill:#a2d9d3">Azure OpenAI</text>
 
   <rect x="572" y="145" width="244" height="212" rx="18" fill="#fff" stroke="#dce6eb" filter="url(#shadow)"/>
   <rect x="592" y="165" width="40" height="40" rx="12" fill="#edf3f2"/>
@@ -87,7 +87,7 @@
   </g>
   <text x="917" y="189" class="eyebrow" fill="#637786">04 / RECORD</text>
   <text x="860" y="238" class="heading">Incident resources</text>
-  <text x="860" y="269" class="body">Cluster-scoped Incident CRDs</text>
+  <text x="860" y="269" class="body">Cluster-scoped CRDs</text>
   <text x="860" y="294" class="body">Diagnosis + next steps</text>
   <path d="M860 310H1064" stroke="#e7edf1"/>
   <text x="860" y="336" class="detail">Only AI-approved changes</text>
@@ -102,7 +102,7 @@
 
   <rect x="304" y="419" width="244" height="112" rx="16" fill="#edf5f4" stroke="#ccdfdc"/>
   <text x="324" y="450" font-size="18" font-weight="700" fill="#246a64">Scoped read-only tools</text>
-  <text x="324" y="479" class="body">Inspect approved resources</text>
+  <text x="324" y="479" class="body">Approved resource reads</text>
   <text x="324" y="505" class="detail">Bounded, redacted evidence</text>
 
   <rect x="572" y="419" width="244" height="112" rx="16" fill="#f6f8fa" stroke="#dce6eb" stroke-dasharray="4 4"/>
