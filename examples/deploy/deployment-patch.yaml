@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubescout
+  namespace: kubescout
+spec:
+  template:
+    spec:
+      containers:
+        - name: agent
+          # Argument lists replace the base list; retain its other runtime settings.
+          args:
+            - --auth-mode=in-cluster
+            - --observer-id=example-all-with-certificates
+            - --model-calls-per-hour=300
+            - --ai-log-dir=/var/log/kubescout/ai
+            - --extra-resources=/etc/kubescout/policies/extra-resources.yaml
+          volumeMounts:
+            - name: extra-resource-policies
+              mountPath: /etc/kubescout/policies
+              readOnly: true
+      volumes:
+        - name: extra-resource-policies
+          configMap:
+            name: kubescout-extra-resources

@@ -58,9 +58,9 @@ retained for correlation. The table lists additional facts from the
 
 ## Configured extra resources
 
-Use `--extra-resources=examples/extra-resources.yaml`, or set
+Use `--extra-resources=examples/cert-manager.yaml`, or set
 `EXTRA_RESOURCES_FILE`, to add explicitly selected API resources and custom
-resources. The [cert-manager example](../examples/extra-resources.yaml) defines
+resources. The [cert-manager example](../examples/cert-manager.yaml) defines
 Certificate readiness after five minutes, expiry within seven days and expiry
 at/past the reported deadline. It is **not enabled by default**.
 Adding other supported status-based policies requires YAML changes, not Go changes.

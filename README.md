@@ -21,7 +21,7 @@ It investigates and recommends; it does not remediate workloads.
 - **Configure checks for additional APIs and CRDs:** select status facts and write
   bounded CEL wellness rules in YAML, without resource-specific Go changes. See
   [extra-resource configuration](docs/resources-and-checks.md#configured-extra-resources)
-  and the [cert-manager example](examples/extra-resources.yaml).
+  and the [cert-manager example](examples/cert-manager.yaml).
 - **Connect related evidence:** group replica failures under their controller and
   inspect relevant resources and Warning events instead of treating every signal
   as a separate incident.
@@ -37,19 +37,7 @@ It investigates and recommends; it does not remediate workloads.
 
 ## How it works
 
-```text
-Kubernetes resources and Warning events
-                  |
-       Collection and evidence checks
-                  |
-       AI investigation <--> Scoped read-only tools
-                  |
-         Validated AI decision
-                  |
-       Kubernetes Incident resources
-                  |
-         Optional web dashboard
-```
+![How KubeScout works: cluster evidence feeds AI investigation with scoped read-only tools; validated AI decisions may change Incident resources, which the optional dashboard displays. No action is also valid.](docs/how-it-works.svg)
 
 Evidence checks identify cases worth investigating; AI decides whether they
 warrant an incident. **No action is a valid conclusion**, even when a check finds
@@ -111,7 +99,7 @@ watching the `default` namespace:
 ```bash
 kubectl config current-context
 make incidents-setup
-make run NAMESPACE_WATCH=default OBSERVER_ID=local-default ALLOW_MODEL=yes
+make run NAMESPACE_WATCH=default OBSERVER_ID=local-default
 ```
 
 Choose a stable observer ID for this cluster and observation scope; keep it
@@ -122,10 +110,10 @@ all namespaces; nodes are always observed.
 Watch mode runs until stopped with Ctrl+C. For one bounded assessment instead:
 
 ```bash
-make once NAMESPACE_WATCH=default OBSERVER_ID=local-default ALLOW_MODEL=yes
+make once NAMESPACE_WATCH=default OBSERVER_ID=local-default
 ```
 
-`ALLOW_MODEL=yes` explicitly authorizes model use through Make. A completed
+Running the agent uses AI; model configuration is required. A completed
 assessment may produce no incidents. Watch mode is needed to establish
 continuous recovery for resolution. One configurable `--recovery-window`
 (default 5 minutes) covers cleared problem signals and confirmed anchor absence;
@@ -169,18 +157,24 @@ Before deploying:
    [the Deployment](deploy/deployment.yaml), and the corresponding [RBAC](deploy/rbac.yaml).
 4. Prepare the model settings in `.env`, using plain `KEY=value` lines.
 
-Then provision the model Secret and explicitly start the agent:
+Then provision the model Secret and deploy the agent:
 
 ```bash
 make model-secret
-make deploy ALLOW_MODEL=yes
+make deploy
 kubectl get incidents
 kubectl -n kubescout logs deployment/kubescout -c agent
 ```
 
-The Secret-creation command does not overwrite an existing Secret. The checked-in
-agent Deployment has zero replicas; `make deploy` activates one replica and
-authorizes ongoing model calls.
+The Secret-creation command does not overwrite an existing Secret. The agent
+Deployment starts one replica when applied; model calls are part of normal operation.
+
+For Certificate checks loaded from a read-only ConfigMap, use the opt-in
+[extra-resource Kustomize example](examples/deploy/kustomization.yaml) and its
+[deployment instructions](docs/operations.md#configmap-backed-kubernetes-example).
+It reuses the single-replica agent Deployment and adds Certificate read RBAC.
+Use the example's commands instead of
+`make deploy`, which applies only the base manifests.
 
 For the optional dashboard, configure its image and pull policy first: it
 currently defaults to a locally imported development image, not a registry image.

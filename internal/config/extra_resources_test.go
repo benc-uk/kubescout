@@ -16,7 +16,7 @@ import (
 // TestExtraResourceConfiguration checks startup compilation, environment defaults and explicit disable/override.
 func TestExtraResourceConfiguration(t *testing.T) {
 	base := []string{"--auth-mode=kubeconfig", "--observer-id=test"}
-	path := "../../examples/extra-resources.yaml"
+	path := "../../examples/cert-manager.yaml"
 	env := func(key string) string {
 		if key == "EXTRA_RESOURCES_FILE" {
 			return path

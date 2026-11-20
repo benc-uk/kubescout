@@ -9,8 +9,6 @@ NAMESPACE_WATCH ?=
 NAMESPACE_IGNORE ?=
 ARGS ?=
 OBSERVER_ID ?= local-dev-$(shell whoami)
-# Confirmation for model-calling Make targets, not a Go runtime setting.
-ALLOW_MODEL ?=
 CONTAINER_ENGINE ?= podman
 IMAGE ?= localhost/kubescout:dev
 DASHBOARD_IMAGE ?= localhost/kubescout-dashboard:dev
@@ -28,7 +26,7 @@ KUBECTL ?= kubectl
 help: ## 📖 Show available targets
 	@awk 'BEGIN {FS = ":.*## "; print "\n☸ KubeScout · Your AI Kubernetes investigator.\n"} \
 		/^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2} \
-		END {print "\nExample (real AI calls and persisted Incidents):\n  make incidents-setup\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps ALLOW_MODEL=yes\n\nLocal defaults: current kubeconfig context, all workload namespaces, OBSERVER_ID=local-dev-<username>\nLocal credentials need get/list/create/patch access to cluster-scoped Incidents.\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nALLOW_MODEL=yes is a Make confirmation gate; model credentials are still required.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md for getting started; docs/operations.md for configuration and deployment;\ndocs/development.md for the Make reference, prerequisites and tests.\n"}' $(MAKEFILE_LIST)
+		END {print "\nExample (real AI calls and persisted Incidents):\n  make incidents-setup\n  make once NAMESPACE_WATCH=default,apps OBSERVER_ID=local-default-apps\n\nLocal defaults: current kubeconfig context, all workload namespaces, OBSERVER_ID=local-dev-<username>\nLocal credentials need get/list/create/patch access to cluster-scoped Incidents.\nNAMESPACE_WATCH and NAMESPACE_IGNORE are mutually exclusive comma-separated lists.\nChoose a stable OBSERVER_ID unique to the cluster and watched scope.\nRunning or deploying the agent uses AI and requires model credentials.\nARGS adds runtime flags to run/once only. deploy uses the checked-in manifests.\nRoutine tests stay offline. Live tests require CONTEXT and create/delete owned cluster fixtures.\nSee README.md for getting started; docs/operations.md for configuration and deployment;\ndocs/development.md for the Make reference, prerequisites and tests.\n"}' $(MAKEFILE_LIST)
 
 setup: ## 📦 Download pinned Go dependencies and install the linter
 	$(GO) mod download
@@ -45,11 +43,11 @@ lint: ## 🧹 Lint all Go code and integration fixtures without running them
 build: ## 🔨 Build the Go binary
 	@$(GO) build -trimpath -o build/bin/kubescout ./cmd/kubescout
 
-run: ## 👀 Watch with AI and persist Incidents locally (ALLOW_MODEL=yes)
-once: ## 🚀 Run one AI assessment and persist Incidents locally (ALLOW_MODEL=yes)
+run: ## 👀 Watch with AI and persist Incidents locally
+once: ## 🚀 Run one AI assessment and persist Incidents locally
 
 run once: build
-	@test -n "$(OBSERVER_ID)" && test "$(ALLOW_MODEL)" = yes || { printf '❌ Set OBSERVER_ID and ALLOW_MODEL=yes\n' >&2; exit 2; }
+	@test -n "$(OBSERVER_ID)" || { printf '❌ Set OBSERVER_ID\n' >&2; exit 2; }
 	@./build/bin/kubescout --auth-mode kubeconfig \
 		$(if $(strip $(NAMESPACE_WATCH)),--namespace-watch "$(NAMESPACE_WATCH)",) \
 		$(if $(strip $(NAMESPACE_IGNORE)),--namespace-ignore "$(NAMESPACE_IGNORE)",) \
@@ -59,20 +57,17 @@ test: ## 🧪 Run tests without a cluster or model connection
 	$(GO) test -race -timeout 120s ./...
 
 integration: ## ☸ Live collector tests with owned fixtures (CONTEXT; no model calls)
-integration-model: ## 🤖 Live AI test, at most six model requests (CONTEXT, ALLOW_MODEL=yes)
+integration-model: ## 🤖 Live AI test, at most six model requests (CONTEXT)
 
 integration integration-model: build
 	@test -n "$(CONTEXT)" || { printf '❌ Set CONTEXT explicitly\n' >&2; exit 2; }
-	@if [ "$@" = integration-model ]; then test "$(ALLOW_MODEL)" = yes || { printf '❌ Set ALLOW_MODEL=yes to authorise up to six model requests\n' >&2; exit 2; }; fi
 	@KUBESCOUT_LIVE_CONTEXT="$(CONTEXT)" \
-		KUBESCOUT_LIVE_MODEL="$(ALLOW_MODEL)" $(GO) test -tags=integration -count=1 -v \
+		$(GO) test -tags=integration -count=1 -v \
 		-timeout 10m -run '$(if $(filter integration-model,$@),^TestLiveModel$$,^TestLive(Kubernetes|Connectivity)$$)' ./tests/cluster
 
-integration-deploy: build ## 🧪 Live in-cluster AI test (imported IMAGE, CRD, CONTEXT, ALLOW_MODEL=yes)
+integration-deploy: build ## 🧪 Live in-cluster AI test (imported IMAGE, CRD, CONTEXT)
 	@test -n "$(CONTEXT)" || { printf '❌ Set CONTEXT explicitly\n' >&2; exit 2; }
-	@test "$(ALLOW_MODEL)" = yes || { printf '❌ Set ALLOW_MODEL=yes to authorise up to six model requests\n' >&2; exit 2; }
 	@KUBESCOUT_LIVE_CONTEXT="$(CONTEXT)" \
-		KUBESCOUT_LIVE_MODEL="$(ALLOW_MODEL)" KUBESCOUT_LIVE_CONTAINER=yes \
 		KUBESCOUT_CONTAINER_ENGINE="$(CONTAINER_ENGINE)" KUBESCOUT_IMAGE="$(IMAGE)" \
 		$(GO) test -tags=integration -count=1 -v \
 		-timeout 10m -run '^TestLiveDeployment$$' ./tests/cluster
@@ -106,12 +101,10 @@ model-secret: ## 🔐 Ensure namespace and create model Secret from .env (curren
 	$(KUBECTL) apply -f deploy/namespace.yaml
 	$(KUBECTL) -n kubescout create secret generic kubescout-model --from-env-file=.env
 
-deploy: ## 🚀 Apply manifests and start ongoing AI (current context, Secret, ALLOW_MODEL=yes)
-	@test "$(ALLOW_MODEL)" = yes || { printf '❌ Set ALLOW_MODEL=yes to authorise ongoing AI investigations\n' >&2; exit 2; }
+deploy: ## 🚀 Apply manifests and start ongoing AI (current context, Secret)
 	@$(KUBECTL) -n kubescout get secret kubescout-model -o name || { \
 		printf '❌ Model Secret is unavailable in the current context. Check access or run: make model-secret\n' >&2; exit 1; }
 	$(KUBECTL) apply -k deploy
-	$(KUBECTL) -n kubescout scale deployment/kubescout --replicas=1
 
 undeploy: ## 🧹 Remove Deployment/RBAC; retain Incidents, Secret, namespace and CRDs (current context)
 	$(KUBECTL) delete -f deploy/deployment.yaml -f deploy/rbac.yaml

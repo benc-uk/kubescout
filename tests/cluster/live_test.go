@@ -4,7 +4,7 @@
 Purpose: Exercise live collector failures, recovery, freshness, load and object limits.
 Flow: Opt-in integration tests use an explicit context and owned workload fixtures
 with ownership-checked namespace cleanup; collector checks make no model calls.
-A separately authorized model test runs bounded collection and AI with a fixture
+A separately selected model test runs bounded collection and AI with a fixture
 incident repository; readable completion and stored fixtures, not stdout JSON,
 verify the result. It accepts no-action and never writes live Incidents.
 */
@@ -38,7 +38,7 @@ import (
 // TestLiveKubernetes exercises failure, recovery, timed rules and load using owned workloads
 // in an explicitly selected live cluster; it checks collector evidence, not AI incidents.
 func TestLiveKubernetes(t *testing.T) {
-	f := newFixture(t, false)
+	f := newFixture(t)
 
 	baseline, code := f.once(nil, nil)
 	if code != 0 || !baseline.CollectionComplete || baseline.Health != "healthy" {
@@ -163,7 +163,7 @@ func TestLiveKubernetes(t *testing.T) {
 // TestLiveConnectivity checks collector freshness and recovery through fixture-local API faults
 // in an explicitly selected live cluster without model calls or cluster-wide network changes.
 func TestLiveConnectivity(t *testing.T) {
-	f := newFixture(t, false)
+	f := newFixture(t)
 	reconnect(t, f)
 }
 
@@ -360,11 +360,10 @@ func reconnect(t *testing.T, f *fixture) {
 	observer.stop()
 }
 
-// TestLiveModel requires model authorization for bounded live collection and AI investigation.
+// TestLiveModel runs bounded live collection and AI investigation with required model configuration.
 // A test-only memory repository verifies accepted changes without writing live Incidents.
 func TestLiveModel(t *testing.T) {
-	requireLiveModel(t)
-	f := newFixture(t, true)
+	f := newFixture(t)
 	p := f.gatedPod("model-pending")
 
 	poll(t, 10*time.Second, "model fixture Pending state", func() (bool, error) {

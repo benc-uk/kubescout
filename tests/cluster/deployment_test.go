@@ -2,7 +2,7 @@
 
 /*
 Purpose: Validate bounded in-cluster AI execution and its authoritative stored Incidents.
-Flow: Integration tests require container and model authorization, explicit context,
+Flow: Explicitly selected integration tests require a context, model configuration,
 an image and a preinstalled CRD; they accept AI no-action as successful completion.
 Fixtures create a model Secret, workloads and RBAC in an owned namespace, with
 ownership-checked namespace cleanup followed by preconditioned deletion of test-owned
@@ -34,16 +34,11 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// TestLiveDeployment requires container and model authorization to run a bounded in-cluster agent.
+// TestLiveDeployment runs a bounded in-cluster agent with required model, image and context configuration.
 // It creates an owned model Secret, RBAC and workloads, then checks readable completion and stored
 // AI provenance; successful AI no-action is valid and fixture cleanup removes owned resources.
 func TestLiveDeployment(t *testing.T) {
-	if os.Getenv("KUBESCOUT_LIVE_CONTAINER") != "yes" {
-		t.Skip("requires explicit container validation approval")
-	}
-
-	requireLiveModel(t)
-	f := newFixtureStage(t, true, "ai-container")
+	f := newFixtureStage(t, "ai-container")
 
 	image := os.Getenv("KUBESCOUT_IMAGE")
 	if image == "" {

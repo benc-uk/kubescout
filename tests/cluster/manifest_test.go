@@ -1,7 +1,7 @@
 /*
 Purpose: Check agent deployment, RBAC and Incident schema contracts offline.
 Flow: Decode checked-in manifests and validate synthetic configuration and incidents
-to check inactive deployment defaults, workload/PV/attachment read permissions, cluster-scoped incident writes
+to check single-replica deployment defaults, workload/PV/attachment read permissions, cluster-scoped incident writes
 and lifecycle.state migration plus the bounded transcript mount without activating a cluster or contacting a model.
 Schema fixtures check native-only descriptions, section bounds and obsolete-format rejection.
 Shared decoding helpers also supply manifests to opt-in integration fixtures.
@@ -83,12 +83,12 @@ func deploymentManifest(t *testing.T) *appsv1.Deployment {
 	return d
 }
 
-// TestDeploymentContract checks offline agent manifests for explicit activation, hardened runtime,
+// TestDeploymentContract checks offline agent manifests for single-replica AI startup, hardened runtime,
 // namespace-filter defaults and required AI configuration references without reading credentials.
 func TestDeploymentContract(t *testing.T) {
 	d := deploymentManifest(t)
-	if d.Spec.Replicas == nil || *d.Spec.Replicas != 0 || d.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
-		t.Fatal("deployment must require explicit activation")
+	if d.Spec.Replicas == nil || *d.Spec.Replicas != 1 || d.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatal("deployment must start one replica with the Recreate strategy")
 	}
 
 	p := d.Spec.Template.Spec
@@ -133,7 +133,7 @@ func TestDeploymentContract(t *testing.T) {
 		t.Fatal("explicit runtime model Secret reference missing")
 	}
 
-	if c.ImagePullPolicy != corev1.PullNever || c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation || !slices.Contains(c.SecurityContext.Capabilities.Drop, corev1.Capability("ALL")) {
+	if c.ImagePullPolicy != corev1.PullAlways || c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation || !slices.Contains(c.SecurityContext.Capabilities.Drop, corev1.Capability("ALL")) {
 		t.Fatal("unsafe container")
 	}
 }

@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="596" viewBox="0 0 1120 596" role="img" aria-labelledby="title description">
+  <title id="title">How KubeScout works</title>
+  <desc id="description">Kubernetes resources and Warning events are collected into private evidence. AI investigates with scoped read-only tools. Go validates decisions against evidence and current observations. Only validated AI decisions change cluster-scoped Incident resources. No action is valid. A separate optional dashboard reads incidents and supports human triage.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef6f5"/>
+    </linearGradient>
+    <linearGradient id="ai" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123b43"/>
+      <stop offset="1" stop-color="#0f202f"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0f172a" flood-opacity=".06"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1 8 5 2 9" fill="none" stroke="#718b96" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+      .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: 1.8px; }
+      .heading { font-size: 23px; font-weight: 700; fill: #172b3a; }
+      .body { font-size: 17px; fill: #526575; }
+      .detail { font-size: 15px; fill: #637786; }
+      .icon { fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .connector { fill: none; stroke: #718b96; stroke-width: 1.8; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="1118" height="594" rx="24" fill="url(#background)" stroke="#e0e9ed"/>
+  <text x="36" y="49" class="eyebrow" fill="#147d79">HOW KUBESCOUT WORKS</text>
+  <text x="36" y="96" font-size="30" font-weight="700" fill="#142b3a">From cluster signals to clear decisions</text>
+  <rect x="810" y="29" width="274" height="30" rx="15" fill="#e1eeec"/>
+  <circle cx="828" cy="44" r="4" fill="#147d79"/>
+  <text x="841" y="48" font-size="12" font-weight="600" fill="#28625f" letter-spacing=".7">READ-ONLY WORKLOAD ACCESS</text>
+
+  <path class="connector" d="M272 251H295"/>
+  <path class="connector" d="M540 251H563"/>
+  <path class="connector" d="M808 251H831"/>
+
+  <rect x="36" y="145" width="244" height="212" rx="18" fill="#fff" stroke="#dce6eb" filter="url(#shadow)"/>
+  <rect x="56" y="165" width="40" height="40" rx="12" fill="#edf4fb"/>
+  <g class="icon" stroke="#437bac">
+    <rect x="65" y="174" width="8" height="8" rx="2"/>
+    <rect x="79" y="174" width="8" height="8" rx="2"/>
+    <rect x="65" y="188" width="8" height="8" rx="2"/>
+    <rect x="79" y="188" width="8" height="8" rx="2"/>
+  </g>
+  <text x="113" y="189" class="eyebrow" fill="#637786">01 / OBSERVE</text>
+  <text x="56" y="238" class="heading">Cluster evidence</text>
+  <text x="56" y="269" class="body">Kubernetes resources</text>
+  <text x="56" y="294" class="body">+ Warning events</text>
+  <path d="M56 310H260" stroke="#e7edf1"/>
+  <text x="56" y="336" class="detail">Collection + evidence checks</text>
+
+  <rect x="304" y="145" width="244" height="212" rx="18" fill="url(#ai)" stroke="#25525b" filter="url(#shadow)"/>
+  <rect x="324" y="165" width="40" height="40" rx="12" fill="#214e55"/>
+  <g class="icon" stroke="#7ce1cf">
+    <path d="m344 172 3.5 9.5 9.5 3.5-9.5 3.5-3.5 9.5-3.5-9.5-9.5-3.5 9.5-3.5Z"/>
+    <path d="M357 171v6m-3-3h6"/>
+  </g>
+  <text x="381" y="189" class="eyebrow" fill="#a2d9d3">02 / INVESTIGATE</text>
+  <text x="324" y="238" class="heading" style="fill:#fff">AI investigation</text>
+  <text x="324" y="269" class="body" style="fill:#c3d8df">Connect related signals</text>
+  <text x="324" y="294" class="body" style="fill:#c3d8df">Gather supporting evidence</text>
+  <path d="M324 310H528" stroke="#34535e"/>
+  <text x="324" y="336" class="detail" style="fill:#a2d9d3">Azure OpenAI + Agent Framework</text>
+
+  <rect x="572" y="145" width="244" height="212" rx="18" fill="#fff" stroke="#dce6eb" filter="url(#shadow)"/>
+  <rect x="592" y="165" width="40" height="40" rx="12" fill="#edf3f2"/>
+  <g class="icon" stroke="#27877b">
+    <path d="m612 173 12 5v8c0 7-5 11-12 14-7-3-12-7-12-14v-8Z"/>
+    <path d="m607 185 4 4 7-8"/>
+  </g>
+  <text x="649" y="189" class="eyebrow" fill="#637786">03 / VALIDATE</text>
+  <text x="592" y="238" class="heading">Validate decisions</text>
+  <text x="592" y="269" class="body">Check evidence + scope</text>
+  <text x="592" y="294" class="body">Reject stale conclusions</text>
+  <path d="M592 310H796" stroke="#e7edf1"/>
+  <text x="592" y="336" class="detail">Go checks; AI decides</text>
+
+  <rect x="840" y="145" width="244" height="212" rx="18" fill="#fff" stroke="#dce6eb" filter="url(#shadow)"/>
+  <rect x="860" y="165" width="40" height="40" rx="12" fill="#edf3f2"/>
+  <g class="icon" stroke="#27877b">
+    <path d="M871 173h12l7 7v18h-19Z"/>
+    <path d="M883 173v7h7m-14 7h9m-9 5h7"/>
+  </g>
+  <text x="917" y="189" class="eyebrow" fill="#637786">04 / RECORD</text>
+  <text x="860" y="238" class="heading">Incident resources</text>
+  <text x="860" y="269" class="body">Cluster-scoped Incident CRDs</text>
+  <text x="860" y="294" class="body">Diagnosis + next steps</text>
+  <path d="M860 310H1064" stroke="#e7edf1"/>
+  <text x="860" y="336" class="detail">Only AI-approved changes</text>
+
+  <path class="connector" d="M426 369V407" marker-start="url(#arrow)"/>
+  <path class="connector" d="M694 369V407" stroke-dasharray="4 5"/>
+  <path class="connector" d="M962 369V407"/>
+
+  <text x="36" y="449" font-size="20" font-weight="600" fill="#294454">Signals are evidence.</text>
+  <text x="36" y="478" font-size="20" font-weight="600" fill="#294454">AI decides what matters.</text>
+  <text x="36" y="511" class="detail">No automatic incident publishing.</text>
+
+  <rect x="304" y="419" width="244" height="112" rx="16" fill="#edf5f4" stroke="#ccdfdc"/>
+  <text x="324" y="450" font-size="18" font-weight="700" fill="#246a64">Scoped read-only tools</text>
+  <text x="324" y="479" class="body">Inspect approved resources</text>
+  <text x="324" y="505" class="detail">Bounded, redacted evidence</text>
+
+  <rect x="572" y="419" width="244" height="112" rx="16" fill="#f6f8fa" stroke="#dce6eb" stroke-dasharray="4 4"/>
+  <text x="592" y="450" font-size="18" font-weight="700" fill="#294454">No action is valid</text>
+  <text x="592" y="479" class="body">No incident change</text>
+  <text x="592" y="505" class="detail">Even for concerning signals</text>
+
+  <rect x="840" y="419" width="244" height="112" rx="16" fill="#fff" stroke="#dce6eb"/>
+  <text x="860" y="450" font-size="18" font-weight="700" fill="#294454">Optional dashboard</text>
+  <text x="860" y="479" class="body">Review + human triage</text>
+  <text x="860" y="505" class="detail">Separate service; no AI calls</text>
+
+  <text x="560" y="567" text-anchor="middle" font-size="15" fill="#526575">Watch continuously. Revisit incidents as conditions change. Resolve only after recovery and AI review.</text>
+</svg>

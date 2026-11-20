@@ -30,7 +30,7 @@ import (
 func TestExtraResourceSDKAndPersistence(t *testing.T) {
 	for _, noAction := range []bool{true, false} {
 		t.Run(fmt.Sprintf("no_action=%t", noAction), func(t *testing.T) {
-			policies, err := resourcepolicy.Load("../../examples/extra-resources.yaml")
+			policies, err := resourcepolicy.Load("../../examples/cert-manager.yaml")
 			if err != nil {
 				t.Fatal(err)
 			}

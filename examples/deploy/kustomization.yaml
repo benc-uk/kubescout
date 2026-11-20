@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kubescout
+resources:
+  - ../../deploy # Base deployment for kubescout
+  - cert-manager-rbac.yaml
+
+# The parent policy requires --load-restrictor=LoadRestrictionsNone when rendering.
+configMapGenerator:
+  - name: kubescout-extra-resources
+    files:
+      - extra-resources.yaml=../cert-manager.yaml
+
+patches:
+  # Patch the kubescout deployment with extra resources
+  - path: deployment-patch.yaml

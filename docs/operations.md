@@ -33,10 +33,9 @@ For `make model-secret`, use plain `KEY=value` lines without `export` or surroun
 quotes: kubectl reads literal file values, not the shell's environment overrides.
 Every `.env` entry becomes a Secret key, so include only intended runtime settings.
 
-`ALLOW_MODEL=yes` is a Make confirmation gate, not application configuration or
-a budget control. It is required for `run`, `once`, `deploy` and the model-calling
-live tests. Direct binary execution bypasses that gate and is itself a request
-to run AI; it still requires valid model configuration.
+Running or deploying the agent starts its AI investigation loop; model use is
+not optional and requires valid model configuration. No separate confirmation
+flag is needed. Request budgets still bound model use and potentially billable calls.
 
 ### Kubernetes access
 
@@ -150,7 +149,7 @@ default. No file means the existing built-in inventory only. Policy files are
 local operator configuration, not discovered cluster objects, model-authored
 instructions or dynamically executed scripts.
 
-Start with the [cert-manager example](../examples/extra-resources.yaml) and
+Start with the [cert-manager example](../examples/cert-manager.yaml) and
 [policy reference](resources-and-checks.md#configured-extra-resources).
 Before enabling it:
 
@@ -177,23 +176,23 @@ Before enabling it:
    materially changing wellness-policy semantics. Removed/out-of-scope stored
    Incidents are not resolved as recovered.
 
-For a deliberately authorized local assessment:
+For a local assessment:
 
 ```bash
-make once ALLOW_MODEL=yes OBSERVER_ID=local-with-certificates \
-  ARGS='--extra-resources=examples/extra-resources.yaml'
+make once OBSERVER_ID=local-with-certificates \
+  ARGS='--extra-resources=examples/cert-manager.yaml'
 ```
 
-`make run` uses the same `ARGS` in watch mode and authorizes ongoing AI calls.
+`make run` uses the same `ARGS` in watch mode and makes ongoing AI calls.
 Both persist accepted AI decisions; this configuration adds no simulation mode.
 
 For in-cluster operation, mount the policy file read-only (for example from an
-operator-managed ConfigMap volume) and add `--extra-resources=/etc/kubescout/extra-resources.yaml`
+operator-managed ConfigMap volume) and add `--extra-resources=/etc/kubescout/policies/extra-resources.yaml`
 to the Deployment arguments, or set `EXTRA_RESOURCES_FILE` explicitly there.
 The agent reads the mounted local file, not the ConfigMap API. Keep this mount
 separate from model credentials and diagnostic transcripts. The checked-in
-Deployment, RBAC and dashboard are unchanged and do not automatically enable the
-example. Policy changes require an agent restart; files are not hot-reloaded.
+base Deployment, RBAC and dashboard do not automatically enable the example.
+Policy changes require an agent restart; files are not hot-reloaded.
 
 Missing APIs/permissions or malformed required status fields mean incomplete
 collection, not an empty healthy inventory. Runtime CEL errors pause AI reviews
@@ -201,6 +200,78 @@ and reset recovery with explicit diagnostics while watch continues. Large
 projected evidence can still exceed the shared model input budget: reduce
 selected fields/rules or review the existing budgets rather than assuming truncation.
 An empty Incident list is not proof of cluster health or of policy execution.
+
+#### ConfigMap-backed Kubernetes example
+
+The opt-in [example Kustomization](../examples/deploy/kustomization.yaml) reuses the
+[agent manifests](../deploy/) and adds:
+
+- A generated ConfigMap containing [cert-manager.yaml](../examples/cert-manager.yaml)
+  under the mounted filename `extra-resources.yaml`.
+- A [Deployment patch](../examples/deploy/deployment-patch.yaml) that mounts the policy
+  read-only at `/etc/kubescout/policies` and selects it with `--extra-resources`.
+- [Certificate-only read RBAC](../examples/deploy/cert-manager-rbac.yaml), bound to the
+  existing agent ServiceAccount. No ConfigMap API access is granted or needed.
+
+It targets the existing `kubescout` Deployment, not a second agent, and inherits
+**one replica**. Applying it starts the agent with the configured policy. The base
+security settings, model Secret reference, transcript storage and built-in
+resource permissions remain inherited. The dashboard is not included.
+
+From the repository root, render the complete example locally without contacting
+the cluster or calling AI:
+
+```bash
+kubectl kustomize examples/deploy --load-restrictor=LoadRestrictionsNone
+```
+
+The loading flag lets the ConfigMap generator read `../cert-manager.yaml`, keeping
+one policy file shared by local runs and deployment. Use it only with trusted
+Kustomizations: it permits loading local files outside the Kustomization directory.
+It does not change Kubernetes permissions. `kubectl apply -k` does not expose
+this option, so apply the rendered output as shown below.
+
+Before applying it, select the intended kubeconfig context and ensure
+`cert-manager.io/v1` serves Certificates; this example does not install
+cert-manager. Review the inherited image/tag in
+[the base Kustomization](../deploy/kustomization.yaml) for your node architecture
+and registry access. Review the namespace filters and request budget, and replace
+the patch's illustrative `example-all-with-certificates` observer ID with a stable
+ID for your cluster and scope. The example inherits observation of all namespaces.
+Keep that ID across restarts; choose a new one when changing observation scope or
+material policy semantics.
+
+Provision the `kubescout-model` Secret separately if it does not already exist
+(for example, with `make model-secret` after preparing your local model settings).
+Never put credentials in the policy ConfigMap. The patch replaces the container
+argument list, so retain its authentication, budget and transcript arguments when
+customizing it.
+
+Apply the overlay to start the agent and its ongoing AI investigations:
+
+```bash
+kubectl kustomize examples/deploy --load-restrictor=LoadRestrictionsNone \
+  | kubectl apply -f -
+kubectl -n kubescout rollout status deployment/kubescout
+```
+
+Use this workflow instead of `make deploy`: that target applies `deploy/`, not
+the example overlay, and would remove the example's Deployment configuration.
+
+To update policies, edit `examples/cert-manager.yaml` and reapply the overlay.
+Kustomize's content-hashed ConfigMap name updates
+the Pod template's volume reference when the policy changes; the new process
+loads and compiles the new rules at startup. Editing a mounted ConfigMap directly
+does not hot-reload the running agent.
+
+To stop the agent while retaining Incidents and configuration:
+
+```bash
+kubectl -n kubescout scale deployment/kubescout --replicas=0
+```
+
+Do not delete the rendered bundle to stop it: it includes the runtime namespace
+and Incident CRD, which must be retained.
 
 Incidents are cluster-scoped and have no `metadata.namespace`. The agent's
 `--incident-namespace` and dashboard's `--namespace` options have been removed.
@@ -215,7 +286,7 @@ After building and configuring the model as in the [README](../README.md#run-loc
 ```bash
 kubectl config current-context
 make incidents-setup
-make run NAMESPACE_WATCH=apps,backend OBSERVER_ID=local-apps-backend ALLOW_MODEL=yes
+make run NAMESPACE_WATCH=apps,backend OBSERVER_ID=local-apps-backend
 ```
 
 Stop with Ctrl+C. Use `make once` with the same scope/identity for one bounded
@@ -226,7 +297,7 @@ Extra runtime flags go in `ARGS`; never put credentials there:
 
 ```bash
 make once NAMESPACE_WATCH=apps,backend OBSERVER_ID=local-apps-backend \
-  ALLOW_MODEL=yes ARGS='--model-calls-per-hour=6 --log-level=debug'
+  ARGS='--model-calls-per-hour=6 --log-level=debug'
 ```
 
 Make's default observer is `local-dev-<username>`; prefer an explicit
@@ -274,13 +345,13 @@ Review [the Deployment](../deploy/deployment.yaml) and [RBAC](../deploy/rbac.yam
   keys from the Secret's `envFrom`.
 - Cluster-scoped Incidents; workload reads and incident writes have separate RBAC.
 - Model budget **300 requests/hour** in the manifest, versus the binary's default 60.
-- One active replica, with a Recreate strategy; the checked-in replica count is zero.
+- One replica with a Recreate strategy; applying the Deployment starts the agent.
 
 With model settings in `.env`, run:
 
 ```bash
 make model-secret
-make deploy ALLOW_MODEL=yes
+make deploy
 kubectl -n kubescout rollout status deployment/kubescout
 kubectl get incidents
 kubectl -n kubescout logs deployment/kubescout -c agent
@@ -292,8 +363,8 @@ Secret-create permissions, fails if the Secret exists, and does not start AI.
 Rotate credentials deliberately using standard Kubernetes tooling.
 
 `make deploy` checks that the Secret is accessible without printing its contents,
-applies the agent bundle and scales to one replica. This starts ongoing model
-calls. Applying the bundle alone leaves the agent at zero replicas.
+then applies the agent bundle. The Deployment already specifies one replica, so
+applying the bundle starts ongoing model calls without a separate scaling step.
 
 The images use pinned bases and non-root users. Deployments use read-only root
 filesystems, dropped capabilities and RuntimeDefault seccomp. The agent's only

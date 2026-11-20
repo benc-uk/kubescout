@@ -53,8 +53,8 @@ guide aligned; do not hide findings with blanket exclusions.
 ## Working on the agent
 
 Build `build/bin/kubescout` with `make build`. For actual execution, follow
-[local operation](operations.md#local-operation): model calls and cluster writes
-require explicit authorization, even when running from a developer machine.
+[local operation](operations.md#local-operation): running the agent uses AI and
+persists accepted Incidents, including when running from a developer machine.
 
 The AI instructions are embedded from
 [instructions.txt](../internal/analysis/instructions.txt); rebuild the binary/image
@@ -139,13 +139,13 @@ Image rebuild/import does not restart a running Pod.
 These tests contact a real cluster and create/delete owned resources. Choose the
 context explicitly and use a development cluster where the required operations
 are authorized. Collector tests do not call AI; model/container tests require
-model settings and explicit authorization for **at most six model HTTP requests**,
-including tool rounds.
+model settings and make **at most six model HTTP requests**, including tool rounds.
+Invoking those test targets selects model use without a separate confirmation flag.
 
 ```bash
 make integration CONTEXT=kind-kind
-make integration-model CONTEXT=kind-kind ALLOW_MODEL=yes
-make integration-deploy CONTEXT=kind-kind ALLOW_MODEL=yes
+make integration-model CONTEXT=kind-kind
+make integration-deploy CONTEXT=kind-kind
 ```
 
 - `integration` exercises collector/evidence APIs directly. Its RSS measurements
@@ -277,13 +277,13 @@ it never starts the agent. Detailed operational procedures live in the
 | `build` | Build `build/bin/kubescout`; do not run it |
 | `test` | Offline race tests; requires C compiler and CGO |
 | `check` | Check formatting, modules and lint; no live tests |
-| `run` | Rebuild/watch using kubeconfig; needs model configuration, CRD, permissions, scope/identity and `ALLOW_MODEL=yes`; persists Incidents |
+| `run` | Rebuild/watch using kubeconfig; needs model configuration, CRD, permissions and scope/identity; persists Incidents |
 | `once` | Same as `run`, for one bounded assessment |
 | `incidents-setup` | Install namespace/CRD and wait for establishment; no RBAC, Secret, agent or model calls |
 | `model-secret` | Ensure namespace and create Secret from `.env`; does not overwrite an existing Secret |
 | `image` | Build the agent `IMAGE`; does not import/deploy |
 | `kind-load` | Save/import existing `IMAGE` into `KIND_CLUSTER`; does not deploy |
-| `deploy` | Check Secret, apply manifests and scale agent to one; requires image availability and `ALLOW_MODEL=yes` |
+| `deploy` | Check Secret and apply the single-replica agent manifests; requires image availability and starts AI |
 | `undeploy` | Remove agent Deployment/RBAC; retain incidents, Secret, namespace and CRD |
 | `dash-build` | Build `build/bin/kubescout-dashboard` with embedded assets |
 | `dash-run` | Build/serve local dashboard using current context and cluster-scoped Incidents; no model calls, but human triage writes status |
@@ -293,8 +293,8 @@ it never starts the agent. Detailed operational procedures live in the
 | `dash-forward` | Forward localhost:8000 to dashboard Service in `kubescout` |
 | `dash-undeploy` | Remove dashboard Deployment/Service/RBAC; retain agent and shared resources |
 | `integration` | Live collector/connectivity tests with owned fixtures; requires `CONTEXT` |
-| `integration-model` | Live AI test; `CONTEXT`, model configuration and `ALLOW_MODEL=yes`; at most six requests |
-| `integration-deploy` | Live AI container test; same opt-ins plus imported `IMAGE` and installed CRD |
+| `integration-model` | Live AI test; requires `CONTEXT` and model configuration; at most six requests |
+| `integration-deploy` | Live AI container test; same requirements plus imported `IMAGE` and installed CRD |
 
 ### Variables
 
@@ -309,7 +309,6 @@ for local runs; `model-secret` passes it directly to kubectl.
 | `NAMESPACE_WATCH` | Empty | `run`/`once` allow-list; also an agent environment variable |
 | `NAMESPACE_IGNORE` | Empty | `run`/`once` deny-list; mutually exclusive with watch; also an agent environment variable |
 | `OBSERVER_ID` | `local-dev-<username>` | `run`/`once`; choose stable cluster/scope-specific identity |
-| `ALLOW_MODEL` | Empty | Must be `yes` for model-calling Make targets; not a runtime setting |
 | `ARGS` | Empty | Extra `run`/`once` flags, not credentials or deployment configuration |
 | `CONTAINER_ENGINE` | `podman` | Image build/save executable |
 | `IMAGE` | `localhost/kubescout:dev` | Agent build/import/container-test image; not manifest substitution |
@@ -321,7 +320,8 @@ for local runs; `model-secret` passes it directly to kubectl.
 | `KIND_PROVIDER` | `podman` | kind provider; must match cluster creation provider |
 | `KUBECTL` | `kubectl` | Kubernetes setup/deploy/forward/cleanup executable |
 
-For live model tests, Make forwards `ALLOW_MODEL` as `KUBESCOUT_LIVE_MODEL` for
-the harness's additional opt-in. Runtime budgets are independent of this gate.
+Live tests are excluded from routine tests by the `integration` build tag.
+Make selects the requested collector, model or container test and forwards
+`CONTEXT` as `KUBESCOUT_LIVE_CONTEXT`; model tests keep their request budgets.
 Local/deployment/dashboard operations use the current kubeconfig context;
 integration tests require `CONTEXT` explicitly.

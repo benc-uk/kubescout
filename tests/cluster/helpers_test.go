@@ -6,7 +6,7 @@ Flow: Integration callers select an explicit context and create a test namespace
 cleanup checks its UID and ownership label before UID-preconditioned deletion.
 Container fixtures also clean up their cluster-scoped Incidents after namespace removal.
 Collector helpers expose private deterministic evidence, not published incidents;
-model fixtures additionally require explicit model-request authorization.
+explicitly selected model fixtures make bounded AI calls without a separate confirmation flag.
 */
 package cluster
 
@@ -75,20 +75,16 @@ const (
 )
 
 // newFixture creates an owned collector-stage namespace in the explicitly selected live context.
-func newFixture(t *testing.T, model bool) *fixture { return newFixtureStage(t, model, "collector") }
+func newFixture(t *testing.T) *fixture { return newFixtureStage(t, "collector") }
 
-// newFixtureStage requires an explicit live context and model opt-in when requested, then creates
+// newFixtureStage requires an explicit live context, then creates
 // a stage-labelled namespace and registers ownership-checked cleanup.
-func newFixtureStage(t *testing.T, model bool, stage string) *fixture {
+func newFixtureStage(t *testing.T, stage string) *fixture {
 	t.Helper()
 
 	target := os.Getenv("KUBESCOUT_LIVE_CONTEXT")
 	if target == "" {
 		t.Fatal("KUBESCOUT_LIVE_CONTEXT must explicitly select a context")
-	}
-
-	if model && os.Getenv("KUBESCOUT_LIVE_MODEL") != "yes" {
-		t.Skip("requires explicit model request authorisation")
 	}
 
 	rc, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{CurrentContext: target}).ClientConfig()
@@ -380,13 +376,4 @@ func metric(t *testing.T, name string, since time.Time, r observation, limit tim
 	}
 
 	t.Logf("collector evidence %s=%s", name, elapsed)
-}
-
-// requireLiveModel skips unless the caller explicitly authorizes up to six real model HTTP requests.
-func requireLiveModel(t *testing.T) {
-	t.Helper()
-
-	if os.Getenv("KUBESCOUT_LIVE_MODEL") != "yes" {
-		t.Skip("requires explicit authorisation for up to six real model requests")
-	}
 }

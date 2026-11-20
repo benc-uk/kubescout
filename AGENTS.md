@@ -233,15 +233,17 @@ Do not create or recreate tests for [scripts/inject-failures.sh](scripts/inject-
 including its menu, fixture creation or cleanup.
 
 Live tests are opt-in under the `integration` build tag. Select contexts and
-namespaces explicitly. Full model/container tests require model authorisation
-and account for every HTTP attempt, including tool rounds. Collector-only tests
+namespaces explicitly. Invoking a model/container test selects real model calls
+without a separate confirmation flag; model configuration remains required.
+Account for every HTTP attempt, including tool rounds. Collector-only tests
 exercise APIs directly and do not claim AI connectivity.
 
 Do not run live model calls or mutate the cluster without explicit permission.
-The checked-in Deployment is inactive until model configuration and operation
-are explicitly authorised. Never silently enable ongoing billable calls during
-migration. Model Secrets are provisioned separately with standard Kubernetes
-tooling, not a dedicated application command; never commit their values.
+Running or deploying the agent means running its required AI loop; the checked-in
+Deployment starts one replica when applied. Do not execute run/deploy or live-test
+commands merely to validate code changes. Model Secrets are provisioned separately
+with standard Kubernetes tooling, not a dedicated application command; never
+commit their values.
 `make model-secret` applies the runtime namespace manifest, then creates the
 Secret from `.env`; it does not overwrite an existing Secret or start the agent.
 The Deployment's explicit namespace-filter environment entries override

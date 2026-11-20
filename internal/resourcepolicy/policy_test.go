@@ -20,7 +20,7 @@ import (
 func certificatePolicy(t *testing.T) Resource {
 	t.Helper()
 
-	resources, err := Load("../../examples/extra-resources.yaml")
+	resources, err := Load("../../examples/cert-manager.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestCertificateRules(t *testing.T) {
 
 // TestStrictPolicyValidation rejects unsafe API/field selection, malformed metadata and nonboolean or unbounded expressions.
 func TestStrictPolicyValidation(t *testing.T) {
-	data, err := os.ReadFile("../../examples/extra-resources.yaml")
+	data, err := os.ReadFile("../../examples/cert-manager.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

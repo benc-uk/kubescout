@@ -4,6 +4,7 @@ Flow: Offline HTTP fixtures, injected clients, command stubs and dry runs verify
 readable execution summaries, colour controls, workload/PV/attachment scope, cluster-scoped incidents, current-context
 selection, deployment preflights and lint command failures without live services.
 Incident setup installs only the namespace and CRD, without deploying or calling AI.
+Isolated command stubs verify agent and live-test targets need configuration, not confirmation flags.
 */
 package main
 
@@ -263,7 +264,7 @@ func TestDeployExplainsMissingSecretWithoutApplying(t *testing.T) {
 
 	for _, context := range []string{"selected", ""} {
 		t.Run("context="+context, func(t *testing.T) {
-			cmd := exec.CommandContext(t.Context(), "make", "-s", "deploy", "ALLOW_MODEL=yes", "CONTEXT="+context, "KUBECTL="+stub)
+			cmd := exec.CommandContext(t.Context(), "make", "-s", "deploy", "CONTEXT="+context, "KUBECTL="+stub)
 			cmd.Dir = root
 			output, err := cmd.CombinedOutput()
 			guidance := "make model-secret"
@@ -297,20 +298,15 @@ func TestMakeLocalKubernetesUsesCurrentContext(t *testing.T) {
 		calls  []string
 	}{
 		{"incidents-setup", []string{"apply -f deploy/namespace.yaml", "apply -f deploy/incidents-crd.yaml", "wait --for=condition=Established --timeout=60s crd/incidents.kubescout.benc-uk.github.com"}},
-		{"deploy", []string{"-n kubescout get secret kubescout-model -o name", "apply -k deploy", "-n kubescout scale deployment/kubescout --replicas=1"}},
+		{"deploy", []string{"-n kubescout get secret kubescout-model -o name", "apply -k deploy"}},
 		{"undeploy", []string{"delete -f deploy/deployment.yaml -f deploy/rbac.yaml"}},
 		{"dash-deploy", []string{"apply -k deploy/dashboard"}},
 		{"dash-forward", []string{"-n kubescout port-forward --address=127.0.0.1 service/kubescout-dashboard 8000:8000"}},
 		{"dash-undeploy", []string{"delete -f deploy/dashboard/deployment.yaml -f deploy/dashboard/service.yaml -f deploy/dashboard/rbac.yaml"}},
 	} {
-		allowModel := "yes"
-		if test.target == "incidents-setup" {
-			allowModel = ""
-		}
-
 		for _, context := range []string{"", "selected"} {
 			t.Run(test.target+"/context="+context, func(t *testing.T) {
-				cmd := exec.CommandContext(t.Context(), "make", "-s", test.target, "ALLOW_MODEL="+allowModel, "CONTEXT="+context, "DASHBOARD_CONTEXT="+context, "KUBECTL="+stub, "GO=must-not-run")
+				cmd := exec.CommandContext(t.Context(), "make", "-s", test.target, "CONTEXT="+context, "DASHBOARD_CONTEXT="+context, "KUBECTL="+stub, "GO=must-not-run")
 				cmd.Dir = root
 
 				output, err := cmd.CombinedOutput()
@@ -319,6 +315,67 @@ func TestMakeLocalKubernetesUsesCurrentContext(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestMakeAICommandsNeedNoConfirmation executes isolated agent and live-test stubs without confirmation flags.
+// Required observer/context validation remains intact, and no real binary, cluster or model is used.
+func TestMakeAICommandsNeedNoConfirmation(t *testing.T) {
+	makefile, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "build", "bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	for path, content := range map[string][]byte{
+		"Makefile": makefile,
+		"go-stub":  []byte("#!/bin/sh\nprintf 'context=%s args=%s\\n' \"$KUBESCOUT_LIVE_CONTEXT\" \"$*\"\n"),
+		filepath.Join("build", "bin", "kubescout"): []byte("#!/bin/sh\nprintf 'agent: %s\\n' \"$*\"\n"),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, path), content, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tt := range []struct {
+		name, target, observer, context, want string
+		fail                                  bool
+	}{
+		{name: "watch", target: "run", observer: "fixture", want: "agent: --auth-mode kubeconfig --observer-id fixture"},
+		{name: "once", target: "once", observer: "fixture", want: "agent: --auth-mode kubeconfig --observer-id fixture --once"},
+		{name: "collector", target: "integration", context: "fixture", want: "-run ^TestLive(Kubernetes|Connectivity)$ ./tests/cluster"},
+		{name: "model", target: "integration-model", context: "fixture", want: "-run ^TestLiveModel$ ./tests/cluster"},
+		{name: "container", target: "integration-deploy", context: "fixture", want: "-run ^TestLiveDeployment$ ./tests/cluster"},
+		{name: "watch requires observer", target: "run", want: "Set OBSERVER_ID", fail: true},
+		{name: "once requires observer", target: "once", want: "Set OBSERVER_ID", fail: true},
+		{name: "collector requires context", target: "integration", want: "Set CONTEXT explicitly", fail: true},
+		{name: "model requires context", target: "integration-model", want: "Set CONTEXT explicitly", fail: true},
+		{name: "container requires context", target: "integration-deploy", want: "Set CONTEXT explicitly", fail: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), "make", "-s", tt.target, "GO="+filepath.Join(dir, "go-stub"),
+				"OBSERVER_ID="+tt.observer, "CONTEXT="+tt.context)
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+			output, err := cmd.CombinedOutput()
+			text := string(output)
+
+			if (err != nil) != tt.fail || !strings.Contains(text, tt.want) {
+				t.Fatalf("unexpected Make execution: err=%v output=%s", err, text)
+			}
+
+			if tt.fail && (strings.Contains(text, "agent:") || strings.Contains(text, "args=test")) {
+				t.Fatalf("invalid configuration reached execution: %s", text)
+			}
+
+			if tt.context != "" && !strings.Contains(text, "context="+tt.context+" args=test") {
+				t.Fatalf("live-test context was not forwarded: %s", text)
+			}
+		})
 	}
 }
 
@@ -337,7 +394,7 @@ func TestMakeNamespaceScopeDefaultsAndIgnore(t *testing.T) {
 		{name: "ignore", ignore: "system,monitoring"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := exec.CommandContext(t.Context(), "make", "--no-print-directory", "-n", "once", "ALLOW_MODEL=yes",
+			cmd := exec.CommandContext(t.Context(), "make", "--no-print-directory", "-n", "once",
 				"NAMESPACE_WATCH=", "NAMESPACE_IGNORE="+tt.ignore, "ARGS=")
 			cmd.Dir = root
 
@@ -369,7 +426,7 @@ func TestMakeLocalRunUsesCurrentContext(t *testing.T) {
 	for _, target := range []string{"run", "once", "dash-run"} {
 		for _, context := range []string{"", "selected"} {
 			t.Run(target+"/context="+context, func(t *testing.T) {
-				args := []string{"--no-print-directory", "-n", target, "ALLOW_MODEL=yes", "GO=go", "NAMESPACE_WATCH=apps,other", "NAMESPACE_IGNORE=", "DASHBOARD_NAMESPACE=unused"}
+				args := []string{"--no-print-directory", "-n", target, "GO=go", "NAMESPACE_WATCH=apps,other", "NAMESPACE_IGNORE=", "DASHBOARD_NAMESPACE=unused"}
 				if context != "" {
 					args = append(args, "CONTEXT="+context, "DASHBOARD_CONTEXT="+context)
 				}

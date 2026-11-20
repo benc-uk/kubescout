@@ -35,7 +35,7 @@ func certificate(namespace, ready, version string) map[string]any {
 
 // TestExtraResourceCollection verifies actual endpoints, filtering before projection/admission and explicit collection failures.
 func TestExtraResourceCollection(t *testing.T) {
-	definitions, err := resourcepolicy.Load("../../examples/extra-resources.yaml")
+	definitions, err := resourcepolicy.Load("../../examples/cert-manager.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestExtraResourceWatchChanges(t *testing.T) {
 
 	var err error
 
-	c.Policy.ExtraResources, err = resourcepolicy.Load("../../examples/extra-resources.yaml")
+	c.Policy.ExtraResources, err = resourcepolicy.Load("../../examples/cert-manager.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -21,7 +21,7 @@ func TestExtraResourceContexts(t *testing.T) {
 
 	var err error
 
-	policy.ExtraResources, err = resourcepolicy.Load("../../examples/extra-resources.yaml")
+	policy.ExtraResources, err = resourcepolicy.Load("../../examples/cert-manager.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
