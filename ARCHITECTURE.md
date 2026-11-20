@@ -564,7 +564,7 @@ for flags, privacy, retention, ephemeral storage and retrieval.
 |---|---|
 | [cmd/kubescout](cmd/kubescout/) | Agent CLI, explicit auth/configuration, process lifecycle and exit codes |
 | [cmd/kubescout-dashboard](cmd/kubescout-dashboard/) | Standalone dashboard CLI, authentication and HTTP lifecycle |
-| [internal/config](internal/config/) | Validated options, limits, namespace selection and root dotenv loading |
+| [internal/config](internal/config/) | Validated options, limits, namespace selection and current-working-directory dotenv loading |
 | [internal/kube](internal/kube/) | Scoped collection, approved projection, ownership and freshness |
 | [internal/health](internal/health/) | Pure evidence rules, not incident publication |
 | [internal/investigation](internal/investigation/) | Typed scoped read-only tools, native describe, shared budgets and credential protection |

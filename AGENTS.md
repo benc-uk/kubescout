@@ -29,7 +29,7 @@ Earlier deterministic report policies are not the current contract.
 - [cmd/kubescout-dashboard](cmd/kubescout-dashboard): standalone dashboard CLI, explicit Kubernetes
   authentication and HTTP lifecycle; no AI or incident-spec writes.
 - [internal/config](internal/config): validated options, scheduling/budget limits,
-  namespace watch/ignore selection and repository-root `.env` loading;
+  namespace watch/ignore selection and current-working-directory `.env` loading;
   existing environment wins.
 - [internal/kube](internal/kube): scoped lists/watches, approved projection,
   owner relationships, shared admission limits and collection freshness.

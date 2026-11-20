@@ -23,10 +23,10 @@ Use a deployment supporting the Responses API and function tools. The endpoint
 cannot contain credentials, query parameters or a fragment. Missing or invalid
 model settings fail explicitly; there is no non-AI runtime mode.
 
-For local runs, the agent loads this repository's root `.env`; existing
-environment variables win, including explicitly empty values. It does not load
-arbitrary parent-directory dotenv files. The dashboard does not load `.env` or
-need model credentials.
+The agent loads `.env` from its current working directory; existing environment
+variables win, including explicitly empty values. It does not search parent
+directories or the executable's directory. The dashboard does not load `.env`
+or need model credentials.
 
 Keep credentials out of command arguments, images, committed manifests and logs.
 For `make model-secret`, use plain `KEY=value` lines without `export` or surrounding

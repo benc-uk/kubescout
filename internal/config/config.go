@@ -1,7 +1,7 @@
 /*
 Purpose: Define and validate runtime options, namespace selection and model settings.
 Flow: Combine CLI flags and environment values into collection, evidence-policy,
-logging/console colour and AI limits; repository-root dotenv loading preserves existing values.
+logging/console colour and AI limits; current-directory dotenv loading preserves existing values.
 Configuration requires AI settings; cluster-scoped Incidents have no storage namespace option.
 Explicit read-only assessments keep AI enabled and emit diagnostic proposals without Incident storage.
 Proposal capture defaults on in both modes; read-only assessment requires this primary output.
@@ -327,39 +327,21 @@ func (c *Config) LoadModel(getenv func(string) string) error {
 	return nil
 }
 
-// LoadDotEnv loads only this module's repository-root .env, preserving existing environment values.
-// It searches upward from cwd and the executable directory, never loading arbitrary parent .env files.
-func LoadDotEnv(cwd, executable string) error {
-	for _, start := range []string{cwd, filepath.Dir(executable)} {
-		for dir := start; ; dir = filepath.Dir(dir) {
-			data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return errors.New("cannot inspect repository module")
-			}
+// LoadDotEnv reads .env from cwd, preserving values already present in the process environment.
+func LoadDotEnv(cwd string) error {
+	values, err := godotenv.Read(filepath.Join(cwd, ".env"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 
-			if strings.HasPrefix(string(data), "module github.com/benc-uk/kubescout\n") {
-				values, err := godotenv.Read(filepath.Join(dir, ".env"))
-				if errors.Is(err, os.ErrNotExist) {
-					return nil
-				}
+	if err != nil {
+		return errors.New("cannot parse working-directory .env")
+	}
 
-				if err != nil {
-					return errors.New("cannot parse repository .env")
-				}
-
-				for key, value := range values {
-					if _, exists := os.LookupEnv(key); !exists {
-						if err := os.Setenv(key, value); err != nil {
-							return fmt.Errorf("cannot load environment variable %q", key)
-						}
-					}
-				}
-
-				return nil
-			}
-
-			if filepath.Dir(dir) == dir {
-				break
+	for key, value := range values {
+		if _, exists := os.LookupEnv(key); !exists {
+			if err := os.Setenv(key, value); err != nil {
+				return fmt.Errorf("cannot load environment variable %q", key)
 			}
 		}
 	}

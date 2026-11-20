@@ -58,7 +58,7 @@ func TestLiveDeployment(t *testing.T) {
 	f.incidents = store
 	f.installRBAC()
 
-	if err := config.LoadDotEnv(filepath.Join("..", ".."), f.binary); err != nil {
+	if err := config.LoadDotEnv(filepath.Join("..", "..")); err != nil {
 		t.Fatal("invalid model configuration")
 	}
 

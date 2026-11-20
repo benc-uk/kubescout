@@ -82,8 +82,8 @@ cd kubescout
 make build
 ```
 
-Create a repository-root `.env` with the following settings, or supply them as
-environment variables. Existing environment values take precedence.
+Create a `.env` in the current working directory with the following settings,
+or supply them as environment variables. Existing environment values take precedence.
 
 ```dotenv
 AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com/openai/v1/

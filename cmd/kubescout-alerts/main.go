@@ -83,12 +83,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, logger *log.Logge
 		return errors.New("cannot determine working directory")
 	}
 
-	executable, err := os.Executable()
-	if err != nil {
-		return errors.New("cannot determine executable location")
-	}
-
-	if err := config.LoadDotEnv(cwd, executable); err != nil {
+	if err := config.LoadDotEnv(cwd); err != nil {
 		return err
 	}
 

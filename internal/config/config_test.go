@@ -1,5 +1,5 @@
 /*
-Purpose: Exercise configuration validation and repository-root dotenv precedence.
+Purpose: Exercise configuration validation and working-directory dotenv precedence.
 Flow: Offline argument tables, synthetic environment values and filesystem fixtures
 check namespace filters, authentication, logging/colour controls, configurable tool budgets, endpoint and model requirements.
 Removed runtime modes and incident-storage namespace options are rejected without contacting Kubernetes or a model.
@@ -262,9 +262,8 @@ func TestModelEndpoint(t *testing.T) {
 	})
 }
 
-// TestDotEnvOnlyRepositoryRoot uses synthetic filesystem fixtures to check root-only dotenv loading,
-// existing-environment precedence and errors for malformed files.
-func TestDotEnvOnlyRepositoryRoot(t *testing.T) {
+// TestDotEnvUsesWorkingDirectory checks current-directory loading, environment precedence and parse errors.
+func TestDotEnvUsesWorkingDirectory(t *testing.T) {
 	root := t.TempDir()
 	write := func(path, data string) {
 		t.Helper()
@@ -273,18 +272,17 @@ func TestDotEnvOnlyRepositoryRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(filepath.Join(root, "go.mod"), "module github.com/benc-uk/kubescout\n")
-	write(filepath.Join(root, ".env"), "KUBESCOUT_TEST_VALUE=file\n")
+	write(filepath.Join(root, ".env"), "KUBESCOUT_TEST_VALUE=executable-directory\n")
 
 	sub := filepath.Join(root, "sub")
 	if err := os.Mkdir(sub, 0700); err != nil {
 		t.Fatal(err)
 	}
 
-	write(filepath.Join(sub, ".env"), "KUBESCOUT_TEST_VALUE=wrong\n")
+	write(filepath.Join(sub, ".env"), "KUBESCOUT_TEST_VALUE=working-directory\n")
 	t.Setenv("KUBESCOUT_TEST_VALUE", "environment")
 
-	if err := LoadDotEnv(sub, filepath.Join(root, "bin", "health")); err != nil {
+	if err := LoadDotEnv(sub); err != nil {
 		t.Fatal(err)
 	}
 
@@ -296,17 +294,17 @@ func TestDotEnvOnlyRepositoryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := LoadDotEnv(sub, filepath.Join(root, "bin", "health")); err != nil {
+	if err := LoadDotEnv(sub); err != nil {
 		t.Fatal(err)
 	}
 
-	if os.Getenv("KUBESCOUT_TEST_VALUE") != "file" {
-		t.Fatal("did not load root .env")
+	if os.Getenv("KUBESCOUT_TEST_VALUE") != "working-directory" {
+		t.Fatal("did not load working-directory .env")
 	}
 
-	write(filepath.Join(root, ".env"), "malformed='")
+	write(filepath.Join(sub, ".env"), "malformed='")
 
-	if err := LoadDotEnv(root, root); err == nil {
+	if err := LoadDotEnv(sub); err == nil {
 		t.Fatal("invalid dotenv silently ignored")
 	}
 }

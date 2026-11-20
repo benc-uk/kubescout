@@ -60,13 +60,7 @@ func runWithClient(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 2
 	}
 
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintln(stderr, "ERROR [GO][BOOT] cannot determine executable location")
-		return 2
-	}
-
-	if err := config.LoadDotEnv(cwd, exe); err != nil {
+	if err := config.LoadDotEnv(cwd); err != nil {
 		fmt.Fprintln(stderr, "ERROR [GO][CONFIG]", err)
 		return 2
 	}
@@ -182,7 +176,7 @@ func logStartup(c config.Config, sink *output.Writer) {
 	}
 
 	_ = sink.Log("info", "GO", "BOOT", fmt.Sprintf("KubeScout starting: mode=%s observer=%s", mode, c.ObserverID))
-	_ = sink.Log("info", "GO", "CONFIG", "Configuration validated: CLI flags and environment; repository-root .env loading preserves existing environment values")
+	_ = sink.Log("info", "GO", "CONFIG", "Configuration validated: CLI flags and environment; working-directory .env loading preserves existing environment values")
 
 	context, kubeconfig := c.Context, c.Kubeconfig
 	if context == "" {

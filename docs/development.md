@@ -261,7 +261,7 @@ guarantee. Stop with Ctrl+C. Kubeconfig credentials need cluster-scoped
 Incident `list` and `watch` permissions.
 
 An existing `ALERT_ENDPOINT_URL` environment value takes precedence. The watcher
-uses the agent's repository-root dotenv loader without requiring model settings.
+uses the agent's current-working-directory dotenv loader without requiring model settings.
 Endpoints and response bodies are not printed.
 
 ## Make reference
